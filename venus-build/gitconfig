@@ -1,0 +1,10 @@
+# Mounted as ~/.gitconfig in the build container: several Venus recipes and submodules
+# (venus-platform, dbus-spy -> veutil) use ssh URLs, but the repositories are public over https.
+[url "https://github.com/"]
+	insteadOf = git@github.com:
+	insteadOf = ssh://git@github.com/
+[filter "lfs"]
+	clean = git-lfs clean -- %f
+	smudge = git-lfs smudge -- %f
+	process = git-lfs filter-process
+	required = true

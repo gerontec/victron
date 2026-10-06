@@ -1,0 +1,10 @@
+
+# Append to venus/build/conf/local.conf.
+# Victron's own image pulls its applications through packagegroup-ve-addons and CORE_IMAGE_EXTRA_INSTALL,
+# both defined in the private layer meta-victronenergy-private. This is the public part of that list
+# (compared against the opkg status of the official v3.80 large image).
+CORE_IMAGE_EXTRA_INSTALL += "dbus-digitalinputs dbus-modbus-client dbus-modem dbus-switch dbus-imt-si-rs485tc dbus-bornay-windplus gui-v2-webassembly venus-platform flashmq dbus-flashmq dbus-spy venus-dbus-tools"
+# venus-access left out: needs the closed ssh-tunnel (Victron support remote access)
+# packagegroup-ve-dbus-data-producers left out: bitbake insists on a provider for the closed vecan-dbus
+# mk2vsc is closed source; it is installed from the official feed afterwards
+RDEPENDS:venus-platform:remove = "mk2vsc"

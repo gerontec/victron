@@ -9,6 +9,8 @@ The host stays a normal Debian system (apt, systemd, own services); Venus OS lar
 | Path | Purpose |
 |---|---|
 | `venus-build/Dockerfile` | Ubuntu 24.04 build container for Yocto scarthgap (newer hosts such as Ubuntu 26.04 / gcc 15 are too new) |
+| `venus-build/local.conf.append` | public part of Victron's private `packagegroup-ve-addons` (GUI v2, venus-platform, flashmq, dbus-modbus-client, ...) |
+| `venus-build/gitconfig` | mounted as `~/.gitconfig`: rewrites the ssh GitHub URLs of some recipes/submodules to https |
 | `venus-build/build_rpi4.sh` | `bitbake -k venus-image-large` for `MACHINE=raspberrypi4`, run inside the container |
 | `pi-gen/config.example` | pi-gen config: trixie arm64 Lite + `stage-venus` |
 | `pi-gen/stage-venus/` | extra pi-gen stage: systemd-container, can-utils, NetworkManager WiFi profile |
@@ -25,17 +27,18 @@ git checkout v3.80
 GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_0=git@github.com: make fetch
 ./repos checkout v3.80
 cp /path/to/victron/venus-build/build_rpi4.sh .
+make build/conf/bblayers.conf   # creates build/conf/local.conf
+cat /path/to/victron/venus-build/local.conf.append >> build/conf/local.conf
 sudo docker build -t venus-build:24.04 /path/to/victron/venus-build
 # DL_DIR is ../../oe-downloads relative to build/, i.e. outside the checkout: mount it too,
 # otherwise every new container loses the downloads and git-fetched recipes (dpkg) break
 mkdir -p ../oe-downloads
-sudo docker run -d --name venus-build -v $PWD:$PWD -v $(realpath ../oe-downloads):$(realpath ../oe-downloads) -w $PWD venus-build:24.04 ./build_rpi4.sh
+sudo docker run -d --name venus-build -v $PWD:$PWD -v $(realpath ../oe-downloads):$(realpath ../oe-downloads) -v /path/to/victron/venus-build/gitconfig:$HOME/.gitconfig:ro -w $PWD venus-build:24.04 ./build_rpi4.sh
 ```
 
-The private layer `meta-victronenergy-private` is not public. Its closed-source packages are installed afterwards from the official feed of the same release (`https://updates.victronenergy.com/feeds/venus/release/packages/scarthgap/`):
+The private layer `meta-victronenergy-private` is not public. It defines `packagegroup-ve-addons` and `CORE_IMAGE_EXTRA_INSTALL`, which is how Victron's image gets its applications; without it the image lacks 146 packages of the official one. `local.conf.append` adds the ones with public recipes. The remaining closed packages exist only in the official feed of the same release (`https://updates.victronenergy.com/feeds/venus/release/packages/scarthgap/`, dirs `raspberrypi4/`, `cortexa7hf-neon-vfpv4/`, `all/`) and are installed afterwards with opkg:
 
-- `raspberrypi4/`: `mk2-dbus` (VE.Bus / MultiPlus), `vecan-dbus`, `vrmlogger`
-- `cortexa7hf-neon-vfpv4/`: `hub4control` (ESS), `mk2vsc`, `can-bus-bms`, `vedirect-interface`, `dbus-cgwacs`, `dbus-fronius`, `gps-dbus`
+`serial-starter mk2-dbus mk2vsc hub4control vecan-dbus vrmlogger vebus-system-config vebus-updater service-advertiser dbus-modbustcp dbus-mqtt-integrations dbus-parallel-bms dbus-eebus dbus-canopen-motordrive dbus-fzsonick-48tl dbus-adc dbus-ble-sensors dbus-cgwacs dbus-fronius dbus-motordrive dbus-rv-c dbus-valence gps-dbus can-bus-bms can-bus-bms-hv vedirect-interface gui start-gui-v1 mqtt-rpc venus-eeprom venus-opportunity-loads vesmart-server velib-tools support-keys dup vup xupc xupd xupt prodtest`
 
 Venus for raspberrypi4 is 32-bit armv7 (`cortexa7hf-neon-vfpv4`); the arm64 Raspberry Pi OS kernel runs it through its 32-bit compat layer.
 
