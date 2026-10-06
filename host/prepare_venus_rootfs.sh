@@ -20,6 +20,7 @@ venus-opportunity-loads vesmart-server velib-tools support-keys dup vup xupc xup
 W=$(mktemp -d /var/tmp/venus-rootfs.XXXXXX)
 cleanup() {
 	umount "$W/rootfs/proc" 2>/dev/null || true
+	umount "$W/rootfs/var/volatile" 2>/dev/null || true
 	umount "$W/mnt" 2>/dev/null || true
 	rm -rf "$W"
 }
@@ -41,18 +42,25 @@ echo "== fixups"
 
 echo "== closed packages from ${FEED}"
 R="$W/rootfs"
-printf 'src/gz %s %s/%s\n' all "$FEED" all cortexa7hf-neon-vfpv4 "$FEED" cortexa7hf-neon-vfpv4 \
-	raspberrypi4 "$FEED" raspberrypi4 > "$R/etc/opkg/venus-feeds.conf"
+# v3.81 ships venus-feed-configs (etc/opkg/venus.conf -> release feed); older images have no feed at all
+if ! chroot "$R" /bin/sh -c 'cat /etc/opkg/*.conf 2>/dev/null' | grep -q '^src'; then
+	printf 'src/gz %s %s/%s\n' all "$FEED" all cortexa7hf-neon-vfpv4 "$FEED" cortexa7hf-neon-vfpv4 \
+		raspberrypi4 "$FEED" raspberrypi4 > "$R/etc/opkg/venus-feeds.conf"
+fi
 cp -a "$R/etc/resolv.conf" "$W/resolv.conf.orig" 2>/dev/null || true
 rm -f "$R/etc/resolv.conf"
 cp /etc/resolv.conf "$R/etc/resolv.conf"
 mount -t proc proc "$R/proc"
+# /tmp -> /var/tmp -> /var/volatile/tmp only exists at runtime
+mount -t tmpfs tmpfs "$R/var/volatile"
+mkdir -p "$R/var/volatile/tmp" "$R/var/volatile/log"
 # shellcheck disable=SC2086
 chroot "$R" /bin/sh -c "opkg update && opkg install $(echo $CLOSED)"
 missing=""
 for p in $CLOSED; do
 	chroot "$R" opkg status "$p" | grep -q 'install ok installed' || missing="$missing $p"
 done
+umount "$R/var/volatile"
 umount "$R/proc"
 rm -f "$R/etc/resolv.conf"
 [ -e "$W/resolv.conf.orig" ] || [ -L "$W/resolv.conf.orig" ] && cp -a "$W/resolv.conf.orig" "$R/etc/resolv.conf"
