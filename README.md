@@ -18,6 +18,7 @@ The host stays a normal Debian system (apt, systemd, own services); Venus OS lar
 | `host/prepare_venus_rootfs.sh` | ext4 image of the Venus build → container rootfs tarball: nspawn fixups + closed packages from the official feed |
 | `host/venus_fixups.sh` | the nspawn adaptations of the Venus rootfs (idempotent, also for an installed rootfs) |
 | `host/install_venus.sh` | installs unit, nspawn settings, udev rule and the rootfs tarball into a host root (`/`, pi-gen chroot, mmdebstrap tree) |
+| `venus-addons/dbus-ebox-battery/` | battery service for the EBox (Pytes LFP without CAN): MQTT `ebox/pwr` → `com.victronenergy.battery.ebox` for DVCC/ESS |
 | `pi-gen/stage-venus/03-venus/` | pi-gen step calling `host/install_venus.sh` with `files/venus-rootfs.tar.zst` |
 | `ncr/build_ncr.sh` | x86_64 variant: Debian trixie amd64 host (mmdebstrap) for a PC; runs the same armv7 Venus rootfs via qemu-user binfmt |
 | `tools/mk3_version.py` | reads the MK3-USB firmware version (MK2 protocol 'V' frame, 2400 8N1) |
@@ -114,6 +115,20 @@ and `GRUB_DEFAULT=venus` in `/etc/default/grub`, then `update-grub`. A GRUB defa
 
 Tested on an Intel Core i3-4350T (UEFI, Secure Boot off): boots to `running`, NetworkManager DHCP on eth0, `qemu-arm` binfmt active.
 
+## EBox battery (dbus-ebox-battery)
+
+The EBox (2 × 15 kWh Pytes, 16S LFP, 6 modules of 100 Ah, only a serial console, no CAN) is read on the host by `ebox_mqtt.py` every 30 s (`ebox pwr` on the console) and published as JSON on `ebox/pwr`, also to the Venus broker on 127.0.0.1. `dbus-ebox-battery` (in Venus, started from `/data/rc.local`) turns it into a battery service:
+
+| Path | Value |
+|---|---|
+| `/Soc`, `/Dc/0/Voltage`, `/Dc/0/Current`, `/Dc/0/Power` | from the EBox |
+| `/Info/MaxChargeVoltage` | 56.6 V: charge end as before (highest pack voltage seen at 100 % SoC) |
+| `/Info/MaxChargeCurrent` | 586 A (30 kW, 1C as allowed by Pytes); 10 A from a cell at 3.60 V, 0 A at 3.65 V |
+| `/Info/MaxDischargeCurrent` | 586 A, 0 A during forced charge |
+| `/Info/ChargeRequest` | 1 below 5 % SoC until 8 %: hub4control switches ESS to Recharge and charges from the grid |
+
+Without data for 120 s the service exits and only registers again with fresh data, so the MultiPlus fall back to their own charge settings. In practice the three MultiPlus-II 48/5000 limit charging to about 11 kW (3 × 70 A).
+
 ## MK3-USB
 
 The MK3 microcontroller is powered from VE.Bus. Without a connected, awake MultiPlus it does not answer at all, so `tools/mk3_version.py` only works once the VE.Bus is connected.
@@ -125,7 +140,7 @@ The MK3 microcontroller is powered from VE.Bus. Without a connected, awake Multi
 - [x] x86 host (Debian trixie amd64) installed on disk and booting, qemu-arm binfmt active
 - [x] Venus rootfs + closed packages + nspawn unit on the x86 host: 60 services, GUI on :80, MQTT, `mk2-dbus.ttyUSB0` started by serial-starter for the MK3
 - [ ] Venus v3.81 rebuild (feed moved to v3.81), rootfs tarball
-- [ ] SoC of the battery to Venus (D-Bus battery service)
+- [x] EBox SoC/limits to Venus: `dbus-ebox-battery`, tested on the x86 host with test messages (forced charge, cell taper)
 - [ ] Final image with WiFi and Venus, flash Pi 4
 - [ ] MK3 firmware read-out with VE.Bus connected
 

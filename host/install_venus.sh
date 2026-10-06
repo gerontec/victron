@@ -32,4 +32,9 @@ if [ -n "$TARBALL" ]; then
 	# /data is bound from the host: seed it with the skeleton Venus expects (conf, db, log, ...)
 	cp -an "$M/data/." "$T/data/"
 fi
+# own Venus add-ons (dbus-ebox-battery, ...) live in /data and start from /data/rc.local
+ADDONS=$(dirname "$(readlink -f "$0")")/../venus-addons
+for i in "$ADDONS"/*/install.sh; do
+	[ -f "$i" ] && sh "$i" "$T/data"
+done
 echo "Venus subsystem installed into ${T:-/}"
