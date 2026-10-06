@@ -1,0 +1,18 @@
+# pi-gen config for Raspberry Pi OS trixie arm64 + Venus OS subsystem; copy to pi-gen/config
+IMG_NAME=raspios-trixie-venus
+PI_GEN_RELEASE="Raspberry Pi OS trixie + Venus OS subsystem"
+RELEASE=trixie
+DEPLOY_COMPRESSION=xz
+LOCALE_DEFAULT=de_DE.UTF-8
+TARGET_HOSTNAME=raspberrypi
+KEYBOARD_KEYMAP=de
+KEYBOARD_LAYOUT="German"
+TIMEZONE_DEFAULT=Europe/Berlin
+FIRST_USER_NAME=pi
+FIRST_USER_PASS=<set me>
+DISABLE_FIRST_BOOT_USER_RENAME=1
+WPA_COUNTRY=DE
+ENABLE_SSH=1
+PUBKEY_ONLY_SSH=1
+PUBKEY_SSH_FIRST_USER="<contents of authorized_keys>"
+STAGE_LIST="stage0 stage1 stage2 stage-venus"

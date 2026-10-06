@@ -1,0 +1,9 @@
+# secrets and local build config
+pi-gen/config
+pi-gen/stage-venus/01-wifi/files/wifi.env
+# build output
+*.img
+*.img.xz
+*.wic
+*.wic.gz
+__pycache__/
