@@ -10,8 +10,9 @@ Input: MQTT topic ebox/pwr on the local Venus broker, written every 30 s by ebox
 Behaviour:
 - charge end as before: CVL = MAX_CHARGE_VOLTAGE (highest pack voltage seen at 100 % SoC, Jul-Oct 2026)
 - cell protection: charge current tapers when the highest cell reaches CELL_TAPER_MV, 0 at CELL_STOP_MV
-- forced charge below FORCE_CHARGE_SOC: /Info/ChargeRequest = 1 (hub4control goes to Recharge and charges
-  from the grid), discharge blocked, released at FORCE_CHARGE_RELEASE_SOC
+- low SoC below FORCE_CHARGE_SOC: discharge blocked until FORCE_CHARGE_RELEASE_SOC; forced charge from the grid
+  (/Info/ChargeRequest = 1, hub4control goes to Recharge) only inside FORCE_CHARGE_WINDOW (local time),
+  PV surplus charges at any time
 - no data for STALE_SECONDS: exit; daemontools restarts it and the service only registers again with
   fresh data, so the MultiPlus fall back to their own charge settings meanwhile
 """
@@ -21,6 +22,8 @@ import logging
 import os
 import sys
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import dbus
 import paho.mqtt.client as mqtt
@@ -43,6 +46,8 @@ CELL_STOP_MV = 3650             # highest cell: no charge current
 TAPER_CURRENT = 10.0            # A
 FORCE_CHARGE_SOC = 5.0          # %
 FORCE_CHARGE_RELEASE_SOC = 8.0  # %
+FORCE_CHARGE_WINDOW = (11, 13)  # forced grid charge only from 11:00 to 13:00
+TIMEZONE = ZoneInfo('Europe/Berlin')
 STALE_SECONDS = 120
 CAPACITY_AH = 600               # 2 x 15 kWh at 51.2 V nominal
 
@@ -54,7 +59,7 @@ class EboxBattery:
 		self.mainloop = mainloop
 		self.service = None
 		self.last_update = 0.0
-		self.force_charge = False
+		self.low_soc = False
 
 	def register(self):
 		s = VeDbusService('com.victronenergy.battery.ebox', dbus.SystemBus(), register=False)
@@ -103,15 +108,17 @@ class EboxBattery:
 		vlow = d.get('vlow_mv')
 
 		if soc < FORCE_CHARGE_SOC:
-			self.force_charge = True
+			self.low_soc = True
 		elif soc >= FORCE_CHARGE_RELEASE_SOC:
-			self.force_charge = False
+			self.low_soc = False
+		start, end = FORCE_CHARGE_WINDOW
+		force_charge = self.low_soc and start <= datetime.now(TIMEZONE).hour < end
 
 		if self.service is None:
 			self.register()
 		s = self.service
 		ccl = self.charge_current(vhigh)
-		dcl = 0.0 if self.force_charge else MAX_DISCHARGE_CURRENT
+		dcl = 0.0 if self.low_soc else MAX_DISCHARGE_CURRENT
 		with s as ctx:
 			ctx['/Soc'] = round(soc, 1)
 			ctx['/Dc/0/Voltage'] = round(voltage, 2) if voltage else None
@@ -122,11 +129,11 @@ class EboxBattery:
 			ctx['/System/NrOfModulesOnline'] = d.get('packs')
 			ctx['/Info/MaxChargeCurrent'] = ccl
 			ctx['/Info/MaxDischargeCurrent'] = dcl
-			ctx['/Info/ChargeRequest'] = 1 if self.force_charge else 0
+			ctx['/Info/ChargeRequest'] = 1 if force_charge else 0
 			ctx['/Io/AllowToCharge'] = 1 if ccl > 0 else 0
-			ctx['/Io/AllowToDischarge'] = 0 if self.force_charge else 1
+			ctx['/Io/AllowToDischarge'] = 0 if self.low_soc else 1
 			ctx['/Alarms/HighVoltage'] = 1 if (vhigh or 0) >= CELL_STOP_MV else 0
-			ctx['/Alarms/LowSoc'] = 1 if self.force_charge else 0
+			ctx['/Alarms/LowSoc'] = 1 if self.low_soc else 0
 		self.last_update = time.monotonic()
 
 	def check_stale(self):

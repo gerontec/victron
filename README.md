@@ -124,8 +124,8 @@ The EBox (2 × 15 kWh Pytes, 16S LFP, 6 modules of 100 Ah, only a serial console
 | `/Soc`, `/Dc/0/Voltage`, `/Dc/0/Current`, `/Dc/0/Power` | from the EBox |
 | `/Info/MaxChargeVoltage` | 56.6 V: charge end as before (highest pack voltage seen at 100 % SoC) |
 | `/Info/MaxChargeCurrent` | 586 A (30 kW, 1C as allowed by Pytes); 10 A from a cell at 3.60 V, 0 A at 3.65 V |
-| `/Info/MaxDischargeCurrent` | 586 A, 0 A during forced charge |
-| `/Info/ChargeRequest` | 1 below 5 % SoC until 8 %: hub4control switches ESS to Recharge and charges from the grid |
+| `/Info/MaxDischargeCurrent` | 586 A; 0 A below 5 % SoC until 8 % (at any time) |
+| `/Info/ChargeRequest` | 1 below 5 % SoC until 8 %, **only from 11:00 to 13:00** (Europe/Berlin): hub4control switches ESS to Recharge and charges from the grid; PV surplus charges at any time |
 
 Without data for 120 s the service exits and only registers again with fresh data, so the MultiPlus fall back to their own charge settings. In practice the three MultiPlus-II 48/5000 limit charging to about 11 kW (3 × 70 A).
 
