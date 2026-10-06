@@ -1,0 +1,1 @@
+# copy python/{ebox_mqtt,pv_ebox2,zenner2db}.py, sofar/{ebox.c,Makefile} and 99-usb-serial.rules from the old Pi into src/

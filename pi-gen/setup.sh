@@ -4,6 +4,7 @@ set -e
 PIGEN="${1:?usage: setup.sh /path/to/pi-gen}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cp -r "${HERE}/stage-venus" "${PIGEN}/"
+install -m 755 "${HERE}/../readers/install_readers.sh" "${PIGEN}/stage-venus/02-readers/files/install_readers.sh"
 touch "${PIGEN}/stage2/SKIP_IMAGES"
 grep -qx "stage-venus/01-wifi/files/wifi.env" "${PIGEN}/.gitignore" 2>/dev/null || echo "stage-venus/01-wifi/files/wifi.env" >> "${PIGEN}/.gitignore"
 echo "stage-venus installed in ${PIGEN}; now create ${PIGEN}/config from config.example"
