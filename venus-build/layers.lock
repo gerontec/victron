@@ -1,0 +1,15 @@
+# Exact source revisions of the Venus OS v3.81 build (dell, 2026-10-06).
+# layer                commit                                    repository
+venus                  88e01f6f92c359c3015909e982fb17aba8938de3  https://github.com/victronenergy/venus.git  (tag v3.81)
+bitbake                c9adc2eed1f21a9a2e1f059dc85f76ba1148df08  https://github.com/victronenergy/bitbake.git
+openembedded-core      07ca97baad7b182849ee50f0bd629b68dc9f53b3  https://github.com/victronenergy/openembedded-core.git
+meta-openembedded      0f00f8b9a21950640da8c5707343e5540133f86e  https://github.com/victronenergy/meta-openembedded.git
+meta-victronenergy     4b14a2ff87d5e85810f129e465149240cdb37618  https://github.com/victronenergy/meta-victronenergy.git
+meta-qt6               01f64a2593b34342ff3d8ccf732b362a43b80e69  https://github.com/victronenergy/meta-qt6.git
+meta-swupdate          5ab00fccfee50d73e3da1c1a352c25be8e525659  https://github.com/victronenergy/meta-swupdate.git
+meta-venus-backports   7c6f0d37ea454273b5102f04c5e1f15a62701699  https://github.com/victronenergy/meta-venus-backports.git
+meta-lts-mixin-go      88ad0c00dc998ad5516288d2ca4a4c528c6a43ae  https://github.com/victronenergy/meta-lts-mixins-go.git
+meta-lts-mixin-rust    c19b6da5a3afd3c892b3b1b44983e993ac6d5308  https://github.com/victronenergy/meta-lts-mixins-rust.git
+# Application sources (dbus-systemcalc-py, gui-v2, venus-platform, ...) are fetched by the recipes in
+# meta-victronenergy at the revisions pinned there. Closed packages (mk2-dbus, hub4control, ...) have no
+# public source; they come as binaries from the official feed (see README).

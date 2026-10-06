@@ -8,6 +8,8 @@ The host stays a normal Debian system (apt, systemd, own services); Venus OS lar
 
 | Path | Purpose |
 |---|---|
+| `venus/` | submodule: victronenergy/venus at v3.81 (the Yocto build setup) |
+| `venus-build/layers.lock` | exact commits of all Yocto layers of the build |
 | `venus-build/Dockerfile` | Ubuntu 24.04 build container for Yocto scarthgap (newer hosts such as Ubuntu 26.04 / gcc 15 are too new) |
 | `venus-build/local.conf.append` | public part of Victron's private `packagegroup-ve-addons` (GUI v2, venus-platform, flashmq, dbus-modbus-client, ...) |
 | `venus-build/gitconfig` | mounted as `~/.gitconfig`: rewrites the ssh GitHub URLs of some recipes/submodules to https |
@@ -22,6 +24,15 @@ The host stays a normal Debian system (apt, systemd, own services); Venus OS lar
 | `pi-gen/stage-venus/03-venus/` | pi-gen step calling `host/install_venus.sh` with `files/venus-rootfs.tar.zst` |
 | `ncr/build_ncr.sh` | x86_64 variant: Debian trixie amd64 host (mmdebstrap) for a PC; runs the same armv7 Venus rootfs via qemu-user binfmt |
 | `tools/mk3_version.py` | reads the MK3-USB firmware version (MK2 protocol 'V' frame, 2400 8N1) |
+
+## Sources
+
+The Venus OS source is not copied into this repository; it is referenced at the exact revision that was built:
+
+- `venus/` is a git submodule of [victronenergy/venus](https://github.com/victronenergy/venus) at tag v3.81 (`git clone --recurse-submodules`, or `git submodule update --init`).
+- `venus-build/layers.lock` lists the commit of every Yocto layer the build used (bitbake, openembedded-core, meta-openembedded, meta-victronenergy, ...). The applications (dbus-systemcalc-py, gui-v2, venus-platform, flashmq, ...) are fetched by the recipes in meta-victronenergy at the revisions pinned there.
+- Own code lives here: `venus-addons/` (dbus-ebox-battery), `host/` (nspawn integration), `pi-gen/`, `ncr/`, `tools/`.
+- The closed Victron packages (mk2-dbus, hub4control, vrmlogger, ...) have no public source and are not redistributed; `host/prepare_venus_rootfs.sh` installs them from the official feed.
 
 ## Venus OS build
 
