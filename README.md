@@ -15,6 +15,10 @@ The host stays a normal Debian system (apt, systemd, own services); Venus OS lar
 | `pi-gen/config.example` | pi-gen config: trixie arm64 Lite + `stage-venus` |
 | `pi-gen/stage-venus/` | extra pi-gen stage: systemd-container, can-utils, NetworkManager WiFi profile |
 | `pi-gen/setup.sh` | copies `stage-venus` into a pi-gen checkout |
+| `host/prepare_venus_rootfs.sh` | ext4 image of the Venus build → container rootfs tarball: nspawn fixups + closed packages from the official feed |
+| `host/venus_fixups.sh` | the nspawn adaptations of the Venus rootfs (idempotent, also for an installed rootfs) |
+| `host/install_venus.sh` | installs unit, nspawn settings, udev rule and the rootfs tarball into a host root (`/`, pi-gen chroot, mmdebstrap tree) |
+| `pi-gen/stage-venus/03-venus/` | pi-gen step calling `host/install_venus.sh` with `files/venus-rootfs.tar.zst` |
 | `ncr/build_ncr.sh` | x86_64 variant: Debian trixie amd64 host (mmdebstrap) for a PC; runs the same armv7 Venus rootfs via qemu-user binfmt |
 | `tools/mk3_version.py` | reads the MK3-USB firmware version (MK2 protocol 'V' frame, 2400 8N1) |
 
@@ -22,10 +26,10 @@ The host stays a normal Debian system (apt, systemd, own services); Venus OS lar
 
 ```
 git clone https://github.com/victronenergy/venus.git && cd venus
-git checkout v3.80
+git checkout v3.81
 # meta-openembedded is listed with an ssh URL; fetch over https instead
 GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_0=git@github.com: make fetch
-./repos checkout v3.80
+./repos checkout v3.81
 cp /path/to/victron/venus-build/build_rpi4.sh .
 make build/conf/bblayers.conf   # creates build/conf/local.conf
 cat /path/to/victron/venus-build/local.conf.append >> build/conf/local.conf
@@ -39,6 +43,31 @@ sudo docker run -d --name venus-build -v $PWD:$PWD -v $(realpath ../oe-downloads
 The private layer `meta-victronenergy-private` is not public. It defines `packagegroup-ve-addons` and `CORE_IMAGE_EXTRA_INSTALL`, which is how Victron's image gets its applications; without it the image lacks 146 packages of the official one. `local.conf.append` adds the ones with public recipes. The remaining closed packages exist only in the official feed of the same release (`https://updates.victronenergy.com/feeds/venus/release/packages/scarthgap/`, dirs `raspberrypi4/`, `cortexa7hf-neon-vfpv4/`, `all/`) and are installed afterwards with opkg:
 
 `serial-starter mk2-dbus mk2vsc hub4control vecan-dbus vrmlogger vebus-system-config vebus-updater service-advertiser dbus-modbustcp dbus-mqtt-integrations dbus-parallel-bms dbus-eebus dbus-canopen-motordrive dbus-fzsonick-48tl dbus-adc dbus-ble-sensors dbus-cgwacs dbus-fronius dbus-motordrive dbus-rv-c dbus-valence gps-dbus can-bus-bms can-bus-bms-hv vedirect-interface gui start-gui-v1 mqtt-rpc venus-eeprom venus-opportunity-loads vesmart-server velib-tools support-keys dup vup xupc xupd xupt prodtest`
+
+The feed keeps only the current release (v3.81 since 05.10.2026); build the same tag, otherwise the closed packages do not match the rest of the image.
+
+## Venus as nspawn container
+
+```
+sudo ./host/prepare_venus_rootfs.sh ~/venus/deploy/venus/images/raspberrypi4/venus-image-large-raspberrypi4.ext4.gz venus-rootfs.tar.zst
+sudo ./host/install_venus.sh / venus-rootfs.tar.zst      # on a running host, then:
+sudo systemctl daemon-reload && sudo udevadm control --reload && sudo systemctl start venus
+```
+
+What has to be adapted, and why:
+
+| Problem | Fix |
+|---|---|
+| nspawn refuses a tree without os-release | `venus_fixups.sh` writes `/usr/lib/os-release` |
+| `--bind` on the command line replaces every `Bind=` of `venus.nspawn`, so `/data` was missing; Venus then mounts a 12 MB tmpfs on `/data/log` and reports a broken data partition | all binds (`/data`, `/etc/resolv.conf`, `/run/udev`, Victron ttys) in `venus-start` |
+| a second udevd in the container fails on the host's `/run/udev` and stalls the boot | container udev disabled; host udev db bound read-only, `VE_SERVICE` set by `90-venus-serial-starter.rules` on the host |
+| nobody fills `/dev/serial-starter` without udevd; serial-starter deletes each entry once it took the device | `serial-starter-devs.sh` (rcS S21) creates the entries at every boot; hotplug restarts the container |
+| sysvinit starts rc with the console pty as controlling tty: when runlevel 5 ends, `svscanboot &` gets SIGHUP and all Venus services die | `setsid svscanboot` |
+| sysvinit ignores the stop signal of nspawn: stop runs into the timeout, the SIGKILL leaves `/run/systemd/nspawn/unix-export/venus` behind and the next start fails | `venus-stop` halts from inside, `ExecStartPre` removes a stale mount |
+| `Type=notify` never becomes ready (sysvinit) | `Type=simple` |
+| journal link to `/var/log/journal` fails | `LinkJournal=no` |
+
+Only Victron serial devices are passed into the container: serial-starter probes every tty it sees and would write into other consoles.
 
 Venus for raspberrypi4 is 32-bit armv7 (`cortexa7hf-neon-vfpv4`); the arm64 Raspberry Pi OS kernel runs it through its 32-bit compat layer.
 
@@ -94,7 +123,9 @@ The MK3 microcontroller is powered from VE.Bus. Without a connected, awake Multi
 - [x] Venus v3.80 layers fetched, Yocto build running
 - [x] Raspberry Pi OS trixie base image built
 - [x] x86 host (Debian trixie amd64) installed on disk and booting, qemu-arm binfmt active
-- [ ] Venus rootfs + closed packages + nspawn unit (MK3, can0, `/data`)
+- [x] Venus rootfs + closed packages + nspawn unit on the x86 host: 60 services, GUI on :80, MQTT, `mk2-dbus.ttyUSB0` started by serial-starter for the MK3
+- [ ] Venus v3.81 rebuild (feed moved to v3.81), rootfs tarball
+- [ ] SoC of the battery to Venus (D-Bus battery service)
 - [ ] Final image with WiFi and Venus, flash Pi 4
 - [ ] MK3 firmware read-out with VE.Bus connected
 

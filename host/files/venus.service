@@ -1,0 +1,22 @@
+[Unit]
+Description=Venus OS subsystem (systemd-nspawn)
+After=network-online.target data.mount
+Wants=network-online.target
+ConditionPathExists=/var/lib/machines/venus/opt/victronenergy
+
+[Service]
+# a killed nspawn leaves its unix-export mount behind and the next start refuses to run
+ExecStartPre=-/bin/sh -c "umount /run/systemd/nspawn/unix-export/venus 2>/dev/null; rmdir /run/systemd/nspawn/unix-export/venus 2>/dev/null; true"
+ExecStart=/usr/local/sbin/venus-start
+ExecStop=/usr/local/sbin/venus-stop
+TimeoutStopSec=60
+DeviceAllow=char-ttyUSB rwm
+DeviceAllow=char-ttyACM rwm
+KillMode=mixed
+Type=simple
+RestartForceExitStatus=133
+SuccessExitStatus=133
+Delegate=yes
+
+[Install]
+WantedBy=multi-user.target

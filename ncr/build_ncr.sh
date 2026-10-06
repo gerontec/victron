@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build an x86_64 Debian trixie live system (netboot via iPXE + live-boot fetch=) that hosts the
 # armv7 Venus OS rootfs in systemd-nspawn, emulated by qemu-user binfmt.
-# Usage: sudo ./build_ncr.sh <authorized_keys file> [out dir]
+# Usage: sudo [VENUS_ROOTFS=venus-rootfs.tar.zst] ./build_ncr.sh <authorized_keys file> [out dir]
 # Output: <out>/vmlinuz, <out>/initrd.img, <out>/filesystem.squashfs
 set -euo pipefail
 
@@ -97,54 +97,8 @@ WantedBy=local-fs.target
 EOF
 chroot "${ROOT}" systemctl enable data.mount >/dev/null
 
-# Venus subsystem placeholder: rootfs goes to /var/lib/machines/venus (armv7, runs via qemu-arm binfmt)
-install -d "${ROOT}/var/lib/machines/venus" "${ROOT}/etc/systemd/nspawn"
-cat > "${ROOT}/etc/systemd/nspawn/venus.nspawn" <<'EOF'
-[Exec]
-Boot=yes
-PrivateUsers=no
-
-[Files]
-Bind=/data
-BindReadOnly=/etc/resolv.conf
-
-[Network]
-VirtualEthernet=no
-EOF
-cat > "${ROOT}/etc/systemd/system/venus.service" <<'EOF'
-[Unit]
-Description=Venus OS subsystem (systemd-nspawn, armv7 via qemu-user)
-After=network-online.target data.mount
-Wants=network-online.target
-ConditionPathExists=/var/lib/machines/venus/opt/victronenergy
-
-[Service]
-ExecStart=/usr/local/sbin/venus-start
-DeviceAllow=char-ttyUSB rwm
-DeviceAllow=char-ttyACM rwm
-KillMode=mixed
-Type=notify
-RestartForceExitStatus=133
-SuccessExitStatus=133
-Delegate=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-# bind only Victron devices (MK3-USB, VE.Direct cables): Venus' serial-starter probes every tty it sees and
-# would write into other consoles (e.g. a battery console on a USB serial adapter)
-cat > "${ROOT}/usr/local/sbin/venus-start" <<'EOF'
-#!/bin/bash
-args=()
-for l in /dev/serial/by-id/usb-VictronEnergy*; do
-	[ -e "$l" ] || continue
-	d=$(readlink -f "$l")
-	args+=(--bind="$d")
-done
-exec /usr/bin/systemd-nspawn --quiet --keep-unit --machine=venus --settings=trusted "${args[@]}"
-EOF
-chmod 755 "${ROOT}/usr/local/sbin/venus-start"
-chroot "${ROOT}" systemctl enable venus.service >/dev/null
+# Venus subsystem: unit, nspawn settings, udev rule; rootfs from host/prepare_venus_rootfs.sh if given
+"$(dirname "$(readlink -f "$0")")/../host/install_venus.sh" "${ROOT}" ${VENUS_ROOTFS:+"${VENUS_ROOTFS}"}
 
 echo "== initramfs + squashfs"
 chroot "${ROOT}" update-initramfs -u -k all >/dev/null

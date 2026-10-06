@@ -1,0 +1,5 @@
+#!/bin/sh
+# Venus runs sysvinit, which ignores the SIGRTMIN+3 that nspawn sends on stop: halt it from inside.
+leader=$(machinectl show venus -p Leader --value 2>/dev/null) || exit 0
+[ -n "$leader" ] && nsenter -t "$leader" -a /sbin/halt
+while kill -0 "$MAINPID" 2>/dev/null; do sleep 1; done

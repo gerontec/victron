@@ -9,3 +9,5 @@ pi-gen/stage-venus/01-wifi/files/wifi.env
 __pycache__/
 pi-gen/stage-venus/02-readers/files/src/
 pi-gen/stage-venus/02-readers/files/install_readers.sh
+pi-gen/stage-venus/03-venus/files/
+*.tar.zst

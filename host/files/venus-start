@@ -1,0 +1,11 @@
+#!/bin/bash
+# Start the Venus OS rootfs in /var/lib/machines/venus as a systemd-nspawn container.
+# Command-line --bind options replace Bind= from venus.nspawn entirely, so every bind is listed here.
+args=(--bind=/data --bind-ro=/etc/resolv.conf --bind-ro=/run/udev)
+# Only Victron devices (MK3-USB, VE.Direct cables) are passed in: Venus serial-starter probes every tty
+# it sees and would write into other consoles (e.g. a battery console on a USB serial adapter).
+for l in /dev/serial/by-id/usb-VictronEnergy*; do
+	[ -e "$l" ] || continue
+	args+=(--bind="$(readlink -f "$l")")
+done
+exec /usr/bin/systemd-nspawn --quiet --keep-unit --machine=venus --settings=trusted "${args[@]}"

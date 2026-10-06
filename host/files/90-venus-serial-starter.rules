@@ -1,0 +1,6 @@
+# Host side of Venus' serial-starter rules, limited to Victron USB devices (the container runs no udevd).
+# serial-starter reads VE_SERVICE with udevadm from the host udev db (/run/udev is bound read-only).
+ACTION=="add", SUBSYSTEM=="tty", ENV{ID_BUS}=="usb", ENV{ID_MODEL}=="MK3-USB_Interface", ENV{VE_SERVICE}="mkx"
+ACTION=="add", SUBSYSTEM=="tty", ENV{ID_BUS}=="usb", ENV{ID_MODEL}=="VE_Direct_cable", ENV{VE_SERVICE}="vedirect"
+# devices are bound into the container at start: restart a running Venus on hotplug
+ACTION=="add|remove", SUBSYSTEM=="tty", ENV{ID_BUS}=="usb", ENV{ID_VENDOR}=="VictronEnergy", RUN+="/usr/bin/systemctl --no-block try-restart venus.service"
