@@ -131,12 +131,16 @@ Delegate=yes
 [Install]
 WantedBy=multi-user.target
 EOF
-# bind only the serial devices that exist at start (MK3-USB, VE.Direct cables, ...)
+# bind only Victron devices (MK3-USB, VE.Direct cables): Venus' serial-starter probes every tty it sees and
+# would write into other consoles (e.g. a battery console on a USB serial adapter)
 cat > "${ROOT}/usr/local/sbin/venus-start" <<'EOF'
 #!/bin/bash
 args=()
-for d in /dev/ttyUSB* /dev/ttyACM*; do [ -e "$d" ] && args+=(--bind="$d"); done
-[ -d /dev/serial ] && args+=(--bind=/dev/serial)
+for l in /dev/serial/by-id/usb-VictronEnergy*; do
+	[ -e "$l" ] || continue
+	d=$(readlink -f "$l")
+	args+=(--bind="$d")
+done
 exec /usr/bin/systemd-nspawn --quiet --keep-unit --machine=venus --settings=trusted "${args[@]}"
 EOF
 chmod 755 "${ROOT}/usr/local/sbin/venus-start"
