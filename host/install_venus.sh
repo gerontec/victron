@@ -27,7 +27,7 @@ if [ -n "$TARBALL" ]; then
 		zstd -dc "$TARBALL" | tar -C "$M" --numeric-owner --xattrs --acls -xpf -
 	else
 		# pi-gen's build container has no zstd, but bsdtar (libarchive-tools) reads it
-		bsdtar -C "$M" --numeric-owner --xattrs --acls -xpf "$TARBALL"
+		LC_ALL=C.UTF-8 bsdtar -C "$M" --numeric-owner --xattrs --acls -xpf "$TARBALL"
 	fi
 	# /data is bound from the host: seed it with the skeleton Venus expects (conf, db, log, ...)
 	cp -an "$M/data/." "$T/data/"
