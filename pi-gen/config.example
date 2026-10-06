@@ -13,6 +13,6 @@ FIRST_USER_PASS=<set me>
 DISABLE_FIRST_BOOT_USER_RENAME=1
 WPA_COUNTRY=DE
 ENABLE_SSH=1
-PUBKEY_ONLY_SSH=1
+PUBKEY_ONLY_SSH=0   # keys from PUBKEY_SSH_FIRST_USER work, password login stays allowed
 PUBKEY_SSH_FIRST_USER="<contents of authorized_keys>"
 STAGE_LIST="stage0 stage1 stage2 stage-venus"
