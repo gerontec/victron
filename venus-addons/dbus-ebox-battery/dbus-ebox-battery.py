@@ -33,7 +33,10 @@ from gi.repository import GLib
 sys.path.insert(1, '/opt/victronenergy/dbus-systemcalc-py/ext/velib_python')
 from vedbus import VeDbusService  # noqa: E402
 
-VERSION = '1.0'
+VERSION = '1.1'
+# can-bus-bms (Speicher A on can0) registers as battery instance 512; 513 keeps the MQTT topics
+# N/<portal>/battery/<instance>/... of the two batteries apart
+DEVICE_INSTANCE = 513
 MQTT_HOST = os.environ.get('EBOX_MQTT_HOST', '127.0.0.1')
 MQTT_TOPIC = 'ebox/pwr'
 
@@ -63,7 +66,7 @@ class EboxBattery:
 
 	def register(self):
 		s = VeDbusService('com.victronenergy.battery.ebox', dbus.SystemBus(), register=False)
-		s.add_mandatory_paths(__file__, VERSION, 'MQTT ' + MQTT_TOPIC, deviceinstance=512,
+		s.add_mandatory_paths(__file__, VERSION, 'MQTT ' + MQTT_TOPIC, deviceinstance=DEVICE_INSTANCE,
 			productid=0xB004, productname='EBox LFP (via ebox_mqtt)', firmwareversion=VERSION,
 			hardwareversion=None, connected=1)
 		s.add_path('/CustomName', 'EBox', writeable=True)

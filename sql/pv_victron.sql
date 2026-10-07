@@ -1,5 +1,5 @@
 -- wagodb.pv_victron: Victron system (3x MultiPlus-II 48/5000, L1/L2/L3) read from Venus OS, one row per minute.
--- Sources: com.victronenergy.vebus (inverter/charger), com.victronenergy.battery (EBox via dbus-ebox-battery),
+-- Sources: com.victronenergy.vebus (inverter/charger), com.victronenergy.battery (Speicher B: EBox via dbus-ebox-battery; Speicher A: CAN-bus BMS on can0),
 -- com.victronenergy.system (ESS, grid, consumption). Units in the column names; NULL = value not available.
 CREATE TABLE IF NOT EXISTS `pv_victron` (
   `id` bigint(20) NOT NULL AUTO_INCREMENT,
@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS `pv_victron` (
   `e_inverter_to_acout_kwh` decimal(12,3) DEFAULT NULL COMMENT 'Zaehler /Energy/InverterToAcOut',
   `e_acin_to_acout_kwh` decimal(12,3) DEFAULT NULL COMMENT 'Zaehler /Energy/AcIn1ToAcOut (Durchleitung)',
 
-  -- Battery (EBox, dbus-ebox-battery)
+  -- Battery Speicher B (EBox, dbus-ebox-battery, com.victronenergy.battery.ebox)
   `soc` decimal(4,1) DEFAULT NULL COMMENT 'SoC der aktiven Batterie in %',
   `bat_v` decimal(6,2) DEFAULT NULL,
   `bat_a` decimal(7,2) DEFAULT NULL COMMENT '+ = Laden',
@@ -44,6 +44,19 @@ CREATE TABLE IF NOT EXISTS `pv_victron` (
   `ccl_a` decimal(6,1) DEFAULT NULL COMMENT '/Info/MaxChargeCurrent (DVCC)',
   `dcl_a` decimal(6,1) DEFAULT NULL COMMENT '/Info/MaxDischargeCurrent (DVCC)',
   `charge_request` tinyint DEFAULT NULL COMMENT '/Info/ChargeRequest: 1 = Zwangsladung angefordert',
+
+  -- Battery Speicher A (CAN-bus BMS on can0, Venus can-bus-bms, com.victronenergy.battery.socketcan_can0)
+  `a_soc` decimal(4,1) DEFAULT NULL COMMENT 'SoC Speicher A in %',
+  `a_soh` decimal(4,1) DEFAULT NULL COMMENT 'SoH Speicher A in %',
+  `a_bat_v` decimal(6,2) DEFAULT NULL,
+  `a_bat_a` decimal(7,2) DEFAULT NULL COMMENT '+ = Laden',
+  `a_bat_w` int DEFAULT NULL,
+  `a_temp_c` decimal(4,1) DEFAULT NULL COMMENT 'BMS-Temperatur',
+  `a_cell_max_v` decimal(5,3) DEFAULT NULL,
+  `a_cell_min_v` decimal(5,3) DEFAULT NULL,
+  `a_cvl_v` decimal(5,2) DEFAULT NULL COMMENT 'Ladeschluss laut BMS (0x351)',
+  `a_ccl_a` decimal(6,1) DEFAULT NULL COMMENT 'max. Ladestrom laut BMS (0x351)',
+  `a_dcl_a` decimal(6,1) DEFAULT NULL COMMENT 'max. Entladestrom laut BMS (0x351)',
 
   -- ESS / system
   `system_state` smallint DEFAULT NULL COMMENT '/SystemState/State von com.victronenergy.system',

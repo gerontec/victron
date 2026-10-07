@@ -24,7 +24,12 @@ MQTT_HOST = '127.0.0.1'
 COLLECT_SECONDS = 5
 DB_CNF = os.path.expanduser('~/.victron2db.cnf')
 
-# column -> (service, path); service 'vebus' / 'battery' take the first instance seen
+# column -> (service, path); 'vebus' takes the first instance seen; the batteries are told apart by /ProductName:
+# 'battery' = Speicher B (EBox, dbus-ebox-battery), 'battery_a' = Speicher A (CAN-bus BMS on can0)
+BATTERY_ROLES = (
+	('battery', 'EBox'),
+	('battery_a', 'CAN-bus BMS'),
+)
 COLUMNS = {
 	'vebus_state': ('vebus', '/State'),
 	'vebus_mode': ('vebus', '/Mode'),
@@ -49,6 +54,17 @@ COLUMNS = {
 	'ccl_a': ('battery', '/Info/MaxChargeCurrent'),
 	'dcl_a': ('battery', '/Info/MaxDischargeCurrent'),
 	'charge_request': ('battery', '/Info/ChargeRequest'),
+	'a_soc': ('battery_a', '/Soc'),
+	'a_soh': ('battery_a', '/Soh'),
+	'a_bat_v': ('battery_a', '/Dc/0/Voltage'),
+	'a_bat_a': ('battery_a', '/Dc/0/Current'),
+	'a_bat_w': ('battery_a', '/Dc/0/Power'),
+	'a_temp_c': ('battery_a', '/Dc/0/Temperature'),
+	'a_cell_max_v': ('battery_a', '/System/MaxCellVoltage'),
+	'a_cell_min_v': ('battery_a', '/System/MinCellVoltage'),
+	'a_cvl_v': ('battery_a', '/Info/MaxChargeVoltage'),
+	'a_ccl_a': ('battery_a', '/Info/MaxChargeCurrent'),
+	'a_dcl_a': ('battery_a', '/Info/MaxDischargeCurrent'),
 	'system_state': ('system', '/SystemState/State'),
 	'ess_setpoint_w': ('settings', '/Settings/CGwacs/AcPowerSetPoint'),
 }
@@ -63,12 +79,14 @@ for ph in (1, 2, 3):
 WANTED = {}  # (service, path) -> column
 for col, key in COLUMNS.items():
 	WANTED[key] = col
+BATTERY_PATHS = {path for (service, path) in WANTED if service.startswith('battery')}
 
 
 def collect():
 	"""Return (portal_id, {(service, path): value})."""
 	values = {}
 	instances = {}
+	batteries = {}  # instance -> {path: value}
 	portal = {'id': None}
 
 	def on_connect(client, userdata, flags, reason_code, properties):
@@ -90,17 +108,24 @@ def collect():
 		if service == 'system' and path == '/Serial':
 			portal['id'] = pid
 			return
-		if service in ('vebus', 'battery'):
-			first = instances.setdefault(service, instance)
-			if instance != first:
+		if service == 'battery':
+			if path != '/ProductName' and path not in BATTERY_PATHS:
 				return
-		if (service, path) not in WANTED:
-			return
+		else:
+			if service == 'vebus':
+				first = instances.setdefault(service, instance)
+				if instance != first:
+					return
+			if (service, path) not in WANTED:
+				return
 		try:
 			v = json.loads(msg.payload).get('value')
 		except (ValueError, AttributeError):
 			return
-		values[(service, path)] = v
+		if service == 'battery':
+			batteries.setdefault(instance, {})[path] = v
+		else:
+			values[(service, path)] = v
 
 	client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f'victron2db-{os.getpid()}')
 	client.on_connect = on_connect
@@ -110,6 +135,12 @@ def collect():
 	time.sleep(COLLECT_SECONDS)
 	client.loop_stop()
 	client.disconnect()
+	for role, prefix in BATTERY_ROLES:
+		for bat in batteries.values():
+			if str(bat.get('/ProductName') or '').startswith(prefix):
+				for path, v in bat.items():
+					values[(role, path)] = v
+				break
 	return portal['id'] or fallback_portal_id(), values
 
 
