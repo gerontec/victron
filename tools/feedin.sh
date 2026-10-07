@@ -8,13 +8,13 @@ V() { sudo nsenter -t "$L" -a dbus -y "$@" >/dev/null; }
 VB=com.victronenergy.vebus.ttyUSB2
 end=$(date -d "$END" +%s); [ "$end" -le "$(date +%s)" ] && end=$(date -d "tomorrow $END" +%s)
 echo "$(date +%T) feed-in ${W} W per phase until $(date -d @$end '+%F %T')"
-V com.victronenergy.settings /Settings/CGwacs/Hub4Mode SetValue 3      # external control: hub4control leaves setpoints alone
 trap 'for p in L1 L2 L3; do V $VB /Hub4/$p/AcPowerSetpoint SetValue 0; done; V com.victronenergy.settings /Settings/CGwacs/Hub4Mode SetValue 1; echo "$(date +%T) stopped, back to Hub4Mode 1"; exit' INT TERM
 while [ "$(date +%s)" -lt "$end" ]; do
+  V com.victronenergy.settings /Settings/CGwacs/Hub4Mode SetValue 3    # external control, re-asserted every cycle
   for p in L1 L2 L3; do
     V $VB /Hub4/$p/MaxFeedInPower SetValue $((W + 100))
     V $VB /Hub4/$p/AcPowerSetpoint SetValue -- -$W                    # negative = power out of AC-in
   done
-  sleep 10
+  sleep 10 & wait $!                                                # wait: a TERM is handled at once, not after the sleep
 done
 kill -TERM $$
