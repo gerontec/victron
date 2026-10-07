@@ -32,7 +32,7 @@ The Venus OS source is not copied into this repository; it is referenced at the 
 - `venus/` is a git submodule of [victronenergy/venus](https://github.com/victronenergy/venus) at tag v3.81 (`git clone --recurse-submodules`, or `git submodule update --init`).
 - `venus-build/layers.lock` lists the commit of every Yocto layer the build used (bitbake, openembedded-core, meta-openembedded, meta-victronenergy, ...). The applications (dbus-systemcalc-py, gui-v2, venus-platform, flashmq, ...) are fetched by the recipes in meta-victronenergy at the revisions pinned there.
 - Own code lives here: `venus-addons/` (dbus-ebox-battery), `host/` (nspawn integration), `pi-gen/`, `ncr/`, `tools/`.
-- The closed Victron packages (mk2-dbus, hub4control, vrmlogger, ...) have no public source and are not redistributed; `host/prepare_venus_rootfs.sh` installs them from the official feed.
+- The 42 Victron packages without public recipe (mk2-dbus, hub4control, vrmlogger, ...) are not redistributed; `host/prepare_venus_rootfs.sh` installs them from the official feed. List, versions, license fields and functions: [nonOpenSource.md](nonOpenSource.md).
 
 ## Venus OS build
 
