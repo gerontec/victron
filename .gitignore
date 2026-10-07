@@ -11,3 +11,4 @@ pi-gen/stage-venus/02-readers/files/src/
 pi-gen/stage-venus/02-readers/files/install_readers.sh
 pi-gen/stage-venus/03-venus/files/
 *.tar.zst
+pi-gen/stage-venus/02-readers/files/victron2db.py

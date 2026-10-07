@@ -2,6 +2,7 @@
 # Install the ebox (battery console) and Zenner (M-Bus heat meter) readers 1:1 as on the old Pi:
 # user pi, /home/pi/python + /home/pi/sofar, cron every 30 s (ebox) / 60 s (zenner), udev names ttyUSB23/ttyUSB24.
 # The scripts carry site config (DB, broker) and are not part of this repo; pass the directory that holds them.
+# Optional: victron2db.py (this repo) next to this script -> /home/pi/python, DB login derived from zenner2db.py.
 # Usage (as root on the target, or inside a chroot): install_readers.sh <src dir with python/ and sofar/> [udev rules file]
 set -euo pipefail
 
@@ -41,10 +42,30 @@ fi
 udevadm control --reload-rules 2>/dev/null && udevadm trigger --subsystem-match=tty 2>/dev/null || true
 
 # cron lines exactly as on the old Pi
-crontab -u pi - <<'EOF'
-* * * * * /home/pi/python/zenner2db.py >/tmp/zenner2db.txt
+CRON='* * * * * /home/pi/python/zenner2db.py >/tmp/zenner2db.txt
 * * * * * /usr/bin/python3 /home/pi/python/ebox_mqtt.py >/tmp/ebox_mqtt.log 2>&1
-* * * * * sleep 30 && /usr/bin/python3 /home/pi/python/ebox_mqtt.py >>/tmp/ebox_mqtt.log 2>&1
-EOF
+* * * * * sleep 30 && /usr/bin/python3 /home/pi/python/ebox_mqtt.py >>/tmp/ebox_mqtt.log 2>&1'
+
+# victron2db: Venus values (local MQTT) -> wagodb.pv_victron, same DB as zenner2db
+V2DB="$(dirname "$(readlink -f "$0")")/victron2db.py"
+if [ -f "${V2DB}" ]; then
+	install -m 755 -o pi -g pi "${V2DB}" /home/pi/python/victron2db.py
+	python3 - <<'EOP'
+import os, re
+src = open('/home/pi/python/zenner2db.py').read()
+ns = {}
+exec(re.search(r"DB_CONFIG = \{.*?\n\}", src, re.S).group(0), ns)
+c = ns['DB_CONFIG']
+p = '/home/pi/.victron2db.cnf'
+with open(p, 'w') as f:
+    f.write('[client]\nhost=%s\nuser=%s\npassword=%s\ndatabase=%s\n'
+            % (c['host'], c['user'], c['password'], c.get('database') or c.get('db')))
+os.chmod(p, 0o600)
+EOP
+	chown pi:pi /home/pi/.victron2db.cnf
+	CRON="${CRON}
+* * * * * /usr/bin/python3 /home/pi/python/victron2db.py >/tmp/victron2db.log 2>&1"
+fi
+echo "${CRON}" | crontab -u pi -
 systemctl enable cron >/dev/null 2>&1 || true
 echo "readers installed for $(uname -m)"
