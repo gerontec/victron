@@ -87,7 +87,7 @@ They are not redistributed in this repository. The feed only carries the current
 Checked on the v3.81 rootfs (07.10.2026) with `file` and `readelf` over every file of each package:
 
 - **All ELF programs are stripped**: no `.symtab`, no debug info. `nm` shows nothing; only the dynamic symbol table is left, i.e. the imported library functions (libc, libdbus, libevent, Qt 6) and a handful of exports that the linker keeps (`stdout`, `optarg`, malloc wrappers, Qt meta-type helpers). No function or class names of Victron's own code are visible.
-- **The Python packages ship readable source** (`.py` next to the `.pyc`), also the ones whose license field says `CLOSED`.
+- **The Python packages ship readable source** (`.py` next to the `.pyc`), also the ones whose license field says `CLOSED`. The files carry no license header or license file, so they are copyrighted by Victron and are **not** copied into this public repository (a private reference copy is kept separately).
 - **Shell only**: `serial-starter`, `service-advertiser`, `start-gui-v1`, `support-keys` (keys only).
 
 | Form | Packages |
