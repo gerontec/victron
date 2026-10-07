@@ -82,6 +82,22 @@ They are not redistributed in this repository. The feed only carries the current
 | xupt | 1.0.4 | **CLOSED** | – | "Victron Ethernet Xup Updater" |
 | prodtest | 0.0 | MIT | – | production test\* |
 
+## Form of the delivered packages
+
+Checked on the v3.81 rootfs (07.10.2026) with `file` and `readelf` over every file of each package:
+
+- **All ELF programs are stripped**: no `.symtab`, no debug info. `nm` shows nothing; only the dynamic symbol table is left, i.e. the imported library functions (libc, libdbus, libevent, Qt 6) and a handful of exports that the linker keeps (`stdout`, `optarg`, malloc wrappers, Qt meta-type helpers). No function or class names of Victron's own code are visible.
+- **The Python packages ship readable source** (`.py` next to the `.pyc`), also the ones whose license field says `CLOSED`.
+- **Shell only**: `serial-starter`, `service-advertiser`, `start-gui-v1`, `support-keys` (keys only).
+
+| Form | Packages |
+|---|---|
+| ELF, stripped | mk2-dbus, mk2vsc, hub4control, vecan-dbus, vebus-system-config (`vbsc`), vebus-updater (`vbdup`), dbus-modbustcp, dbus-eebus, dbus-canopen-motordrive, dbus-adc, dbus-ble-sensors, dbus-cgwacs, dbus-fronius, dbus-motordrive, dbus-rv-c, dbus-valence, gps-dbus, can-bus-bms, can-bus-bms-hv, vedirect-interface (`vedirect-dbus`), gui, velib-tools (8 tools), dup, vup, xupc, xupd, xupt, prodtest (plus scripts) |
+| Python source | vrmlogger, dbus-mqtt-integrations, dbus-parallel-bms, dbus-fzsonick-48tl, mqtt-rpc, venus-eeprom, venus-opportunity-loads, vesmart-server |
+| Shell scripts | serial-starter, service-advertiser, start-gui-v1 |
+
+Examples of the linked libraries: `mk2-dbus` and `dbus-adc` are C (libdbus, libevent, libpthread); `hub4control` is C++/Qt 6 (QtDBus, QtXml, QtCore).
+
 ## Built here from public source
 
 Everything else of the image: the base system (openembedded-core), GUI v2 (`gui-v2-webassembly`), `venus-platform`, `flashmq` + `dbus-flashmq` (MQTT), `dbus-systemcalc-py`, `dbus-modbus-client`, `dbus-digitalinputs`, `dbus-switch`, Node-RED, ... (see `venus-build/local.conf.append` and `venus-build/layers.lock`), plus the own add-on `venus-addons/dbus-ebox-battery`.
