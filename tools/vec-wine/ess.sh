@@ -12,7 +12,7 @@ dlg() { xdotool search --onlyvisible --name "^$1\$" | tail -1; }   # newest visi
 ok() { W=$(dlg "$1"); [ -n "$W" ] && xdotool windowactivate --sync "$W" key "${2:-Return}" 2>/dev/null; sleep "${3:-4}"; }
 for step in "$@"; do echo "$(date +%T) step $step"; case "$step" in
 release)  # hand the MK3 from Venus to Wine
-  V svc -d /service/serial-starter; V svc -d /service/mk2-dbus.ttyUSB2; sleep 3 ;;
+  V svc -d /service/serial-starter; V sh -c "svc -d /service/mk2-dbus.ttyUSB*"; sleep 3 ;;
 restore)  # give the MK3 back to Venus
   pkill -f 'VE Configure tools' ; sleep 2; V svc -u /service/serial-starter ;;
 qc)       # Quick Configure: Welcome -> Change settings (default) -> Com 3 (remembered) -> Switch all ON -> overview

@@ -30,9 +30,9 @@ box64 wine64 "$INST" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART >/dev/null 2>&1
 mkdir -p "$WINEPREFIX/drive_c/ProgramData/VE Configure tools/Assistants"
 cp "$WINEPREFIX/drive_c/users/Public/VE Configure tools/Assistants/"*.vfp "$WINEPREFIX/drive_c/ProgramData/VE Configure tools/Assistants/"
 # virtual desktop (popups render) and COM3 = MK3
-printf 'Windows Registry Editor Version 5.00\r\n\r\n[HKEY_CURRENT_USER\\Software\\Wine\\Explorer]\r\n"Desktop"="Default"\r\n\r\n[HKEY_CURRENT_USER\\Software\\Wine\\Explorer\\Desktops]\r\n"Default"="1260x780"\r\n\r\n[HKEY_LOCAL_MACHINE\\Software\\Wine\\Ports]\r\n"COM3"="/dev/ttyUSB2"\r\n' > ~/vec/setup.reg
+printf 'Windows Registry Editor Version 5.00\r\n\r\n[HKEY_CURRENT_USER\\Software\\Wine\\Explorer]\r\n"Desktop"="Default"\r\n\r\n[HKEY_CURRENT_USER\\Software\\Wine\\Explorer\\Desktops]\r\n"Default"="1260x780"\r\n\r\n[HKEY_LOCAL_MACHINE\\Software\\Wine\\Ports]\r\n"COM3"="/dev/ttyUSB30"\r\n' > ~/vec/setup.reg
 box64 wine64 regedit /S 'Z:\home\pi\vec\setup.reg'
 box64 wineserver -k
-ln -sfn /dev/ttyUSB2 "$WINEPREFIX/dosdevices/com3"
+ln -sfn /dev/ttyUSB30 "$WINEPREFIX/dosdevices/com3"
 cp "$(dirname "$0")/run.sh" ~/vec/run.sh; chmod +x ~/vec/run.sh
 echo "setup done"

@@ -7,7 +7,7 @@ three-phase system without moving the MK3 to a Windows PC.
 
 | File | Purpose |
 |---|---|
-| `setup.sh` | one-time install: box64, Xvfb/openbox/xcompmgr/x11vnc, Wine 10.0 wow64 (Kron4ek), VE Configure tools (`VECSetup_B.exe`, silent), assistant packs, Wine virtual desktop, COM3 = `/dev/ttyUSB2` |
+| `setup.sh` | one-time install: box64, Xvfb/openbox/xcompmgr/x11vnc, Wine 10.0 wow64 (Kron4ek), VE Configure tools (`VECSetup_B.exe`, silent), assistant packs, Wine virtual desktop, COM3 = `/dev/ttyUSB30` (fixed MK3 name, host/99-victron-mk3.rules) |
 | `xstart.sh` | start the display stack on `:1` (VNC on localhost:5901) |
 | `run.sh` | start a VE tool; `ttyUSB0`/`ttyUSB1` (M-Bus, EBox console) are bind-mounted to `/dev/null` so a COM scan cannot disturb them |
 | `ess.sh` | the recorded GUI steps (see below) |
@@ -24,10 +24,10 @@ SAVE_NAME=L1 sh ess.sh save sendthis close
 SAVE_NAME=L2 sh ess.sh l2 assist addess esswiz save sendthis close
 SAVE_NAME=L3 sh ess.sh l3 assist addess esswiz save sendthis close
 sh ess.sh restore                            # MK3 back to Venus
-sudo nsenter -t $(sudo machinectl show venus -p Leader --value) -a svc -u /service/mk2-dbus.ttyUSB2
+sudo nsenter -t $(sudo machinectl show venus -p Leader --value) -a sh -c "svc -u /service/mk2-dbus.ttyUSB*"
 ```
 
-Then check in Venus that `/Hub4/AssistantId` = 5 on `com.victronenergy.vebus.ttyUSB2`.
+Then check in Venus that `/Hub4/AssistantId` = 5 on `com.victronenergy.vebus.ttyUSB*`.
 
 Prerequisites and lessons from the first run (2026-10-07):
 

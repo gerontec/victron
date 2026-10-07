@@ -1,0 +1,14 @@
+# USB/IP server on the Pi: lets a PC attach a USB device of the Pi over the network (TCP 3240).
+# Nothing is exported until a device is bound (tools/mk3-remote.sh on).
+[Unit]
+Description=USB/IP server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStartPre=/sbin/modprobe usbip-host
+ExecStart=/usr/sbin/usbipd
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

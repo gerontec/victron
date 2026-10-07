@@ -1,0 +1,16 @@
+# Fixed ESS feed-in (tools/feedin.sh) that survives a reboot. Edit the end date, then:
+#   sudo cp feedin.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now feedin
+[Unit]
+Description=Fixed ESS feed-in per phase via Venus /Hub4 setpoints
+After=venus.service
+Wants=venus.service
+
+[Service]
+User=pi
+ExecStart=/bin/sh /home/pi/vec/feedin.sh 400 "2026-10-08 08:15"
+Restart=on-failure
+RestartSec=20
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

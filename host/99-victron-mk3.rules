@@ -1,0 +1,4 @@
+# Fixed name for the Victron MK3-USB (VE.Bus): /dev/ttyUSB30, independent of USB enumeration order.
+# Host-side only. Do NOT bind it into Venus under this name: mk2-dbus then restarts every second
+# (tried 2026-10-07; it looks the device up in /sys/class/tty by its kernel name), Venus keeps the kernel name.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6015", ATTRS{manufacturer}=="VictronEnergy", SYMLINK+="ttyUSB30", GROUP="dialout", MODE="0660"
