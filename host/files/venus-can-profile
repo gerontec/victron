@@ -1,0 +1,52 @@
+#!/bin/sh
+# Switch the CAN profile of the Venus OS subsystem for one interface (default can0).
+# Venus changes the bitrate with can-set-rate, which fails inside the container (no CAP_NET_ADMIN),
+# so the host sets the bitrate first, then the profile is written to Venus' settings.
+# Profiles (veutil src/qt/canbus_interfaces.cpp):
+#   off       0  disabled
+#   vecan     1  250k  VE.Can (vecan-dbus)
+#   vecan-bms 2  250k  VE.Can + CAN-bus BMS
+#   bms       3  500k  CAN-bus BMS LV (can-bus-bms)
+#   hv        7  500k  CAN-bus BMS HV (can-bus-bms-hv)
+#   listen    8  500k  interface up, no Venus service (for candump)
+# Usage: venus-can-profile [off|vecan|vecan-bms|bms|hv|listen] [interface]   (no argument: show)
+set -eu
+IF="${2:-can0}"
+SETTING="/Settings/Canbus/${IF}/Profile"
+
+venus() {
+	leader=$(machinectl show venus -p Leader --value 2>/dev/null) || { echo "Venus container not running" >&2; exit 1; }
+	nsenter -t "$leader" -a "$@"
+}
+
+show() {
+	echo "host:  $(ip -details link show "$IF" | grep -oE 'bitrate [0-9]+' || echo 'down')"
+	echo "venus: profile $(venus dbus -y com.victronenergy.settings "$SETTING" GetValue 2>/dev/null | tr -d ' ')"
+	venus sh -c "ls /service | grep -E '\.${IF}\$'" | sed 's/^/       service /'
+}
+
+[ "$(id -u)" -eq 0 ] || exec sudo "$0" "$@"
+[ $# -eq 0 ] && { show; exit 0; }
+
+case "$1" in
+	off)       P=0; RATE=0 ;;
+	vecan)     P=1; RATE=250000 ;;
+	vecan-bms) P=2; RATE=250000 ;;
+	bms)       P=3; RATE=500000 ;;
+	hv)        P=7; RATE=500000 ;;
+	listen)    P=8; RATE=500000 ;;
+	*) echo "unknown profile: $1" >&2; exit 2 ;;
+esac
+
+# host side: bitrate, kept for the next boot by can@.service
+ip link set "$IF" down
+if [ "$RATE" -gt 0 ]; then
+	ip link set "$IF" type can bitrate "$RATE" restart-ms 100
+	ip link set "$IF" up
+fi
+mkdir -p /etc/venus-can
+echo "BITRATE=$RATE" > "/etc/venus-can/$IF.conf"
+
+venus dbus -y com.victronenergy.settings "$SETTING" SetValue "$P" >/dev/null
+sleep 5
+show

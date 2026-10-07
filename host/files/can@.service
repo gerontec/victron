@@ -1,0 +1,16 @@
+[Unit]
+Description=Bring up %i for the Venus OS subsystem (bitrate from /etc/venus-can/%i.conf)
+BindsTo=sys-subsystem-net-devices-%i.device
+After=sys-subsystem-net-devices-%i.device
+Before=venus.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=BITRATE=500000
+EnvironmentFile=-/etc/venus-can/%i.conf
+ExecStart=/bin/sh -c '[ "$BITRATE" -gt 0 ] && /usr/sbin/ip link set %i up type can bitrate $BITRATE restart-ms 100 || true'
+ExecStop=/usr/sbin/ip link set %i down
+
+[Install]
+WantedBy=sys-subsystem-net-devices-%i.device

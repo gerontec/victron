@@ -20,6 +20,7 @@ The host stays a normal Debian system (apt, systemd, own services); Venus OS lar
 | `host/prepare_venus_rootfs.sh` | ext4 image of the Venus build → container rootfs tarball: nspawn fixups + closed packages from the official feed |
 | `host/venus_fixups.sh` | the nspawn adaptations of the Venus rootfs (idempotent, also for an installed rootfs) |
 | `host/install_venus.sh` | installs unit, nspawn settings, udev rule and the rootfs tarball into a host root (`/`, pi-gen chroot, mmdebstrap tree) |
+| `host/files/venus-can-profile`, `can@.service` | CAN for Venus: host sets the bitrate, script switches the Venus CAN profile ([can.md](can.md)) |
 | `venus-addons/dbus-ebox-battery/` | battery service for the EBox (Pytes LFP without CAN): MQTT `ebox/pwr` → `com.victronenergy.battery.ebox` for DVCC/ESS |
 | `pi-gen/stage-venus/03-venus/` | pi-gen step calling `host/install_venus.sh` with `files/venus-rootfs.tar.zst` |
 | `ncr/build_ncr.sh` | x86_64 variant: Debian trixie amd64 host (mmdebstrap) for a PC; runs the same armv7 Venus rootfs via qemu-user binfmt |
