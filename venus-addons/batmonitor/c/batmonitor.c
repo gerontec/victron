@@ -7,6 +7,12 @@
  *   - the AC-in of the Multis is read once per cycle (Python: twice, for the surplus and for the charge block)
  *   - log line only when a rule changes or every LOG_SECONDS (else 17000 lines a day)
  *   - an inverter message with PCC null is ignored as a whole (Python: TypeError in the callback, same effect)
+ *   - soyo optimised to PCC 0 W (0.18, user 2026-10-08, also in batmonitor.py 0.16): the own power of the Multis is
+ *     kept and only the new part is scaled with KP, so a PCC held at 0 by the Sofar holds the setpoint instead of
+ *     growing it 1 % per cycle:
+ *       charge     own charge + KP * (pcc + bat1_eff - SOYO_TARGET)      (old: KP * (surplus - 200 W): +200 W export)
+ *       discharge  own discharge - Bat1 charge - KP * (pcc - SOYO_TARGET) (old: -KP * pcc, back to IDLE once covered)
+ *     both hold down to SOYO_HOLD_TH; entry thresholds unchanged (+200 W surplus, -100 W import)
  * PI prototype (not armed): BATMONITOR_PI=1 lets a velocity-form PI on y = PCC + Sofar Bat1 replace the soyo
  * discharge/charge amounts (same gates, same phase split). Without it the PI runs in shadow: every cycle one line
  * in PI_SHADOW_FILE with what soyo set and what the PI would set, to compare both before arming it.
@@ -26,7 +32,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define VERSION "0.17-c"
+#define VERSION "0.18-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
@@ -41,6 +47,8 @@
 #define W_MAX (900 * POWER_SCALE)
 #define PCC_IMPORT_TH -100.0
 #define PCC_SURPLUS_TH 200.0
+#define SOYO_TARGET 0.0         /* W at the PCC (0.18: was +200 W export in effect) */
+#define SOYO_HOLD_TH 20.0       /* W: charging / proportional discharging continues while surplus / deficit is above */
 #define CHARGING_TH 200.0
 #define NIGHT_PV_TH 100.0
 #define WP_CAP (500 * POWER_SCALE)
@@ -130,6 +138,7 @@ static struct {
 
 /* controller state */
 static int prot[NBANK], force_[NBANK], soc_ok[NBANK], lead = -1, hub4mode_set;
+static int soyo_chg_prev, soyo_prop_prev;   /* last cycle charged from PV / discharged proportionally */
 static double soc[NBANK];
 static int setpoints[NPH];
 static double setpoint_time;
@@ -698,7 +707,7 @@ static void calc(void)
 
 	/* the meter already includes our own charging: use the measured AC-in, not the setpoints */
 	const char *vb = vebus();
-	double own_charge = 0.0, multis = 0.0;
+	double own_charge = 0.0, own_discharge = 0.0, multis = 0.0;
 	for (int p = 0; p < NPH; p++) {
 		char path[32];
 		double a;
@@ -707,12 +716,16 @@ static void calc(void)
 			multis += a;
 			if (a > 0)
 				own_charge += a;
+			else
+				own_discharge -= a;
 		}
 	}
 	/* a Sofar Bat1 discharge is no surplus; its charging counts with BAT1_CHARGE_FACTOR */
 	double bat1_eff = bat1 < 0 ? bat1 : bat1 * BAT1_CHARGE_FACTOR;
 	double surplus = (have_pcc ? pcc : 0.0) + bat1_eff + own_charge;
 	int block = ladesperre(stale, pcc, have_pcc, bat1, pcc_avg5, bat1_avg5, aussen, aussen_time, multis);
+	/* surplus includes the own charging: once charging, it holds down to SOYO_HOLD_TH instead of 200 W */
+	int charge_mode = surplus > PCC_SURPLUS_TH || (soyo_chg_prev && surplus > SOYO_HOLD_TH);
 
 	for (int b = 0; b < NBANK; b++) {
 		const char *s = BANKS[b].service, *bn = BANKS[b].name;
@@ -753,9 +766,9 @@ static void calc(void)
 				snprintf(why[p], 96, "%s:FORCE_CHARGE(%.1f%%)", bn, soc[b]);
 			} else if (stale)
 				snprintf(why[p], 96, "STALE");
-			else if (surplus > PCC_SURPLUS_TH && block)
+			else if (charge_mode && block)
 				snprintf(why[p], 96, "%s:LADESPERRE(peak %dh)", bn, ls.peak_h);
-			else if (surplus > PCC_SURPLUS_TH) {
+			else if (charge_mode) {
 				snprintf(why[p], 96, "%s:PV_SURPLUS", bn);
 				if (soc[b] < 100.0) {
 					charge[p] = 1;
@@ -775,12 +788,19 @@ static void calc(void)
 	if (n_dis) {
 		int night = have_pv && pv < NIGHT_PV_TH, w;
 		char rule[64];
-		if (pcc < PCC_IMPORT_TH) {
-			w = (int)(-pcc * KP) + (night ? B_NIGHT : 0);
+		/* deficit = what the Multis already give (minus what of it goes into the Sofar battery) + the import still
+		   left (0.18; old: -KP * pcc, which dropped back to IDLE as soon as the own discharge covered the import) */
+		double deficit = own_discharge - (bat1 > 0 ? bat1 : 0.0) - KP * (pcc - SOYO_TARGET);
+		if (pcc < PCC_IMPORT_TH || (soyo_prop_prev && deficit > SOYO_HOLD_TH)) {
+			w = deficit > 0 ? (int)deficit : 0;   /* never turn a discharge into charging (Sofar TOU charge) */
+			if (night && w < B_NIGHT)
+				w = B_NIGHT;
 			if (w > W_MAX)
 				w = W_MAX;
 			strcpy(rule, "PROPORTIONAL");
+			soyo_prop_prev = 1;
 		} else {
+			soyo_prop_prev = 0;
 			w = night ? B_NIGHT : B_DAY_IDLE;
 			strcpy(rule, "IDLE");
 		}
@@ -793,8 +813,12 @@ static void calc(void)
 		alloc_discharge(w, discharge, rule, sp, why);
 	}
 	if (n_chg) {
-		alloc_charge(fmin((int)((surplus - PCC_SURPLUS_TH) * KP), (double)CHARGE_MAX_PHASE * n_chg), charge, n_chg, sp, why);
+		alloc_charge(fmin((int)(own_charge + KP * ((have_pcc ? pcc : 0.0) + bat1_eff - SOYO_TARGET)), (double)CHARGE_MAX_PHASE * n_chg),
+					 charge, n_chg, sp, why);
 	}
+	soyo_chg_prev = n_chg > 0;
+	if (!n_dis)
+		soyo_prop_prev = 0;
 
 	/* PI prototype. y = PCC + Sofar Bat1: Bat1 charging counts with BAT1_CHARGE_FACTOR (as the soyo surplus);
 	   a Bat1 discharge counts while the Multis charge (the Sofar must not feed them) and at night (the Multis take

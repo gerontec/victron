@@ -27,6 +27,11 @@ Differences, all on purpose:
 - charging from PV surplus (pcc > 200 W): KP * (pcc - 200) shared by the phases whose bank is below 100 %.
   Not soyo (that was the EBox charger fox2db); without it Hub4Mode 3 would never charge.
 - output: ESS external control (Hub4Mode 3), /Hub4/Lx/AcPowerSetpoint (- = out of the battery).
+- soyo optimised to PCC 0 W (0.16, user 2026-10-08, same in c/batmonitor.c 0.18): the own power of the Multis is
+  kept and only the new part is scaled with KP (a PCC held at 0 by the Sofar holds the setpoint, no 1 %/cycle growth):
+    charge     own charge + KP * (pcc + bat1_eff - SOYO_TARGET)       (old: KP * (surplus - 200 W) -> +200 W export)
+    discharge  own discharge - Bat1 charge - KP * (pcc - SOYO_TARGET)  (old: -KP * pcc, back to IDLE once covered)
+  both hold down to SOYO_HOLD_TH; entry thresholds unchanged (+200 W surplus, -100 W import).
 - charge block (0.15, user 2026-10-08): fox2db_logic.h Ladesperre with the clear-sky DC model (Meinel, NOAA sun
   position, strings fitted per field, tree horizon, temperature derating from aussen/temp), 1:1. Summer only
   (LADESPERRE_MONTHS, ESP: May-Aug): on a forecast 20 kW day PV surplus charging waits for the peak window
@@ -54,7 +59,7 @@ import paho.mqtt.client as mqtt
 from dbus.mainloop.glib import DBusGMainLoop
 from gi.repository import GLib
 
-VERSION = '0.15'
+VERSION = '0.16'
 LIVE = os.environ.get('BATMONITOR_LIVE') == '1'
 MQTT_HOST = os.environ.get('BATMONITOR_MQTT_HOST', '192.168.178.218')
 INVERTER_TOPIC = 'inverter/power_grid_exchange/json'
@@ -76,6 +81,8 @@ B_DAY_IDLE = 10 * POWER_SCALE      # W
 W_MAX = 900 * POWER_SCALE          # W, total (ESP: Soyo maximum)
 PCC_IMPORT_TH = -100.0     # W
 PCC_SURPLUS_TH = 200.0     # W
+SOYO_TARGET = 0.0          # W at the PCC (0.16: was +200 W export in effect)
+SOYO_HOLD_TH = 20.0        # W: charging / proportional discharging continues while surplus / deficit is above
 CHARGING_TH = 200.0        # W, ESP: in_ebox > 200
 NIGHT_PV_TH = 100.0        # W, ESP: fox::NIGHT_DC_TH
 WP_CAP = 500 * POWER_SCALE  # W, ESP: soyo_wp_cap, Oct-Apr with the heat pump running
@@ -200,6 +207,7 @@ class BatMonitor:
 		self.setpoints = {p: 0 for c in BANKS.values() for p in c['phases']}
 		self.setpoint_time = 0.0
 		self.hub4mode_set = False
+		self.soyo_chg_prev = self.soyo_prop_prev = False
 
 	# MQTT thread: only plain assignments
 	def on_inverter(self, d):
@@ -255,16 +263,20 @@ class BatMonitor:
 		# the meter already includes our own charging: use the measured AC-in, not the setpoints (the AC-in
 		# current limit caps the real power, setpoints would wind up to CHARGE_MAX_PHASE)
 		vb = self.vebus()
-		own_charge = 0.0
+		own_charge = own_discharge = 0.0
 		for p in self.setpoints:
 			a = self.get(vb, '/Ac/ActiveIn/%s/P' % p) if vb else None
 			if a is not None and a > 0:
 				own_charge += a
+			elif a is not None:
+				own_discharge -= a
 		# the Sofar holds its PCC at 0 with its own battery Bat1: a Bat1 discharge is no surplus (as dbus-pcc-grid,
 		# fox2db: discharge counts fully, charging with BAT1_CHARGE_FACTOR)
 		bat1_eff = self.bat1 if self.bat1 < 0 else self.bat1 * BAT1_CHARGE_FACTOR
 		surplus = (self.pcc or 0.0) + bat1_eff + own_charge
 		ladesperre = self.ladesperre(vb, stale)
+		# surplus includes the own charging: once charging, it holds down to SOYO_HOLD_TH instead of 200 W
+		charge_mode = surplus > PCC_SURPLUS_TH or (self.soyo_chg_prev and surplus > SOYO_HOLD_TH)
 		for bank, cfg in BANKS.items():
 			s = cfg['service']
 			soc = self.get(s, '/Soc') if self.get(s, '/Connected') in (1, 1.0) else None
@@ -288,9 +300,9 @@ class BatMonitor:
 					why[p] = '%s:FORCE_CHARGE(%.1f%%)' % (bank, soc)
 				elif stale:
 					why[p] = 'STALE'
-				elif surplus > PCC_SURPLUS_TH and ladesperre:
+				elif charge_mode and ladesperre:
 					why[p] = '%s:LADESPERRE(peak %sh)' % (bank, self.ls_info.get('peak_h'))
-				elif surplus > PCC_SURPLUS_TH:
+				elif charge_mode:
 					why[p] = '%s:PV_SURPLUS' % bank
 					if soc < 100.0:
 						charge.append(p)
@@ -303,12 +315,19 @@ class BatMonitor:
 		self.update_lead()
 		if discharge:
 			night = self.pv is not None and self.pv < NIGHT_PV_TH
-			if self.pcc < PCC_IMPORT_TH:
-				w = min(int(-self.pcc * KP) + (B_NIGHT if night else 0), W_MAX)
+			# what the Multis already give (minus what of it goes into the Sofar battery) + the import still left
+			deficit = own_discharge - max(self.bat1, 0.0) - KP * (self.pcc - SOYO_TARGET)
+			if self.pcc < PCC_IMPORT_TH or (self.soyo_prop_prev and deficit > SOYO_HOLD_TH):
+				w = max(int(deficit), 0)          # never turn a discharge into charging (Sofar TOU charge)
+				if night:
+					w = max(w, B_NIGHT)
+				w = min(w, W_MAX)
 				rule = 'PROPORTIONAL'
+				self.soyo_prop_prev = True
 			else:
 				w = B_NIGHT if night else B_DAY_IDLE
 				rule = 'IDLE'
+				self.soyo_prop_prev = False
 			rule += '|NIGHT' if night else ''
 			if month not in SUMMER_MONTHS and wp_running and w > WP_CAP:
 				w = WP_CAP
@@ -322,7 +341,7 @@ class BatMonitor:
 		if charge:
 			# the meter sees our own charging: surplus = pcc + charging of the last cycle (else it toggles every minute)
 			# fill the banks in CHARGE_PRIORITY order: each phase of a bank up to CHARGE_MAX_PHASE, the rest to the next bank
-			rest = min(int((surplus - PCC_SURPLUS_TH) * KP), CHARGE_MAX_PHASE * len(charge))
+			rest = min(int(own_charge + KP * ((self.pcc or 0.0) + bat1_eff - SOYO_TARGET)), CHARGE_MAX_PHASE * len(charge))
 			# SoC balancing: the stack behind gets priority when the other is more than SOC_BALANCE_ON ahead
 			order = CHARGE_PRIORITY
 			if self.lead:
@@ -340,6 +359,9 @@ class BatMonitor:
 			if rest > 0:
 				for p in charge:
 					sp[p] += int(min(rest / len(charge), CHARGE_MAX_PHASE - sp[p]))
+		self.soyo_chg_prev = bool(charge)
+		if not discharge:
+			self.soyo_prop_prev = False
 		fc = self.full_forecast()
 		eta = '  '.join('%s full %s' % (b, datetime.fromtimestamp(f['full_at'], TIMEZONE).strftime('%H:%M') if f['full_at'] else '-')
 						for b, f in fc.items())
