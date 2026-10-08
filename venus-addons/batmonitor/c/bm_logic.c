@@ -24,6 +24,7 @@
 #define WP_MAX_AGE 150.0        /* s, older: no Z2 correction, WP_CAP as before */
 #define WP_ON_TH 300.0          /* W: heat pump counts as running (no night floor) */
 #define SEASON_MAX_AGE (2 * 86400)   /* s: older batmonitor/season -> month rule */
+#define FC_MAX_AGE (3 * 3600)        /* s: older batmonitor/forecast is ignored */
 /* batmonitor */
 #define BAT1_CHARGE_FACTOR 0.5
 /* charge block, 1:1 from waveshare/fox2db_logic.h (fox2db v2.9) and sofar_waveshare.yaml */
@@ -83,6 +84,7 @@ const struct bm_param BM_PARAMS[] = {
 	{"SOC_BALANCE_OFF",       P(soc_balance_off),           1,       0,       50,      "%", "balancing ends below"},
 	{"SOYO_TARGET",           P(soyo_target),               0,       -500,    500,     "W", "PCC target (+ = export)"},
 	{"B_NIGHT",               P(b_night),                   936,     0,       4000,    "W", "night base discharge (no PV, heat pump off in winter)"},
+	{"FC_HYST",               P(fc_hyst),                   2,       0,       20,      "%", "forecast rule back on above target + this"},
 };
 const int BM_NPARAMS = sizeof(BM_PARAMS) / sizeof(BM_PARAMS[0]);
 
@@ -103,6 +105,7 @@ void bm_cfg_default(struct bm_cfg *cfg)
 {
 	memset(cfg, 0, sizeof(*cfg));
 	cfg->ladesperre = 1;
+	cfg->forecast = 1;
 	for (int i = 0; i < BM_NPARAMS; i++)
 		*bm_param_ptr(cfg, i) = BM_PARAMS[i].def;
 }
@@ -355,6 +358,29 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 	int wp_fresh = in->wp_time > 0 && now - in->wp_time < WP_MAX_AGE;
 	int season_ok = in->season && in->t - in->season_ts < SEASON_MAX_AGE;
 	int season = season_ok ? in->season : (month >= SUMMER_FROM && month <= SUMMER_TO) ? BM_SUMMER : BM_WINTER;
+	out->season = season;
+	out->season_measured = season_ok;
+	/* forecast (0.24, readers/forecast.py): while both stacks are above the SoC that the next day's PV surplus will
+	   refill, they serve everything, the heat pump included, in any season (sell less, use more); below the target
+	   the season rules apply again, back on above target + FC_HYST */
+	{
+		double min_soc = 101;
+		for (int b = 0; b < NBANK; b++)
+			if (in->bms_ok[b] && in->soc[b] < min_soc)
+				min_soc = in->soc[b];
+		int fc_ok = cfg->forecast && in->fc_target >= 0 && in->fc_ts > 0 && in->t - in->fc_ts < FC_MAX_AGE && min_soc <= 100;
+		if (!fc_ok)
+			st->fc_active = 0;
+		else if (!st->fc_active && min_soc > in->fc_target + cfg->fc_hyst)
+			st->fc_active = 1;
+		else if (st->fc_active && min_soc < in->fc_target)
+			st->fc_active = 0;
+		out->fc_active = st->fc_active;
+		out->fc_target = fc_ok ? in->fc_target : -1;
+		out->fc_min_soc = min_soc;
+		if (st->fc_active)
+			season = BM_SUMMER;        /* serve the heat pump like in summer */
+	}
 	int winter = season != BM_SUMMER;          /* transition counts as winter for the WP_CAP fallback */
 	/* the heat pump power the batteries must NOT cover: all of it in winter, the part above 1900 W in the
 	   transition (0.22), none in summer */
@@ -472,6 +498,8 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 			strcat(rule, "|NIGHT");
 		if (wp_eff >= WP_ON_TH)
 			strcat(rule, season == BM_TRANSITION ? "|WP1900" : "|Z2");
+		if (st->fc_active)
+			strcat(rule, "|FC");
 		if (!wp_fresh && winter && wp_running && w > (int)cfg->wp_cap) {
 			w = (int)cfg->wp_cap;
 			strcat(rule, "|WP_CAP");
@@ -543,7 +571,5 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 	}
 	out->surplus = surplus;
 	out->wp_eff = wp_eff;
-	out->season = season;
-	out->season_measured = season_ok;
 	memcpy(st->setpoints, sp, sizeof(st->setpoints));
 }

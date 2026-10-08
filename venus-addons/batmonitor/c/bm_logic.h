@@ -27,12 +27,14 @@ extern const char *BM_PH[NPH];
 struct bm_cfg {
 	int ladesperre;          /* BATMONITOR_LADESPERRE (default on) */
 	int pi_armed;            /* BATMONITOR_PI=1: the PI replaces the soyo amounts */
+	int forecast;            /* BATMONITOR_FORECAST (default on): forecast target SoC may override the season */
 	/* tunable parameters, defaults and limits in BM_PARAMS (bm_logic.c), env BATMONITOR_<NAME> in batmonitor.c */
 	double w_max, discharge_max_phase, charge_max_phase, charger_cap_phase;
 	double wp_bat_max_transition, wp_cap;
 	double soc_min, soc_min_release, soc_force, soc_force_release, force_charge_w;
 	double soc_balance_on, soc_balance_off;
 	double soyo_target, b_night;
+	double fc_hyst;
 };
 
 /* parameter table: name (env BATMONITOR_<name>), default, allowed range, unit, meaning */
@@ -60,6 +62,8 @@ struct bm_in {
 	double wp, wp_time;                                     /* SDM72D heat pump W */
 	int season;                                             /* batmonitor/season: 0 none, BM_SUMMER/WINTER/TRANSITION */
 	time_t season_ts;                                       /* its "ts" (unix) */
+	double fc_target;                                       /* batmonitor/forecast target_soc %, < 0 = none */
+	time_t fc_ts;
 	int ac_ok[NPH];
 	double ac_in[NPH];                                      /* vebus /Ac/ActiveIn/Lx/P, + = the Multi takes */
 	int bms_ok[NBANK];                                      /* Connected == 1 and /Soc valid */
@@ -78,6 +82,7 @@ struct bm_state {
 	int lead;                                    /* bank more than SOC_BALANCE_ON ahead, -1 = none */
 	int soyo_chg_prev, soyo_prop_prev;
 	int ls_yday, peak_today, ls_latched, badweather_today;
+	int fc_active;                               /* forecast: stacks above the target SoC -> serve everything */
 	double pi_e_prev, pi_t_prev;
 	int setpoints[NPH];                          /* sent last cycle (the PI's u_applied) */
 };
@@ -87,6 +92,8 @@ struct bm_out {
 	char why[NPH][WHY_LEN];
 	double surplus, wp_eff;
 	int season, season_measured;                 /* BM_SUMMER/WINTER/TRANSITION used; 1 = from batmonitor/season */
+	int fc_active;
+	double fc_target, fc_min_soc;
 	struct bm_ls ls;
 	struct bm_pi pi;
 	int lead_event;                              /* 1 = a bank took the lead, -1 = back within SOC_BALANCE_OFF */

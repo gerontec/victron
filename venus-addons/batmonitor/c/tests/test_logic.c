@@ -26,6 +26,8 @@ struct plant {
 	double soc[NBANK];
 	int wp_fresh, r290_hz, stale_inv;
 	int season, season_age_h;      /* batmonitor/season: 0 none, BM_SUMMER, BM_WINTER; age of its ts */
+	double fc_target;              /* batmonitor/forecast target SoC, 0 = none */
+	int fc_age_h;
 	double aussen;
 };
 
@@ -89,6 +91,8 @@ static void simulate(struct run *r, const struct plant *pl, time_t t0, int n)
 		in->wp_time = pl->wp_fresh ? now : 0;
 		in->season = pl->season;
 		in->season_ts = in->t - pl->season_age_h * 3600;
+		in->fc_target = pl->fc_target > 0 ? pl->fc_target : -1;
+		in->fc_ts = in->t - pl->fc_age_h * 3600;
 		for (int p = 0; p < NPH; p++) {
 			in->ac_ok[p] = 1;
 			in->ac_in[p] = r->ac[p];
@@ -394,6 +398,32 @@ static void test_param_override(void)
 	CHECK(sum_sp(&r) >= -3000 && sum_sp(&r) <= -2990, "W_MAX override 3000 W, sp sum %d", sum_sp(&r));
 }
 
+static void test_forecast_overrides_winter(void)
+{
+	struct run r;
+	struct plant pl = BASE(.house = 500, .wp = 4000, .r290_hz = 60, .season = BM_WINTER, .season_age_h = 1,
+						   .fc_target = 20, .soc = {50, 50});
+	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 60);       /* sunny day ahead: stacks may run down to 20 % */
+	print_state("winter, forecast target 20 %, SoC 50", &r);
+	CHECK(r.out.fc_active && rule_has(&r, "|FC"), "forecast rule active");
+	CHECK(abs(sum_sp(&r) + 4500) <= 60, "house + heat pump from the batteries, sp sum %d", sum_sp(&r));
+
+	pl.soc[0] = pl.soc[1] = 18;                                  /* below the target: tariff rules again */
+	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 60);
+	print_state("winter, forecast target 20 %, SoC 18", &r);
+	CHECK(!r.out.fc_active && rule_has(&r, "|Z2"), "below target: Z2 again");
+	CHECK(abs(sum_sp(&r) + 500) <= 60, "only the house, sp sum %d", sum_sp(&r));
+
+	pl.soc[0] = pl.soc[1] = 21;                                  /* inside the hysteresis: not back on from cold */
+	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 10);
+	CHECK(!r.out.fc_active, "21 %% < target 20 + 2: rule stays off");
+
+	pl.soc[0] = pl.soc[1] = 50;
+	pl.fc_age_h = 4;                                             /* stale forecast */
+	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 30);
+	CHECK(!r.out.fc_active && rule_has(&r, "|Z2"), "stale forecast ignored");
+}
+
 static void test_pi_shadow_not_armed(void)
 {
 	struct run r;
@@ -428,6 +458,7 @@ int main(void)
 	test_season_stale_falls_back_to_months();
 	test_transition_wp_1900();
 	test_param_override();
+	test_forecast_overrides_winter();
 	test_pi_shadow_not_armed();
 	printf("%d checks, %d failed\n", checks, fails);
 	return fails ? 1 : 0;

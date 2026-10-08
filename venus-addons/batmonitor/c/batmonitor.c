@@ -43,12 +43,13 @@
 #include <unistd.h>
 #include "bm_logic.h"
 
-#define VERSION "0.23-c"
+#define VERSION "0.24-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
 #define WP_TOPIC "em0/power"          /* SDM72D, heat pump electrical power in W (sdm72d.py on .218, once a minute) */
 #define SEASON_TOPIC "batmonitor/season"   /* season.py on .218, hourly: {"mode": "summer"|"winter", ..., "ts"} */
+#define FORECAST_TOPIC "batmonitor/forecast"   /* forecast.py on .218, hourly: {"target_soc", ..., "ts"} */
 #define STATE_FILE_DEFAULT "/data/batmonitor/state.json"
 #define TZ_BERLIN "CET-1CEST,M3.5.0,M10.5.0/3"   /* Europe/Berlin without a zoneinfo file */
 #define SETPOINT_MAX_AGE 90.0
@@ -77,6 +78,7 @@ static struct {
 	double wp, wp_time;
 	int season;
 	double season_ts;
+	double fc_target, fc_ts;
 } mq;
 
 static double setpoint_time;
@@ -231,6 +233,7 @@ static void on_connect(struct mosquitto *m, void *ud, int rc)
 		mosquitto_subscribe(m, NULL, AUSSEN_TOPIC, 0);
 		mosquitto_subscribe(m, NULL, WP_TOPIC, 0);
 		mosquitto_subscribe(m, NULL, SEASON_TOPIC, 0);
+		mosquitto_subscribe(m, NULL, FORECAST_TOPIC, 0);
 	}
 }
 
@@ -287,6 +290,12 @@ static void on_message(struct mosquitto *m, void *ud, const struct mosquitto_mes
 			mq.inv_time = mono();
 			pthread_mutex_unlock(&mq_lock);
 		}
+	} else if (strcmp(msg->topic, FORECAST_TOPIC) == 0) {
+		pthread_mutex_lock(&mq_lock);
+		mq.fc_target = jnum(d, "target_soc", -1, NULL);
+		mq.fc_ts = jnum(d, "ts", 0, NULL);
+		pthread_mutex_unlock(&mq_lock);
+		LOG("forecast: %s", buf);
 	} else if (strcmp(msg->topic, SEASON_TOPIC) == 0) {
 		const cJSON *mo = cJSON_GetObjectItemCaseSensitive(d, "mode");
 		int season = cJSON_IsString(mo) ? (strcmp(mo->valuestring, "summer") == 0 ? BM_SUMMER
@@ -402,6 +411,10 @@ static void write_state(const int *sp, char why[][WHY_LEN], double surplus)
 	cJSON_AddStringToObject(js, "season", o_.season == BM_WINTER ? "winter" : o_.season == BM_TRANSITION ? "transition"
 							: "summer");
 	cJSON_AddStringToObject(js, "season_source", o_.season_measured ? "measured" : "months");
+	o = cJSON_AddObjectToObject(js, "forecast_rule");
+	cJSON_AddNumberToObject(o, "active", o_.fc_active);
+	cJSON_AddNumberToObject(o, "target_soc", o_.fc_target);
+	cJSON_AddNumberToObject(o, "min_soc", o_.fc_min_soc);
 	o = cJSON_AddObjectToObject(js, "pi");
 	cJSON_AddNumberToObject(o, "armed", cfg.pi_armed);
 	cJSON_AddNumberToObject(o, "y_w", round(o_.pi.y));
@@ -462,6 +475,8 @@ static void calc(void)
 	in.wp_time = mq.wp_time;
 	in.season = mq.season;
 	in.season_ts = (time_t)mq.season_ts;
+	in.fc_target = mq.fc_ts > 0 ? mq.fc_target : -1;
+	in.fc_ts = (time_t)mq.fc_ts;
 	pthread_mutex_unlock(&mq_lock);
 	const char *vb = vebus();
 	for (int p = 0; p < NPH; p++) {
@@ -574,6 +589,8 @@ int main(void)
 	cfg.ladesperre = !l || strcmp(l, "1") == 0;
 	const char *pe = getenv("BATMONITOR_PI");
 	cfg.pi_armed = pe && strcmp(pe, "1") == 0;
+	const char *fe = getenv("BATMONITOR_FORECAST");
+	cfg.forecast = !fe || strcmp(fe, "1") == 0;
 	bm_init(&st);
 	const char *sf = getenv("BATMONITOR_STATE_FILE");
 	if (sf && *sf)
