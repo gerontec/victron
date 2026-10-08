@@ -28,9 +28,7 @@ Differences, all on purpose:
   Not soyo (that was the EBox charger fox2db); without it Hub4Mode 3 would never charge.
 - output: ESS external control (Hub4Mode 3), /Hub4/Lx/AcPowerSetpoint (- = out of the battery).
 
-Site settings in /data/batmonitor/env (sourced by service/run, not in the repo):
-  BATMONITOR_MQTT_HOST=<house broker with the inverter and r290 topics>
-  BATMONITOR_LIVE=1          # without it: DRY RUN, logs only On exit (live) the setpoints go to 0
+DRY RUN by default (logs only). Live: BATMONITOR_LIVE=1 in /data/batmonitor/env (sourced by service/run). On exit (live) the setpoints go to 0
 and Hub4Mode back to 1 (normal ESS).
 """
 
@@ -50,7 +48,7 @@ from gi.repository import GLib
 
 VERSION = '0.3'
 LIVE = os.environ.get('BATMONITOR_LIVE') == '1'
-MQTT_HOST = os.environ.get('BATMONITOR_MQTT_HOST', '127.0.0.1')   # house broker: /data/batmonitor/env
+MQTT_HOST = os.environ.get('BATMONITOR_MQTT_HOST', '192.168.178.218')
 INVERTER_TOPIC = 'inverter/power_grid_exchange/json'
 R290_TOPIC = 'r290/heatpump/all'
 

@@ -49,7 +49,7 @@ from vedbus import VeDbusService  # noqa: E402
 
 VERSION = '1.2'
 DEVICE_INSTANCE = 30
-MQTT_HOST = os.environ.get('PCC_MQTT_HOST', '127.0.0.1')   # house broker: /data/dbus-pcc-grid/env
+MQTT_HOST = os.environ.get('PCC_MQTT_HOST', '192.168.178.218')
 MQTT_TOPIC = 'inverter/power_grid_exchange/json'
 STALE_SECONDS = 180
 PHASES = ('L1', 'L2', 'L3')

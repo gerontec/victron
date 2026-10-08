@@ -1,6 +1,6 @@
 #!/bin/sh
 exec 2>&1
-# site settings (BATMONITOR_MQTT_HOST, BATMONITOR_LIVE=1); without the file: local broker, dry run
+# BATMONITOR_LIVE=1 in /data/batmonitor/env switches it live; without the file: dry run
 [ -f /data/batmonitor/env ] && . /data/batmonitor/env
 export BATMONITOR_MQTT_HOST BATMONITOR_LIVE
 exec python3 /data/batmonitor/batmonitor.py

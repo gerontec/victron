@@ -1,6 +1,3 @@
 #!/bin/sh
 exec 2>&1
-# site settings (PCC_MQTT_HOST=<house broker>), not in the repo
-[ -f /data/dbus-pcc-grid/env ] && . /data/dbus-pcc-grid/env
-export PCC_MQTT_HOST
 exec python3 /data/dbus-pcc-grid/dbus-pcc-grid.py
