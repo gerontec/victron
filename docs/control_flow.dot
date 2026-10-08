@@ -1,0 +1,153 @@
+// Who controls the three-phase MultiPlus system, through which Venus D-Bus service, with which inputs.
+// State 2026-10-08 10:00. Render: dot -Tpdf control_flow.dot -o control_flow.pdf
+digraph victron_control {
+	graph [rankdir=TB, fontname="Helvetica", fontsize=11, nodesep=0.25, ranksep=0.55, newrank=true,
+	       label="Lenggries: external controllers -> Venus gateways -> VE.Bus (state 2026-10-08 10:00)\nsolid = active control path, dashed = read only / inactive",
+	       labelloc=t];
+	node  [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=9, fillcolor="#ffffff"];
+	edge  [fontname="Helvetica", fontsize=8];
+
+	// ── external sources ──────────────────────────────────────────────────────────────────
+	subgraph cluster_ext {
+		label="external controllers / sources"; style="rounded,filled"; fillcolor="#f4f6fb"; color="#8899bb";
+		sofar [fillcolor="#fff3d6", label=<<b>Sofar hybrid inverter</b><br/>regulates its own PCC to 0 with Bat1<br/>(house battery, max 2.5 kW)>];
+		pivot [label=<<b>pivot2db / Sofar reader</b> (Pi .218)<br/>MQTT <i>inverter/power_grid_exchange/json</i>, 1/min>];
+		mqtt218 [shape=cylinder, fillcolor="#eef7ee", label=<<b>MQTT broker 192.168.178.218</b>>];
+		ebox_hw [fillcolor="#fff3d6", label=<<b>EBox</b> 300 Ah Pytes 16S LFP<br/>console on ttyUSB23 (Prolific)>];
+		ebox_mqtt [label=<<b>ebox / ebox_mqtt.py</b> (Pi host cron, 30 s)<br/>publishes to .218 and 127.0.0.1>];
+		stackA [fillcolor="#fff3d6", label=<<b>Stack A</b> 300 Ah LFP<br/>CAN BMS>];
+		r290 [label=<<b>r290mb.py</b><br/>MQTT <i>r290/heatpump/all</i>>];
+		ats [fillcolor="#fde2e2", label=<<b>ATS</b> motorised changeover switch 3~<br/>grid -&gt; AC-in L1 / L2 / L3 of the 3 MP2>];
+		feedin [style="rounded,dashed", label=<<b>feedin.sh</b> (Pi host)<br/>inactive>];
+		batmon [style="rounded,dashed", label=<<b>batmonitor.py</b><br/>not installed (dry run only)>];
+		v2db [style="rounded,dashed", label=<<b>victron2db.py</b> (Pi host cron, 1/min)<br/>-&gt; wagodb.pv_victron>];
+	}
+
+	// ── Venus gateways ─────────────────────────────────────────────────────────────────────
+	subgraph cluster_venus {
+		label="Venus OS v3.81 (nspawn on Pi 4 .119): D-Bus gateways"; style="rounded,filled"; fillcolor="#eef4ff"; color="#5577aa";
+		mqtt_local [shape=cylinder, fillcolor="#eef7ee", label=<<b>flashmq</b> 127.0.0.1:1883>];
+
+		pccgrid [fillcolor="#dff0ff", label=<
+			<table border="0" cellspacing="0" cellpadding="1">
+			<tr><td align="left"><b>dbus-pcc-grid 1.2</b> -&gt; com.victronenergy.grid.pcc (inst 30)</td></tr>
+			<tr><td align="left">in: ActivePower_PCC_Total [kW, + export]</td></tr>
+			<tr><td align="left">in: Power_Bat1 [kW, + charge], SOC_Bat1 [%], PCC_substituted</td></tr>
+			<tr><td align="left">in: sofar/bat1_factor (default 0.5)</td></tr>
+			<tr><td align="left">in: vebus /Ac/ActiveIn/P (observer, 1/s, lag 5 s)</td></tr>
+			<tr><td align="left">out: /Ac/Power = -1000*(PCC + bat1_eff) + dAC-in</td></tr>
+			<tr><td align="left">out: /Ac/L1..L3/Power = /Ac/Power / 3, /Substituted</td></tr>
+			<tr><td align="left">out: /Settings/CGwacs/MaxChargePower (SOC1 gate)</td></tr>
+			<tr><td align="left">   max(5000 W, export + AC-in) until SOC_Bat1 &gt; 99 % today, then -1</td></tr>
+			</table>>];
+
+		eboxbat [fillcolor="#dff0ff", label=<
+			<table border="0" cellspacing="0" cellpadding="1">
+			<tr><td align="left"><b>dbus-ebox-battery 1.2</b> -&gt; com.victronenergy.battery.ebox (inst 513)</td></tr>
+			<tr><td align="left">in: ebox/pwr soc, power_w, current_a, voltage_v</td></tr>
+			<tr><td align="left">in: vhigh_mv, vlow_mv, volt_st, packs; stale 120 s -&gt; exit</td></tr>
+			<tr><td align="left">out: /Soc, /Dc/0/Voltage|Current|Power, /System/Max|MinCellVoltage</td></tr>
+			<tr><td align="left">out: /Info/MaxChargeVoltage 56.6 V (CVL)</td></tr>
+			<tr><td align="left">out: /Info/MaxChargeCurrent 586 A, 10 A at cell 3.60 V, 0 at 3.65 V / volt_st High</td></tr>
+			<tr><td align="left">out: /Info/MaxDischargeCurrent 586 A, 0 below SoC 5 % until 8 %</td></tr>
+			<tr><td align="left">out: /Info/ChargeRequest (SoC &lt; 5 %, 11-13 h only)</td></tr>
+			<tr><td align="left">out: /Io/AllowToCharge|Discharge, /Alarms/HighVoltage|LowSoc</td></tr>
+			<tr><td align="left">(capacity still 600 Ah, real 300 Ah)</td></tr>
+			</table>>];
+
+		canbms [fillcolor="#f0f0f0", label=<
+			<table border="0" cellspacing="0" cellpadding="1">
+			<tr><td align="left"><b>can-bus-bms</b> (Victron, closed) -&gt; battery.socketcan_can0 (inst 512)</td></tr>
+			<tr><td align="left">can0 MCP2515, 500 kbit/s, profile 3</td></tr>
+			<tr><td align="left">0x351 CVL 57.6 V, CCL 100 A, DCL 200 A, low 48.0 V</td></tr>
+			<tr><td align="left">0x355 SoC/SoH, 0x356 U/I/T, 0x35A alarms, 0x35E name</td></tr>
+			<tr><td align="left">0x370-0x379 cell min/max, ids, modules</td></tr>
+			<tr><td align="left"><b>display only: not the active BMS</b></td></tr>
+			</table>>];
+
+		settings [fillcolor="#fff8e0", label=<
+			<table border="0" cellspacing="0" cellpadding="1">
+			<tr><td align="left"><b>localsettings</b> com.victronenergy.settings</td></tr>
+			<tr><td align="left">CGwacs/Hub4Mode 1 (optimized), AcPowerSetPoint 50 W</td></tr>
+			<tr><td align="left">CGwacs/BatteryLife/State 2, MinimumSocLimit 10 %</td></tr>
+			<tr><td align="left">CGwacs/MaxChargePower (from dbus-pcc-grid)</td></tr>
+			<tr><td align="left">CGwacs/MaxDischargePower -1, MaxFeedInPower -1</td></tr>
+			<tr><td align="left">SystemSetup/BatteryService battery/513, BmsInstance 513</td></tr>
+			<tr><td align="left">SystemSetup/MaxChargeCurrent -1, MaxChargeVoltage 0</td></tr>
+			<tr><td align="left">Services/Bol 1 (DVCC on), Shared voltage/temp/current sense 1</td></tr>
+			</table>>];
+
+		systemcalc [fillcolor="#e6e0ff", label=<
+			<table border="0" cellspacing="0" cellpadding="1">
+			<tr><td align="left"><b>dbus-systemcalc-py</b> (DVCC, com.victronenergy.system)</td></tr>
+			<tr><td align="left">active BMS = battery.ebox (513)</td></tr>
+			<tr><td align="left">-&gt; vebus: CVL 56.6 V, CCL, DCL, SoC (VebusSoc), voltage sense</td></tr>
+			<tr><td align="left">/Dvcc/Alarms/MultipleBatteries 1</td></tr>
+			</table>>];
+
+		hub4 [fillcolor="#e6e0ff", label=<
+			<table border="0" cellspacing="0" cellpadding="1">
+			<tr><td align="left"><b>hub4control</b> (ESS, Victron closed)</td></tr>
+			<tr><td align="left">in: grid.pcc /Ac/Power, settings, battery SoC/limits</td></tr>
+			<tr><td align="left">out: vebus /Hub4/L1..L3/AcPowerSetpoint, MaxFeedInPower</td></tr>
+			<tr><td align="left">out: /Hub4/DisableCharge, /Hub4/DisableFeedIn</td></tr>
+			</table>>];
+
+		mk2dbus [fillcolor="#e6e0ff", label=<
+			<table border="0" cellspacing="0" cellpadding="1">
+			<tr><td align="left"><b>mk2-dbus</b> com.victronenergy.vebus.ttyUSB2 (Victron, closed)</td></tr>
+			<tr><td align="left">/Hub4/AssistantId 5 (ESS), /Mode 3, /State, /Soc</td></tr>
+			<tr><td align="left">/Ac/ActiveIn/P, /Dc/0/*, /Alarms/*, /Leds/*</td></tr>
+			<tr><td align="left">/Interfaces/Mk2/Tunnel (mk2vsc backup/restore)</td></tr>
+			</table>>];
+	}
+
+	// ── VE.Bus ─────────────────────────────────────────────────────────────────────────────
+	subgraph cluster_vebus {
+		label="VE.Bus three-phase (MK3-USB HQ1722KX766)"; style="rounded,filled"; fillcolor="#f2fbf2"; color="#55aa55";
+		mk3 [label=<<b>MK3-USB</b>>];
+		dev0 [fillcolor="#dfffdf", label=<<b>dev0 = L1</b> HQ2606P4NCH (master)<br/>ESS 1077 B: dyn. cut-off 52.0/50.0/49.2/48.0 V<br/>battery monitor off>];
+		dev1 [fillcolor="#dfffdf", label=<<b>dev1 = L2</b> HQ2606Y2Y4U (middle, wall)<br/>ESS 645 B, sustain off, AES on<br/>battery monitor off>];
+		dev2 [fillcolor="#dfffdf", label=<<b>dev2 = L3</b> HQ2605CWUWH<br/>ESS 645 B<br/>battery monitor off>];
+	}
+	grid [shape=house, fillcolor="#ffffff", label="grid / house\n(behind Sofar PCC)"];
+
+	// ── data flow ──────────────────────────────────────────────────────────────────────────
+	sofar -> pivot [label="Modbus: PCC, Bat1, SOC1, PV1/PV2"];
+	pivot -> mqtt218 [label="inverter/power_grid_exchange/json"];
+	r290 -> mqtt218 [label="comp_freq_actual", style=dashed];
+	ebox_hw -> ebox_mqtt [label="`ebox pwr` 115200"];
+	ebox_mqtt -> mqtt_local [label="ebox/pwr"];
+	ebox_mqtt -> mqtt218 [label="ebox/pwr", style=dashed];
+	mqtt218 -> pccgrid [label="PCC, Bat1, SOC1\nsofar/bat1_factor"];
+	mqtt218 -> batmon [style=dashed];
+	mqtt_local -> eboxbat [label="ebox/pwr"];
+	stackA -> canbms [label="CAN 500 kbit/s"];
+
+	pccgrid -> hub4 [label="grid meter /Ac/Power"];
+	pccgrid -> settings [label="MaxChargePower"];
+	mk2dbus -> pccgrid [style=dashed, label="/Ac/ActiveIn/P"];
+	eboxbat -> systemcalc [label="SoC, CVL, CCL, DCL,\nAllowTo*, ChargeRequest"];
+	eboxbat -> hub4 [label="ChargeRequest"];
+	canbms -> systemcalc [style=dashed, label="not selected"];
+	settings -> systemcalc;
+	settings -> hub4;
+	systemcalc -> mk2dbus [label="DVCC limits, SoC"];
+	hub4 -> mk2dbus [label="AcPowerSetpoint L1..L3"];
+	feedin -> settings [style=dashed, label="Hub4Mode 3"];
+	feedin -> mk2dbus [style=dashed, label="setpoints"];
+	batmon -> mk2dbus [style=dashed, label="Hub4Mode 3 setpoints"];
+	mk2dbus -> v2db [style=dashed];
+
+	mk2dbus -> mk3 [dir=both, label="VE.Bus"];
+	mk3 -> dev0 [dir=both, label="MK3 only at L1"];
+	dev0 -> dev1 [dir=both, color="#4477cc", style=dashed, label="VE.Bus"]; dev1 -> dev2 [dir=both, color="#4477cc", style=dashed, label="VE.Bus"];
+	ats -> dev0 [color="#cc4444", label="AC-in L1"];
+	ats -> dev1 [color="#cc4444", label="AC-in L2"];
+	ats -> dev2 [color="#cc4444", label="AC-in L3"];
+	grid -> ats [color="#cc4444"];
+	ebox_hw -> dev0 [color="#996600", penwidth=2, label="DC"];
+	ebox_hw -> dev2 [color="#996600", penwidth=2, label="DC"];
+	stackA -> dev1 [color="#996600", penwidth=2, label="DC"];
+	sofar -> grid [dir=both, color="#cc4444", label="PCC"];
+}

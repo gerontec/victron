@@ -10,7 +10,7 @@ Template, 1:1: the soyo calculation of the Waveshare ESP32 (gerontec/sofar waves
   G2      EBox charger relay state != 0                                             -> no counterpart here
   G3      0 <= SoC < SOC_MIN                                                        -> w = 0 (ESP: 9 %)
   G4      bank charging, BMS power > 200 W                                          -> w = 0 (ESP: ebox/pwr)
-  G5      pcc > 200 W (PV surplus)                                                  -> w = 0
+  G5      pcc > 200 W (PV surplus; here pcc + own charging of the last cycle)        -> w = 0
   import  pcc < -100 W:   w = min(int(-pcc * 1.01) + (night ? 468 : 0), 900)
   else    w = night ? 468 : 10
   (468, 10, 900 and the 500 W cap below are doubled here, POWER_SCALE)
@@ -21,7 +21,7 @@ Template, 1:1: the soyo calculation of the Waveshare ESP32 (gerontec/sofar waves
 
 Differences, all on purpose:
 - per bank (BANKS): the gates are evaluated with each bank's BMS SoC/power; w is shared equally by the
-  phases whose bank passed them. Default: stack A (can-bus-bms, can0) -> L2, EBox -> L1, L3.
+  phases whose bank passed them. Default: Stack1 MUST (can-bus-bms, can0) -> L2, Stack2 Pytes (EBox) -> L1, L3.
 - SOC_MIN 5 % (user 2026-10-08), release at 7 % (fox2db DD_CHARGE_TARGET).
 - forced charge (user 2026-10-08): bank SoC < 3 % -> FORCE_CHARGE_W per phase from the grid until 5 %.
 - charging from PV surplus (pcc > 200 W): KP * (pcc - 200) shared by the phases whose bank is below 100 %.
@@ -46,15 +46,15 @@ import paho.mqtt.client as mqtt
 from dbus.mainloop.glib import DBusGMainLoop
 from gi.repository import GLib
 
-VERSION = '0.3'
+VERSION = '0.8'
 LIVE = os.environ.get('BATMONITOR_LIVE') == '1'
 MQTT_HOST = os.environ.get('BATMONITOR_MQTT_HOST', '192.168.178.218')
 INVERTER_TOPIC = 'inverter/power_grid_exchange/json'
 R290_TOPIC = 'r290/heatpump/all'
 
 BANKS = {
-	'A':    {'service': 'com.victronenergy.battery.socketcan_can0', 'phases': ('L2',)},
-	'EBOX': {'service': 'com.victronenergy.battery.ebox',           'phases': ('L1', 'L3')},
+	'STACK1_MUST':  {'service': 'com.victronenergy.battery.socketcan_can0', 'phases': ('L2',)},
+	'STACK2_PYTES': {'service': 'com.victronenergy.battery.ebox',           'phases': ('L1', 'L3')},
 }
 
 # soyo, 1:1 from sofar_waveshare.yaml; the power values doubled (POWER_SCALE) for the house base load of
@@ -80,6 +80,10 @@ SOC_FORCE = 3.0            # %
 SOC_FORCE_RELEASE = 5.0    # %
 FORCE_CHARGE_W = 500       # W per phase
 CHARGE_MAX_PHASE = 4000    # W per phase, PV surplus charging
+CHARGE_PRIORITY = ('STACK1_MUST', 'STACK2_PYTES')   # PV surplus fills the banks in this order (user 2026-10-08):
+                                                    # Stack1 has one 70 A charger (~4.3 h for 300 Ah), Stack2 two
+                                                    # (140 A, ~2.1 h); Stack1 first, and Stack2 is charged gentler
+BAT1_CHARGE_FACTOR = 0.5  # share of the Sofar Bat1 charging that counts as surplus (fox2db default)
 SEND_SECONDS = 10
 TIMEZONE = ZoneInfo('Europe/Berlin')
 
@@ -90,6 +94,7 @@ class BatMonitor:
 	def __init__(self):
 		self.bus = dbus.SystemBus()
 		self.pcc = self.pv = None
+		self.bat1 = 0.0
 		self.inv_time = 0.0
 		self.r290_hz = 0
 		self.r290_time = 0.0
@@ -102,6 +107,7 @@ class BatMonitor:
 	# MQTT thread: only plain assignments
 	def on_inverter(self, d):
 		self.pcc = d.get('ActivePower_PCC_Total', 0) * 1000.0
+		self.bat1 = (d.get('Power_Bat1') or 0) * 1000.0
 		self.pv = (d.get('Power_PV1', 0) + d.get('Power_PV2', 0)) * 1000.0
 		self.inv_time = time.monotonic()
 
@@ -122,7 +128,8 @@ class BatMonitor:
 		if not LIVE:
 			return
 		try:
-			self.bus.get_object(service, path, introspect=False).SetValue(value, dbus_interface='com.victronenergy.BusItem')
+			v = dbus.Int32(value, variant_level=1) if isinstance(value, int) else dbus.Double(value, variant_level=1)
+			self.bus.get_object(service, path, introspect=False).SetValue(v, dbus_interface='com.victronenergy.BusItem')
 		except dbus.exceptions.DBusException as e:
 			log.error('SetValue %s %s: %s', service, path, e)
 
@@ -140,6 +147,18 @@ class BatMonitor:
 		wp_running = self.r290_time and now - self.r290_time < STALE_SECONDS and self.r290_hz > 0
 		sp, why = {}, {}
 		discharge, charge = [], []
+		# the meter already includes our own charging: use the measured AC-in, not the setpoints (the AC-in
+		# current limit caps the real power, setpoints would wind up to CHARGE_MAX_PHASE)
+		vb = self.vebus()
+		own_charge = 0.0
+		for p in self.setpoints:
+			a = self.get(vb, '/Ac/ActiveIn/%s/P' % p) if vb else None
+			if a is not None and a > 0:
+				own_charge += a
+		# the Sofar holds its PCC at 0 with its own battery Bat1: a Bat1 discharge is no surplus (as dbus-pcc-grid,
+		# fox2db: discharge counts fully, charging with BAT1_CHARGE_FACTOR)
+		bat1_eff = self.bat1 if self.bat1 < 0 else self.bat1 * BAT1_CHARGE_FACTOR
+		surplus = (self.pcc or 0.0) + bat1_eff + own_charge
 		for bank, cfg in BANKS.items():
 			s = cfg['service']
 			soc = self.get(s, '/Soc') if self.get(s, '/Connected') in (1, 1.0) else None
@@ -162,7 +181,7 @@ class BatMonitor:
 					why[p] = '%s:FORCE_CHARGE(%.1f%%)' % (bank, soc)
 				elif stale:
 					why[p] = 'STALE'
-				elif self.pcc > PCC_SURPLUS_TH:
+				elif surplus > PCC_SURPLUS_TH:
 					why[p] = '%s:PV_SURPLUS' % bank
 					if soc < 100.0:
 						charge.append(p)
@@ -188,12 +207,20 @@ class BatMonitor:
 				sp[p] = -int(w / len(discharge))
 				why[p] = rule
 		if charge:
-			w = min(int((self.pcc - PCC_SURPLUS_TH) * KP), CHARGE_MAX_PHASE * len(charge))
-			for p in charge:
-				sp[p] = int(w / len(charge))
-				why[p] += '|CHARGE'
-		log.info('%spcc %s W pv %s W -> %s', '' if LIVE else 'DRY ',
-			None if self.pcc is None else round(self.pcc), None if self.pv is None else round(self.pv),
+			# the meter sees our own charging: surplus = pcc + charging of the last cycle (else it toggles every minute)
+			# fill the banks in CHARGE_PRIORITY order: each phase of a bank up to CHARGE_MAX_PHASE, the rest to the next bank
+			rest = min(int((surplus - PCC_SURPLUS_TH) * KP), CHARGE_MAX_PHASE * len(charge))
+			for bank in CHARGE_PRIORITY:
+				ph = [p for p in BANKS[bank]['phases'] if p in charge]
+				if not ph:
+					continue
+				share = min(rest, CHARGE_MAX_PHASE * len(ph))
+				for p in ph:
+					sp[p] = int(share / len(ph))
+					why[p] += '|CHARGE'
+				rest -= share
+		log.info('%spcc %s W bat1 %s W pv %s W -> %s', '' if LIVE else 'DRY ',
+			None if self.pcc is None else round(self.pcc), round(self.bat1), None if self.pv is None else round(self.pv),
 			'  '.join('%s %+d W (%s)' % (p, sp[p], why[p]) for p in sorted(sp)))
 		self.setpoints = sp
 		self.setpoint_time = now

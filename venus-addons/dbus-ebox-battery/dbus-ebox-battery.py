@@ -10,6 +10,9 @@ Input: MQTT topic ebox/pwr on the local Venus broker, written every 30 s by ebox
 Behaviour:
 - charge end as before: CVL = MAX_CHARGE_VOLTAGE (highest pack voltage seen at 100 % SoC, Jul-Oct 2026)
 - cell protection: charge current tapers when the highest cell reaches CELL_TAPER_MV, 0 at CELL_STOP_MV
+- pack "High" voltage event from the EBox console (volt_st, Volt.St column of `ebox pwr`): charging blocked
+  (CCL 0, AllowToCharge 0, HighVoltage alarm) until volt_st is back and the highest cell is below
+  HIGH_RELEASE_MV, so the charger does not pulse against the pack limit
 - low SoC below FORCE_CHARGE_SOC: discharge blocked until FORCE_CHARGE_RELEASE_SOC; forced charge from the grid
   (/Info/ChargeRequest = 1, hub4control goes to Recharge) only inside FORCE_CHARGE_WINDOW (local time),
   PV surplus charges at any time
@@ -33,26 +36,27 @@ from gi.repository import GLib
 sys.path.insert(1, '/opt/victronenergy/dbus-systemcalc-py/ext/velib_python')
 from vedbus import VeDbusService  # noqa: E402
 
-VERSION = '1.1'
+VERSION = '1.2'
 # can-bus-bms (Speicher A on can0) registers as battery instance 512; 513 keeps the MQTT topics
 # N/<portal>/battery/<instance>/... of the two batteries apart
 DEVICE_INSTANCE = 513
 MQTT_HOST = os.environ.get('EBOX_MQTT_HOST', '127.0.0.1')
 MQTT_TOPIC = 'ebox/pwr'
 
-# limits for both EBoxes together: 2 x 15 kWh Pytes, 6 modules of 100 Ah at 51.2 V (3 modules visible)
+# Stack2 = Pytes EBox, 15 kWh, 3 modules of 100 Ah at 51.2 V (all visible on the console); Stack1 (MUST) is separate
 MAX_CHARGE_VOLTAGE = 56.6       # V, highest pack voltage seen at 100 % SoC (Jul-Oct 2026)
 MAX_CHARGE_CURRENT = 586.0      # A, 30 kW / 51.2 V: 1C, allowed by Pytes
 MAX_DISCHARGE_CURRENT = 586.0   # A, 1C as for charging
 CELL_TAPER_MV = 3600            # highest cell: charge current down to TAPER_CURRENT
 CELL_STOP_MV = 3650             # highest cell: no charge current
 TAPER_CURRENT = 10.0            # A
+HIGH_RELEASE_MV = 3450          # highest cell: release the charge block after a "High" event
 FORCE_CHARGE_SOC = 5.0          # %
 FORCE_CHARGE_RELEASE_SOC = 8.0  # %
 FORCE_CHARGE_WINDOW = (11, 13)  # forced grid charge only from 11:00 to 13:00
 TIMEZONE = ZoneInfo('Europe/Berlin')
 STALE_SECONDS = 120
-CAPACITY_AH = 600               # 2 x 15 kWh at 51.2 V nominal
+CAPACITY_AH = 300               # 15 kWh at 51.2 V nominal (was 600 = both stacks, corrected 2026-10-08)
 
 log = logging.getLogger('dbus-ebox-battery')
 
@@ -63,6 +67,7 @@ class EboxBattery:
 		self.service = None
 		self.last_update = 0.0
 		self.low_soc = False
+		self.high_block = False
 
 	def register(self):
 		s = VeDbusService('com.victronenergy.battery.ebox', dbus.SystemBus(), register=False)
@@ -110,6 +115,15 @@ class EboxBattery:
 		vhigh = d.get('vhigh_mv')
 		vlow = d.get('vlow_mv')
 
+		volt_st = str(d.get('volt_st') or 'Normal')
+		if volt_st.lower().startswith('high'):
+			if not self.high_block:
+				log.warning('EBox reports %s voltage (cell max %s mV): charging blocked', volt_st, vhigh)
+			self.high_block = True
+		elif self.high_block and vhigh is not None and vhigh < HIGH_RELEASE_MV:
+			log.info('EBox voltage %s, cell max %s mV: charging released', volt_st, vhigh)
+			self.high_block = False
+
 		if soc < FORCE_CHARGE_SOC:
 			self.low_soc = True
 		elif soc >= FORCE_CHARGE_RELEASE_SOC:
@@ -120,7 +134,7 @@ class EboxBattery:
 		if self.service is None:
 			self.register()
 		s = self.service
-		ccl = self.charge_current(vhigh)
+		ccl = 0.0 if self.high_block else self.charge_current(vhigh)
 		dcl = 0.0 if self.low_soc else MAX_DISCHARGE_CURRENT
 		with s as ctx:
 			ctx['/Soc'] = round(soc, 1)
@@ -135,7 +149,7 @@ class EboxBattery:
 			ctx['/Info/ChargeRequest'] = 1 if force_charge else 0
 			ctx['/Io/AllowToCharge'] = 1 if ccl > 0 else 0
 			ctx['/Io/AllowToDischarge'] = 0 if self.low_soc else 1
-			ctx['/Alarms/HighVoltage'] = 1 if (vhigh or 0) >= CELL_STOP_MV else 0
+			ctx['/Alarms/HighVoltage'] = 2 if self.high_block else (1 if (vhigh or 0) >= CELL_STOP_MV else 0)
 			ctx['/Alarms/LowSoc'] = 1 if self.low_soc else 0
 		self.last_update = time.monotonic()
 
