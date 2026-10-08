@@ -23,7 +23,7 @@ digraph victron_control {
 		v2db [style="rounded,dashed", label=<<b>victron2db.py</b> (Pi host cron, 1/min)<br/>D-Bus values + batmonitor state.json (bm_*)>];
 		wagodb [shape=cylinder, style="filled,dashed", fillcolor="#eef7ee", label=<<b>wagodb.pv_victron</b> (.218)>];
 		fuxa [style="rounded,dashed", label=<<b>victron_api.php</b> (heissa web1)<br/>-&gt; FUXA venus.heissa.de, WebAPI 60 s>];
-		ncr [style="rounded,dashed", fillcolor="#f0f0f0", label=<<b>fallback: NCR venusncr</b> (x86, nspawn + qemu armv7)<br/>same Venus rootfs, batmonitor 0.16-c LIVE,<br/>dbus-ebox-battery, readers; idle without MK3/BMS/adapters<br/>takes over when MK3 + adapters are moved (never both)>];
+		ncr [style="rounded,dashed", fillcolor="#f0f0f0", label=<<b>fallback: NCR venusncr</b> (x86, nspawn + qemu armv7)<br/>same Venus rootfs, batmonitor 0.17-c LIVE,<br/>dbus-ebox-battery, readers; idle without MK3/BMS/adapters<br/>takes over when MK3 + adapters are moved (never both)>];
 	}
 
 	// ── Venus gateways ─────────────────────────────────────────────────────────────────────
@@ -33,7 +33,7 @@ digraph victron_control {
 
 		batmon [fillcolor="#ffe9d6", label=<
 			<table border="0" cellspacing="0" cellpadding="1">
-			<tr><td align="left"><b>batmonitor 0.16-c</b> (C port of batmonitor.py 0.15, 5 s cycle, 3 MB RSS)</td></tr>
+			<tr><td align="left"><b>batmonitor 0.17-c</b> (C port of batmonitor.py 0.15, 5 s cycle, 3 MB RSS)</td></tr>
 			<tr><td align="left">in: PCC, Bat1, PV, avg5 (4 s), r290 comp_freq, aussen/temp</td></tr>
 			<tr><td align="left">in: BMS SoC + DC power per stack, vebus /Ac/ActiveIn/L1..L3/P</td></tr>
 			<tr><td align="left">bank SoC &lt; 5 %: no discharge until 7 %; &lt; 3 %: grid charge 500 W/phase until 5 %</td></tr>
@@ -45,6 +45,7 @@ digraph victron_control {
 			<tr><td align="left">charge block May-Aug: clear-sky model (fox2db), wait for the 20 kW peak window</td></tr>
 			<tr><td align="left">   rest of the year: every watt of surplus charges at once</td></tr>
 			<tr><td align="left">full-charge forecast (5 min DC average), state.json</td></tr>
+			<tr><td align="left">PI prototype on PCC + Bat1 -&gt; 0 W: shadow only (pi_shadow.csv, tools/compare.py)</td></tr>
 			<tr><td align="left">out: Hub4Mode 3, /Hub4/L1..L3/AcPowerSetpoint, MaxFeedInPower</td></tr>
 			</table>>];
 

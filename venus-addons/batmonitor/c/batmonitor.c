@@ -7,6 +7,9 @@
  *   - the AC-in of the Multis is read once per cycle (Python: twice, for the surplus and for the charge block)
  *   - log line only when a rule changes or every LOG_SECONDS (else 17000 lines a day)
  *   - an inverter message with PCC null is ignored as a whole (Python: TypeError in the callback, same effect)
+ * PI prototype (not armed): BATMONITOR_PI=1 lets a velocity-form PI on y = PCC + Sofar Bat1 replace the soyo
+ * discharge/charge amounts (same gates, same phase split). Without it the PI runs in shadow: every cycle one line
+ * in PI_SHADOW_FILE with what soyo set and what the PI would set, to compare both before arming it.
  * Build inside Venus (gcc + dbus headers are in the image; libmosquitto/libcjson only as .so.1): see Makefile.
  */
 #define _GNU_SOURCE
@@ -23,7 +26,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define VERSION "0.16-c"
+#define VERSION "0.17-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
@@ -80,6 +83,15 @@
 #define NOCT 45.0
 #define T_STC 25.0
 
+/* PI prototype: u(k) = u_applied(k-1) + KP*(e(k) - e(k-1)) + KI*dt*e(k), e = y - PI_TARGET, clamped to the
+   phases that may charge / discharge (velocity form: no integrator to wind up, bumpless when switched on) */
+#define PI_TARGET 0.0           /* W at the PCC (user 2026-10-08: PCC near 0; soyo settles at ~+200 W export) */
+#define PI_DEADBAND 75.0        /* |e| below this counts as 0 (PCC resolution 10 W, 4 s samples) */
+#define PI_KP 0.2               /* on the change of e */
+#define PI_KI 0.06              /* 1/s: KI * 5 s = 0.3 of the error per cycle (plant gain ~1, one cycle delay) */
+#define PI_SHADOW_FILE "/data/batmonitor/pi_shadow.csv"
+#define PI_SHADOW_MAX 8000000L  /* bytes, then renamed to .1: CSV <= 16 MB, + multilog 4 x 1 MB = 20 MB (user) */
+
 #define NPH 3
 #define NBANK 2
 static const char *PH[NPH] = {"L1", "L2", "L3"};
@@ -102,7 +114,7 @@ static const struct arr ARRAYS[2] = {{60, 33, 19430}, {68, -12, 7690}};
 static const struct arr ARRAYS_EAST[2] = {{59, -29, 22036}, {67, 32, 2781}};
 static const double KT_MONTH[13] = {0, .331, .402, .563, .838, .909, .880, .840, .820, .760, .600, .350, .134};
 
-static int LIVE, LADESPERRE_ENABLE;
+static int LIVE, LADESPERRE_ENABLE, PI_ENABLE;
 static char STATE_FILE[256] = STATE_FILE_DEFAULT;   /* BATMONITOR_STATE_FILE: other path for a dry test run */
 static volatile sig_atomic_t stop_flag;
 
@@ -126,6 +138,9 @@ static int hist_n[NBANK];
 /* charge block day latches (ESP State: peak_today, ladesperre_latched, badweather_today) */
 static int ls_yday = -1, peak_today, ls_latched, badweather_today;
 static struct { int active, peak_h, win_end_h; double dc, ratio, ratio_now, noon_h; } ls;
+/* PI prototype */
+static double pi_e_prev, pi_t_prev;
+static struct { double y, e, applied, u, u_min, u_max; int sp[NPH]; } pi;
 
 static DBusConnection *bus;
 
@@ -567,12 +582,94 @@ static void write_state(const int *sp, char why[][96], double surplus)
 	cJSON_AddNumberToObject(o, "noon_h", round(ls.noon_h * 100) / 100);
 	cJSON_AddNumberToObject(o, "peak_today", peak_today);
 	cJSON_AddNumberToObject(o, "badweather_today", badweather_today);
+	o = cJSON_AddObjectToObject(st, "pi");
+	cJSON_AddNumberToObject(o, "armed", PI_ENABLE);
+	cJSON_AddNumberToObject(o, "y_w", round(pi.y));
+	cJSON_AddNumberToObject(o, "e_w", round(pi.e));
+	cJSON_AddNumberToObject(o, "applied_w", round(pi.applied));
+	cJSON_AddNumberToObject(o, "u_w", round(pi.u));
+	cJSON *ps = cJSON_AddObjectToObject(o, "sp");
+	for (int p = 0; p < NPH; p++)
+		cJSON_AddNumberToObject(ps, PH[p], pi.sp[p]);
 	char *s = cJSON_PrintUnformatted(st);
 	FILE *f = fopen(tmp, "w");
 	if (!f || fputs(s, f) < 0 || fclose(f) != 0 || rename(tmp, STATE_FILE) != 0)
 		LOGE("state file: write failed");
 	free(s);
 	cJSON_Delete(st);
+}
+
+/* discharge w (W, > 0) over the phases in dis[]; SoC balancing: the stack more than SOC_BALANCE_ON ahead
+   delivers alone, else equal shares */
+static void alloc_discharge(int w, const int *dis, const char *rule, int *sp, char why[][96])
+{
+	int give[NPH] = {0}, n_give = 0, lead_ph;
+	if (lead >= 0)
+		for (int i = 0; i < BANKS[lead].nph; i++)
+			if (dis[BANKS[lead].ph[i]]) {
+				give[BANKS[lead].ph[i]] = 1;
+				n_give++;
+			}
+	lead_ph = n_give > 0;
+	if (!lead_ph)
+		for (int p = 0; p < NPH; p++)
+			if (dis[p]) {
+				give[p] = 1;
+				n_give++;
+			}
+	for (int p = 0; p < NPH; p++) {
+		if (!dis[p])
+			continue;
+		sp[p] = give[p] ? -(int)((double)w / n_give) : 0;
+		snprintf(why[p], 96, "%s%s", rule, lead_ph && give[p] ? "|BALANCE" : lead_ph ? "|BALANCE_HOLD" : "");
+	}
+}
+
+/* charge rest (W) over the phases in chg[]: the banks in CHARGE_PRIORITY order up to their real charger capacity,
+   the stack behind first; what is left up to CHARGE_MAX_PHASE on all phases alike */
+static void alloc_charge(double rest, const int *chg, int n_chg, int *sp, char why[][96])
+{
+	int order[NBANK], k = 0;
+	for (int i = 0; i < NBANK; i++)
+		if (CHARGE_PRIORITY[i] != lead)
+			order[k++] = CHARGE_PRIORITY[i];
+	if (lead >= 0)
+		order[k++] = lead;
+	for (int i = 0; i < k; i++) {
+		int b = order[i], ph[NPH], n = 0;
+		for (int j = 0; j < BANKS[b].nph; j++)
+			if (chg[BANKS[b].ph[j]])
+				ph[n++] = BANKS[b].ph[j];
+		if (!n)
+			continue;
+		double share = fmin(rest, (double)CHARGER_CAP_PHASE * n);
+		for (int j = 0; j < n; j++) {
+			sp[ph[j]] = (int)(share / n);
+			strncat(why[ph[j]], "|CHARGE", 95 - strlen(why[ph[j]]));
+		}
+		rest -= share;
+	}
+	if (rest > 0)
+		for (int p = 0; p < NPH; p++)
+			if (chg[p])
+				sp[p] += (int)fmin(rest / n_chg, (double)(CHARGE_MAX_PHASE - sp[p]));
+}
+
+static void pi_shadow_log(double pcc, double bat1, double pv, const int *sp, char why[][96])
+{
+	FILE *f = fopen(PI_SHADOW_FILE, "a");
+	if (!f)
+		return;
+	if (ftell(f) == 0)
+		fputs("ts,pcc_w,bat1_w,pv_w,y_w,e_w,applied_w,pi_u_w,pi_min_w,pi_max_w,"
+			  "sp_l1,sp_l2,sp_l3,pi_l1,pi_l2,pi_l3,armed,rule_l1,rule_l2,rule_l3\n", f);
+	fprintf(f, "%ld,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%d,%d,%d,%d,%d,%d,%d,%s,%s,%s\n", (long)time(NULL),
+			pcc, bat1, pv, pi.y, pi.e, pi.applied, pi.u, pi.u_min, pi.u_max, sp[0], sp[1], sp[2],
+			pi.sp[0], pi.sp[1], pi.sp[2], PI_ENABLE, why[0], why[1], why[2]);
+	long size = ftell(f);
+	fclose(f);
+	if (size > PI_SHADOW_MAX)
+		rename(PI_SHADOW_FILE, PI_SHADOW_FILE ".1");
 }
 
 /* one cycle: the ESP soyo calculation, per bank */
@@ -596,6 +693,7 @@ static void calc(void)
 	int stale = inv_time == 0 || now - inv_time > STALE_SECONDS;
 	int wp_running = r290_time > 0 && now - r290_time < STALE_SECONDS && r290_hz > 0;
 	int sp[NPH] = {0}, discharge[NPH] = {0}, charge[NPH] = {0}, n_dis = 0, n_chg = 0;
+	int pi_ok[NPH] = {0}, pi_chg[NPH] = {0}, pi_dis[NPH] = {0}, n_pichg = 0, n_pidis = 0;
 	char why[NPH][96] = {{0}};
 
 	/* the meter already includes our own charging: use the measured AC-in, not the setpoints */
@@ -636,6 +734,18 @@ static void calc(void)
 		for (int i = 0; i < BANKS[b].nph; i++) {
 			int p = BANKS[b].ph[i];
 			sp[p] = 0;
+			/* PI: own gates (the soyo ones depend on its fixed thresholds) */
+			if (soc_ok[b] && !force_[b] && !stale) {
+				pi_ok[p] = 1;
+				if (!block && soc[b] < 100.0) {
+					pi_chg[p] = 1;
+					n_pichg++;
+				}
+				if (!prot[b]) {
+					pi_dis[p] = 1;
+					n_pidis++;
+				}
+			}
 			if (!soc_ok[b])
 				snprintf(why[p], 96, "%s:BMS_MISSING", bn);
 			else if (force_[b]) {
@@ -680,57 +790,63 @@ static void calc(void)
 			w = WP_CAP;
 			strcat(rule, "|WP_CAP");
 		}
-		/* SoC balancing: the stack more than SOC_BALANCE_ON ahead delivers alone, else equal shares */
-		int give[NPH] = {0}, n_give = 0, lead_ph = 0;
-		if (lead >= 0)
-			for (int i = 0; i < BANKS[lead].nph; i++)
-				if (discharge[BANKS[lead].ph[i]]) {
-					give[BANKS[lead].ph[i]] = 1;
-					n_give++;
-				}
-		lead_ph = n_give > 0;
-		if (!lead_ph)
-			for (int p = 0; p < NPH; p++)
-				if (discharge[p]) {
-					give[p] = 1;
-					n_give++;
-				}
-		for (int p = 0; p < NPH; p++) {
-			if (!discharge[p])
-				continue;
-			sp[p] = give[p] ? -(int)((double)w / n_give) : 0;
-			snprintf(why[p], 96, "%s%s", rule, lead_ph && give[p] ? "|BALANCE" : lead_ph ? "|BALANCE_HOLD" : "");
-		}
+		alloc_discharge(w, discharge, rule, sp, why);
 	}
 	if (n_chg) {
-		/* fill the banks in CHARGE_PRIORITY order up to their real charger capacity, the stack behind first */
-		double rest = fmin((int)((surplus - PCC_SURPLUS_TH) * KP), (double)CHARGE_MAX_PHASE * n_chg);
-		int order[NBANK], k = 0;
-		for (int i = 0; i < NBANK; i++)
-			if (CHARGE_PRIORITY[i] != lead)
-				order[k++] = CHARGE_PRIORITY[i];
-		if (lead >= 0)
-			order[k++] = lead;
-		for (int i = 0; i < k; i++) {
-			int b = order[i], ph[NPH], n = 0;
-			for (int j = 0; j < BANKS[b].nph; j++)
-				if (charge[BANKS[b].ph[j]])
-					ph[n++] = BANKS[b].ph[j];
-			if (!n)
-				continue;
-			double share = fmin(rest, (double)CHARGER_CAP_PHASE * n);
-			for (int j = 0; j < n; j++) {
-				sp[ph[j]] = (int)(share / n);
-				strncat(why[ph[j]], "|CHARGE", 95 - strlen(why[ph[j]]));
-			}
-			rest -= share;
-		}
-		/* what is left after every charger got its real capacity: up to CHARGE_MAX_PHASE on all phases alike */
-		if (rest > 0)
-			for (int p = 0; p < NPH; p++)
-				if (charge[p])
-					sp[p] += (int)fmin(rest / n_chg, (double)(CHARGE_MAX_PHASE - sp[p]));
+		alloc_charge(fmin((int)((surplus - PCC_SURPLUS_TH) * KP), (double)CHARGE_MAX_PHASE * n_chg), charge, n_chg, sp, why);
 	}
+
+	/* PI prototype. y = PCC + Sofar Bat1: Bat1 charging counts with BAT1_CHARGE_FACTOR (as the soyo surplus);
+	   a Bat1 discharge counts while the Multis charge (the Sofar must not feed them) and at night (the Multis take
+	   the base load over from the Sofar, soyo: fixed 936 W); by day while they discharge it is ignored (the Sofar
+	   battery covers the house first, the Multis only real grid import, as soyo) */
+	{
+		int night = have_pv && pv < NIGHT_PV_TH;
+		double applied = 0;
+		for (int p = 0; p < NPH; p++)
+			if (pi_ok[p])
+				applied += setpoints[p];
+		double b1 = bat1 > 0 ? bat1 * BAT1_CHARGE_FACTOR : (applied > 0 || night) ? bat1 : 0.0;
+		double y = (have_pcc ? pcc : 0.0) + b1, e = y - PI_TARGET;
+		if (fabs(e) < PI_DEADBAND)
+			e = 0;
+		double dt = pi_t_prev > 0 ? fmin(fmax(now - pi_t_prev, 1.0), 30.0) : CYCLE_SECONDS;
+		double u = applied + (pi_t_prev > 0 ? PI_KP * (e - pi_e_prev) : 0) + PI_KI * dt * e;
+		int dis_cap = (!(month >= SUMMER_FROM && month <= SUMMER_TO) && wp_running) ? WP_CAP : W_MAX;
+		double u_max = (double)CHARGE_MAX_PHASE * n_pichg, u_min = n_pidis ? -dis_cap : 0;
+		u = fmax(u_min, fmin(u_max, u));
+		pi_e_prev = e;
+		pi_t_prev = now;
+		int psp[NPH] = {0};
+		char pwhy[NPH][96];
+		for (int p = 0; p < NPH; p++)
+			snprintf(pwhy[p], 96, "%.95s", why[p]);
+		for (int p = 0; p < NPH; p++)
+			if (pi_ok[p])
+				snprintf(pwhy[p], 96, "PI(%+.0f)", u);
+		if (u > 0)
+			alloc_charge(u, pi_chg, n_pichg, psp, pwhy);
+		else if (u < 0) {
+			char rule[32];
+			snprintf(rule, sizeof(rule), "PI(%+.0f)", u);
+			alloc_discharge((int)-u, pi_dis, rule, psp, pwhy);
+		}
+		for (int p = 0; p < NPH; p++)
+			if (!pi_ok[p])
+				psp[p] = sp[p];          /* force charge, BMS missing, stale: as soyo */
+		pi.y = y;
+		pi.e = e;
+		pi.applied = applied;
+		pi.u = u;
+		pi.u_min = u_min;
+		pi.u_max = u_max;
+		memcpy(pi.sp, psp, sizeof(psp));
+		if (PI_ENABLE) {
+			memcpy(sp, psp, sizeof(psp));
+			memcpy(why, pwhy, sizeof(pwhy));
+		}
+	}
+	pi_shadow_log(have_pcc ? pcc : 0, bat1, have_pv ? pv : 0, sp, why);
 
 	char rules[NPH * 96] = "";
 	for (int p = 0; p < NPH; p++) {
@@ -762,7 +878,8 @@ static void calc(void)
 			snprintf(spcc, sizeof(spcc), "%.0f", pcc);
 		if (have_pv)
 			snprintf(spv, sizeof(spv), "%.0f", pv);
-		LOG("%spcc %s W bat1 %.0f W pv %s W -> %s | %s", LIVE ? "" : "DRY ", spcc, bat1, spv, line, eta);
+		LOG("%spcc %s W bat1 %.0f W pv %s W -> %s | %s | PI%s u %+.0f W", LIVE ? "" : "DRY ", spcc, bat1, spv, line, eta,
+			PI_ENABLE ? "" : " shadow", pi.u);
 		strcpy(last_rules, rules);
 		last_log = now;
 	}
@@ -819,6 +936,8 @@ int main(void)
 	DBusError err;
 	LIVE = e && strcmp(e, "1") == 0;
 	LADESPERRE_ENABLE = !l || strcmp(l, "1") == 0;
+	const char *pe = getenv("BATMONITOR_PI");
+	PI_ENABLE = pe && strcmp(pe, "1") == 0;
 	const char *sf = getenv("BATMONITOR_STATE_FILE");
 	if (sf && *sf)
 		snprintf(STATE_FILE, sizeof(STATE_FILE), "%s", sf);
@@ -835,8 +954,8 @@ int main(void)
 		return 1;
 	}
 	dbus_connection_set_exit_on_disconnect(bus, FALSE);
-	LOG("batmonitor %s %s, cycle %d s, banks STACK1_MUST=L1, STACK2_PYTES=L2+L3, charge block %s", VERSION,
-		LIVE ? "LIVE" : "DRY RUN", CYCLE_SECONDS, LADESPERRE_ENABLE ? "on" : "off");
+	LOG("batmonitor %s %s, cycle %d s, banks STACK1_MUST=L1, STACK2_PYTES=L2+L3, charge block %s, PI %s", VERSION,
+		LIVE ? "LIVE" : "DRY RUN", CYCLE_SECONDS, LADESPERRE_ENABLE ? "on" : "off", PI_ENABLE ? "ARMED" : "shadow");
 
 	mosquitto_lib_init();
 	/* random client id: Pi and NCR fallback (both containers are "raspberrypi4") share the broker, a fixed id
