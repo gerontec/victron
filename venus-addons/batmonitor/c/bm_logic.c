@@ -83,7 +83,7 @@ const struct bm_param BM_PARAMS[] = {
 	{"SOC_BALANCE_ON",        P(soc_balance_on),            3,       0.5,     50,      "%", "SoC difference that starts balancing"},
 	{"SOC_BALANCE_OFF",       P(soc_balance_off),           1,       0,       50,      "%", "balancing ends below"},
 	{"SOYO_TARGET",           P(soyo_target),               0,       -500,    500,     "W", "PCC target (+ = export)"},
-	{"B_NIGHT",               P(b_night),                   936,     0,       4000,    "W", "night base discharge (no PV, heat pump off in winter)"},
+	{"B_NIGHT",               P(b_night),                   936,     0,       4000,    "W", "unused since 0.25-c (night follows PCC + Sofar Bat1), kept for env compatibility"},
 	{"FC_HYST",               P(fc_hyst),                   2,       0,       20,      "%", "forecast rule back on above target + this"},
 };
 const int BM_NPARAMS = sizeof(BM_PARAMS) / sizeof(BM_PARAMS[0]);
@@ -271,7 +271,7 @@ static int ladesperre(const struct bm_cfg *cfg, const struct bm_in *in, struct b
 	return block;
 }
 
-/* discharge w (W, > 0) over the phases in dis[], at most DISCHARGE_MAX_PHASE each; SoC balancing: the stack more
+/* discharge w (W, > 0) over the phases in dis[], at most DISCHARGE_MAX_PHASE each, equal power per bank (0.26); SoC balancing: the stack more
    than SOC_BALANCE_ON ahead delivers alone, what its phases cannot give goes to the other phases (0.22) */
 static void alloc_discharge(const struct bm_cfg *cfg, int lead, int w, const int *dis, const char *rule, int *sp, char why[][WHY_LEN])
 {
@@ -285,13 +285,51 @@ static void alloc_discharge(const struct bm_cfg *cfg, int lead, int w, const int
 				n_give++;
 			}
 	lead_ph = n_give > 0;
-	if (!lead_ph)
+	int dmax = (int)cfg->discharge_max_phase;
+	if (!lead_ph) {
+		/* no lead (0.26, user 2026-10-08): every bank delivers the same power, so the two 300 Ah stacks drain alike:
+		   Stack1 alone on L1 gives as much as Stack2 on L2+L3 (L1 50 %, L2/L3 25 % each). What a phase cannot give
+		   above DISCHARGE_MAX_PHASE goes to the other discharging phases alike */
+		double want[NPH] = {0};
+		int n_banks = 0;
+		for (int b = 0; b < NBANK; b++)
+			for (int i = 0; i < BM_BANKS[b].nph; i++)
+				if (dis[BM_BANKS[b].ph[i]]) {
+					n_banks++;
+					break;
+				}
+		for (int b = 0; b < NBANK; b++) {
+			int nb = 0;
+			for (int i = 0; i < BM_BANKS[b].nph; i++)
+				nb += dis[BM_BANKS[b].ph[i]];
+			for (int i = 0; i < BM_BANKS[b].nph; i++)
+				if (dis[BM_BANKS[b].ph[i]])
+					want[BM_BANKS[b].ph[i]] = (double)w / n_banks / nb;
+		}
+		for (int k = 0; k < NPH; k++) {                    /* spill above dmax, at most NPH rounds */
+			double over = 0;
+			int n_free = 0;
+			for (int p = 0; p < NPH; p++)
+				if (dis[p]) {
+					if (want[p] > dmax) {
+						over += want[p] - dmax;
+						want[p] = dmax;
+					} else if (want[p] < dmax)
+						n_free++;
+				}
+			if (over <= 0 || !n_free)
+				break;
+			for (int p = 0; p < NPH; p++)
+				if (dis[p] && want[p] < dmax)
+					want[p] += over / n_free;
+		}
 		for (int p = 0; p < NPH; p++)
 			if (dis[p]) {
-				give[p] = 1;
-				n_give++;
+				sp[p] = -(int)want[p];
+				snprintf(why[p], WHY_LEN, "%s", rule);
 			}
-	int dmax = (int)cfg->discharge_max_phase;
+		return;
+	}
 	int share = n_give ? (int)((double)w / n_give) : 0, spill = 0;
 	if (share > dmax) {
 		spill = (share - dmax) * n_give;
@@ -478,20 +516,23 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 		   left (0.18; old: -KP * pcc, which dropped back to IDLE as soon as the own discharge covered the import) */
 		/* the own charging (force charge of the other stack) is no house load: it comes from the grid (0.20) */
 		double house = z2 + own_charge;
-		double deficit = own_discharge - (bat1 > 0 ? bat1 : 0.0) - KP * (house - cfg->soyo_target);
 		/* winter: the night base load would flow into the heat pump */
 		int night_floor = night && (season != BM_WINTER || !wp_fresh || in->wp < WP_ON_TH);
-		if (house < PCC_IMPORT_TH || (st->soyo_prop_prev && deficit > SOYO_HOLD_TH)) {
+		/* night (0.25, user 2026-10-08: PCC near 0): the Sofar Bat1 counts signed instead of the fixed B_NIGHT floor.
+		   Its discharge is house load the stacks take over, its charge is our own overshoot (the 936 W floor charged
+		   the Sofar battery with ~600 W at a 300 W house). pcc + bat1 is the load behind the Sofar however the Sofar
+		   splits it, so both regulators do not fight; the Sofar battery idles, the PCC stays near 0 */
+		double b1_def = night_floor ? bat1 : (bat1 > 0 ? bat1 : 0.0);
+		double deficit = own_discharge - b1_def - KP * (house - cfg->soyo_target);
+		if (house < PCC_IMPORT_TH || ((st->soyo_prop_prev || night_floor) && deficit > SOYO_HOLD_TH)) {
 			w = deficit > 0 ? (int)deficit : 0;   /* never turn a discharge into charging (Sofar TOU charge) */
-			if (night_floor && w < (int)cfg->b_night)
-				w = (int)cfg->b_night;
 			if (w > (int)cfg->w_max)
 				w = (int)cfg->w_max;
 			strcpy(rule, "PROPORTIONAL");
 			st->soyo_prop_prev = 1;
 		} else {
 			st->soyo_prop_prev = 0;
-			w = night_floor ? (int)cfg->b_night : B_DAY_IDLE;
+			w = night_floor ? 0 : B_DAY_IDLE;
 			strcpy(rule, "IDLE");
 		}
 		if (night)

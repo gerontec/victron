@@ -205,13 +205,41 @@ static void test_w_max_and_phase_cap(void)
 	CHECK(fabs(r.pcc) <= 80, "house covered, pcc %.0f", r.pcc);
 }
 
+static void test_bank_split(void)
+{
+	struct run r;
+	struct plant pl = BASE(.house = 2000, .season = BM_SUMMER, .season_age_h = 1);
+	simulate(&r, &pl, local_time(2026, 7, 15, 23, 0), 60);       /* 0.26: L1 = L2 + L3 */
+	print_state("bank split, house 2 kW", &r);
+	CHECK(abs(r.out.sp[0] - (r.out.sp[1] + r.out.sp[2])) <= 3 && abs(r.out.sp[1] - r.out.sp[2]) <= 1,
+		  "L1 = L2 + L3, got %d %d %d", r.out.sp[0], r.out.sp[1], r.out.sp[2]);
+	CHECK(abs(sum_sp(&r) + 2000) <= 30, "house covered, sp sum %d", sum_sp(&r));
+
+	pl = BASE(.house = 9000, .season = BM_SUMMER, .season_age_h = 1);
+	simulate(&r, &pl, local_time(2026, 7, 15, 23, 0), 60);       /* L1 would need 4500 W: capped, rest to L2/L3 */
+	print_state("bank split, house 9 kW", &r);
+	CHECK(r.out.sp[0] == -4000, "L1 capped at 4000 W, got %d", r.out.sp[0]);
+	CHECK(abs(r.out.sp[1] + 2500) <= 30 && abs(r.out.sp[2] + 2500) <= 30, "L2/L3 take the spill, got %d %d",
+		  r.out.sp[1], r.out.sp[2]);
+	CHECK(fabs(r.pcc) <= 80, "house covered, pcc %.0f", r.pcc);
+}
+
 static void test_winter_night_floor(void)
 {
 	struct run r;
 	struct plant pl = BASE(.house = 500, .sofar_dis = 1, .sofar_chg = 1);
-	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 40);       /* no heat pump: night base 936 W */
+	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 40);       /* no heat pump: the stacks take over the Sofar */
 	print_state("winter night, no WP, Sofar covers", &r);
-	CHECK(abs(sum_sp(&r) + 936) <= 3, "night floor 936 W, sp sum %d", sum_sp(&r));
+	CHECK(abs(sum_sp(&r) + 500) <= 30, "Multis cover the house 500 W (0.25: no fixed 936 W floor), sp sum %d", sum_sp(&r));
+	CHECK(fabs(r.bat1) <= 30, "Sofar Bat1 neither charged nor discharged, bat1 %.0f", r.bat1);
+	CHECK(fabs(r.pcc) <= 30, "PCC near 0, pcc %.0f", r.pcc);
+	CHECK(pcc_swing(&r, 20) < 60, "no oscillation, swing %.0f", pcc_swing(&r, 20));
+
+	pl = BASE(.house = 300, .sofar_dis = 1, .sofar_chg = 1);
+	simulate(&r, &pl, local_time(2026, 10, 8, 20, 30), 40);      /* 2026-10-08: 936 W floor charged the Sofar +600 W */
+	print_state("night, house 300 W, Sofar charges/discharges", &r);
+	CHECK(abs(sum_sp(&r) + 300) <= 30, "Multis cover 300 W, not 936 W, sp sum %d", sum_sp(&r));
+	CHECK(fabs(r.bat1) <= 30, "the stacks do not charge the Sofar battery, bat1 %.0f", r.bat1);
 }
 
 static void test_wp_running_no_night_floor(void)
@@ -442,6 +470,7 @@ int main(void)
 	test_summer_wp_from_battery();
 	test_summer_wp_4kw_from_battery();
 	test_w_max_and_phase_cap();
+	test_bank_split();
 	test_winter_night_floor();
 	test_wp_running_no_night_floor();
 	test_day_surplus_to_zero();
