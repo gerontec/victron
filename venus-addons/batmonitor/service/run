@@ -1,6 +1,9 @@
 #!/bin/sh
 exec 2>&1
 # BATMONITOR_LIVE=1 in /data/batmonitor/env switches it live; without the file: dry run
+# BATMONITOR_LADESPERRE=0 switches the summer charge block off
 [ -f /data/batmonitor/env ] && . /data/batmonitor/env
-export BATMONITOR_MQTT_HOST BATMONITOR_LIVE
+export BATMONITOR_MQTT_HOST BATMONITOR_LIVE BATMONITOR_LADESPERRE
+# C port (5 s cycle) when built; batmonitor.py (60 s) stays as fallback: BATMONITOR_PYTHON=1 in env
+[ -x /data/batmonitor/c/batmonitor ] && [ "$BATMONITOR_PYTHON" != 1 ] && exec /data/batmonitor/c/batmonitor
 exec python3 /data/batmonitor/batmonitor.py

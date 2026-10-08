@@ -1,15 +1,22 @@
 #!/bin/sh
 # Install batmonitor into a Venus /data (survives firmware updates) and start it from /data/rc.local.
 # Usage inside Venus: sh install.sh            From the host: sudo sh install.sh /data
+# The C port is built with the gcc of the Venus image (inside Venus only); without a binary run falls back to Python.
 set -e
 DATA="${1:-/data}"
 HERE=$(dirname "$(readlink -f "$0")")
 D="$DATA/batmonitor"
-mkdir -p "$D/service/log"
+mkdir -p "$D/service/log" "$D/c"
 cp "$HERE/batmonitor.py" "$D/"
+cp -r "$HERE/c/batmonitor.c" "$HERE/c/Makefile" "$HERE/c/include" "$D/c/"
 cp "$HERE/service/run" "$D/service/run"
 cp "$HERE/service/log/run" "$D/service/log/run"
 chmod 755 "$D/batmonitor.py" "$D/service/run" "$D/service/log/run"
+if [ -d /opt/victronenergy ] && command -v cc >/dev/null; then
+	make -C "$D/c" -B || echo "C build failed: service/run falls back to batmonitor.py (or copy a binary built on the Pi)"
+else
+	echo "not inside Venus: build later in Venus with: make -C /data/batmonitor/c"
+fi
 RC="$DATA/rc.local"
 [ -f "$RC" ] || printf '#!/bin/sh\n' > "$RC"
 chmod 755 "$RC"

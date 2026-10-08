@@ -21,12 +21,18 @@ Template, 1:1: the soyo calculation of the Waveshare ESP32 (gerontec/sofar waves
 
 Differences, all on purpose:
 - per bank (BANKS): the gates are evaluated with each bank's BMS SoC/power; w is shared equally by the
-  phases whose bank passed them. Default: Stack1 MUST (can-bus-bms, can0) -> L2, Stack2 Pytes (EBox) -> L1, L3.
+  phases whose bank passed them. Default: Stack1 MUST (can-bus-bms, can0) -> L1 (middle unit), Stack2 Pytes (EBox) -> L2, L3.
 - SOC_MIN 5 % (user 2026-10-08), release at 7 % (fox2db DD_CHARGE_TARGET).
 - forced charge (user 2026-10-08): bank SoC < 3 % -> FORCE_CHARGE_W per phase from the grid until 5 %.
 - charging from PV surplus (pcc > 200 W): KP * (pcc - 200) shared by the phases whose bank is below 100 %.
   Not soyo (that was the EBox charger fox2db); without it Hub4Mode 3 would never charge.
 - output: ESS external control (Hub4Mode 3), /Hub4/Lx/AcPowerSetpoint (- = out of the battery).
+- charge block (0.15, user 2026-10-08): fox2db_logic.h Ladesperre with the clear-sky DC model (Meinel, NOAA sun
+  position, strings fitted per field, tree horizon, temperature derating from aussen/temp), 1:1. Summer only
+  (LADESPERRE_MONTHS, ESP: May-Aug): on a forecast 20 kW day PV surplus charging waits for the peak window
+  (pcc > 20 kW, peak hour or solar noon, whatever comes first); measured clouds release it for the day.
+  The rest of the year every watt of surplus charges at once. Measured proxy: pcc_avg5 + Bat1_avg5 + AC-in of
+  the Multis (ESP: + ebox_w).
 
 DRY RUN by default (logs only). Live: BATMONITOR_LIVE=1 in /data/batmonitor/env (sourced by service/run). On exit (live) the setpoints go to 0
 and Hub4Mode back to 1 (normal ESS).
@@ -34,10 +40,12 @@ and Hub4Mode back to 1 (normal ESS).
 
 import json
 import logging
+import math
 import os
 import signal
 import sys
 import time
+from collections import deque
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -46,15 +54,17 @@ import paho.mqtt.client as mqtt
 from dbus.mainloop.glib import DBusGMainLoop
 from gi.repository import GLib
 
-VERSION = '0.12'
+VERSION = '0.15'
 LIVE = os.environ.get('BATMONITOR_LIVE') == '1'
 MQTT_HOST = os.environ.get('BATMONITOR_MQTT_HOST', '192.168.178.218')
 INVERTER_TOPIC = 'inverter/power_grid_exchange/json'
 R290_TOPIC = 'r290/heatpump/all'
+AUSSEN_TOPIC = 'aussen/temp'
 
 BANKS = {
-	'STACK1_MUST':  {'service': 'com.victronenergy.battery.socketcan_can0', 'phases': ('L2',)},
-	'STACK2_PYTES': {'service': 'com.victronenergy.battery.ebox',           'phases': ('L1', 'L3')},
+	# Stack1 MUST feeds the middle unit (device 2 on the wall) = HQ2606P4NCH = Devices/0 = L1 (user photo 2026-10-08)
+	'STACK1_MUST':  {'service': 'com.victronenergy.battery.socketcan_can0', 'phases': ('L1',), 'capacity_wh': 300 * 51.2},
+	'STACK2_PYTES': {'service': 'com.victronenergy.battery.ebox',           'phases': ('L2', 'L3'), 'capacity_wh': 300 * 51.2},
 }
 
 # soyo, 1:1 from sofar_waveshare.yaml; the power values doubled (POWER_SCALE) for the house base load of
@@ -88,10 +98,83 @@ SOC_BALANCE_ON = 3.0      # % SoC difference between the stacks that starts bala
 SOC_BALANCE_OFF = 1.0     # % back to normal (equal discharge share / CHARGE_PRIORITY) below this difference
 BAT1_CHARGE_FACTOR = 0.5  # share of the Sofar Bat1 charging that counts as surplus (fox2db default)
 SEND_SECONDS = 10
-STATE_FILE = '/data/batmonitor/state.json'   # read by victron2db.py on the Pi host (-> wagodb.pv_victron bm_*)
+STATE_FILE = '/data/batmonitor/state.json'
+ETA_WINDOW = 300          # s, average of the DC charge power for the full-charge forecast
+ETA_MIN_W = 50            # W, below this average no forecast (not charging)   # read by victron2db.py on the Pi host (-> wagodb.pv_victron bm_*)
 TIMEZONE = ZoneInfo('Europe/Berlin')
+# charge block, 1:1 from waveshare/fox2db_logic.h (fox2db v2.9) and sofar_waveshare.yaml
+LADESPERRE_ENABLE = os.environ.get('BATMONITOR_LADESPERRE', '1') == '1'
+LADESPERRE_MONTHS = range(5, 9)   # ESP: LADESPERRE_MONTH_FROM 5 .. LADESPERRE_MONTH_TO 8
+LADESPERRE_RATIO = 0.50           # ESP yaml: ladesperre_ratio (good weather while the ratio is <= this)
+LADESPERRE_HYST = 0.25            # release only at ratio >= LADESPERRE_RATIO + LADESPERRE_HYST
+LADESPERRE_NOW_RATIO = 0.20       # unaveraged ratio at which clouds count as proven -> release for the day
+PCC_PEAK_TH = 20000.0             # W, DO4 limit; a forecast above it opens the window, a measured one ends it
+DC_RATIO_MIN = 5000.0             # W, below this clear-sky power no ratio
+AUSSEN_MAX_AGE = 900              # s, ESP: in_aussen_ms < 900000
+LAT, LON = 47.6811, 11.5732
+# (tilt, azimuth from south, nominal W), fitted per string (gen_pv_strings.py, 14 clear days):
+# Sofar PV1 west / PV2 south, FoxESS pv2 east / pv1 west
+ARRAYS = ((60, 33, 19430), (68, -12, 7690))
+ARRAYS_EAST = ((59, -29, 22036), (67, 32, 2781))
+# tall trees in the east sector: below the tree line only diffuse light (clearsky.tex)
+HOR_AZ_SPLIT, HOR_EAST, HOR_SOUTH, HOR_DIFFUSE = 120.0, 23.0, 15.0, 0.25
+KT_MONTH = (0, .331, .402, .563, .838, .909, .880, .840, .820, .760, .600, .350, .134)
+TEMP_COEFF, NOCT, T_STC = -0.0030, 45.0, 25.0
 
 log = logging.getLogger('batmonitor')
+
+
+def sun_pos(t_utc):
+	"""NOAA sun position: (elevation, azimuth from north) in degrees for unix UTC"""
+	g = time.gmtime(t_utc)
+	hour = g.tm_hour + g.tm_min / 60.0 + g.tm_sec / 3600.0
+	gamma = 2.0 * math.pi / 365.0 * (g.tm_yday - 1 + (hour - 12) / 24.0)   # C tm_yday is 0-based
+	eqtime = 229.18 * (0.000075 + 0.001868 * math.cos(gamma) - 0.032077 * math.sin(gamma)
+					   - 0.014615 * math.cos(2 * gamma) - 0.040849 * math.sin(2 * gamma))
+	decl = (0.006918 - 0.399912 * math.cos(gamma) + 0.070257 * math.sin(gamma)
+			- 0.006758 * math.cos(2 * gamma) + 0.000907 * math.sin(2 * gamma)
+			- 0.002697 * math.cos(3 * gamma) + 0.00148 * math.sin(3 * gamma))
+	ha = math.radians((hour * 60.0 + eqtime + 4.0 * LON) / 4.0 - 180.0)
+	latr = math.radians(LAT)
+	cosz = math.sin(latr) * math.sin(decl) + math.cos(latr) * math.cos(decl) * math.cos(ha)
+	elev = 90.0 - math.degrees(math.acos(max(-1.0, min(1.0, cosz))))
+	az_s = math.atan2(math.sin(ha), math.cos(ha) * math.sin(latr) - math.tan(decl) * math.cos(latr))
+	return elev, (math.degrees(az_s) + 180.0 + 360.0) % 360.0
+
+
+def calc_arrays(arrays, t, month):
+	elev, az = sun_pos(t)
+	if elev <= 0:
+		return 0.0
+	am = min(1.0 / math.sin(math.radians(elev)), 37.0)
+	tr = 0.7 ** (am ** 0.678)
+	kt = KT_MONTH[month] if 1 <= month <= 12 else 0.60
+	shade = 1.0 if elev >= (HOR_EAST if az < HOR_AZ_SPLIT else HOR_SOUTH) else HOR_DIFFUSE
+	e, s = math.radians(elev), 0.0
+	for tilt, az_south, power in arrays:
+		b, da = math.radians(tilt), math.radians((az - 180.0) - az_south)
+		s += power * tr * kt * max(0.0, math.sin(e) * math.cos(b) + math.cos(e) * math.sin(b) * math.cos(da))
+	return s * shade
+
+
+def dc_now(t, month):
+	"""clear-sky DC power of all four strings (W) at unix UTC t"""
+	return calc_arrays(ARRAYS, t, month) + calc_arrays(ARRAYS_EAST, t, month)
+
+
+def solar_noon_utc(t):
+	"""astronomical local noon (hour angle 0) of the UTC day of t, unix UTC"""
+	midnight = int(t // 86400) * 86400
+	gamma = 2.0 * math.pi / 365.0 * (time.gmtime(midnight + 43200).tm_yday - 1)
+	eqtime = 229.18 * (0.000075 + 0.001868 * math.cos(gamma) - 0.032077 * math.sin(gamma)
+					   - 0.014615 * math.cos(2 * gamma) - 0.040849 * math.sin(2 * gamma))
+	return midnight + (720.0 - eqtime - 4.0 * LON) * 60.0
+
+
+def dc_temp_factor(elev, ambient):
+	"""defensive temperature derating (-0.30 %/K, NOCT cell temperature), clamped to 0.85..1"""
+	cell = ambient + (NOCT - 20.0) / 800.0 * 1000.0 * max(0.0, math.sin(math.radians(elev)))
+	return max(0.85, min(1.0, 1.0 + TEMP_COEFF * (cell - T_STC)))
 
 
 class BatMonitor:
@@ -100,11 +183,19 @@ class BatMonitor:
 		self.pcc = self.pv = None
 		self.bat1 = 0.0
 		self.inv_time = 0.0
+		self.pcc_avg5 = self.bat1_avg5 = None
+		self.aussen = None
+		self.aussen_time = 0.0
+		# charge block day latches (ESP State: peak_today, ladesperre_latched, badweather_today)
+		self.ls_day = None
+		self.peak_today = self.ls_latched = self.badweather_today = False
+		self.ls_info = {}
 		self.r290_hz = 0
 		self.r290_time = 0.0
 		self.prot = {b: False for b in BANKS}
 		self.soc = {b: None for b in BANKS}
 		self.lead = None        # bank more than SOC_BALANCE_ON ahead (hysteresis down to SOC_BALANCE_OFF)
+		self.power_hist = {b: deque() for b in BANKS}   # (time, DC power W) for the 5 min average
 		self.force = {b: False for b in BANKS}
 		self.setpoints = {p: 0 for c in BANKS.values() for p in c['phases']}
 		self.setpoint_time = 0.0
@@ -115,7 +206,15 @@ class BatMonitor:
 		self.pcc = d.get('ActivePower_PCC_Total', 0) * 1000.0
 		self.bat1 = (d.get('Power_Bat1') or 0) * 1000.0
 		self.pv = (d.get('Power_PV1', 0) + d.get('Power_PV2', 0)) * 1000.0
+		pcc5, bat5 = d.get('ActivePower_PCC_Total_avg5'), d.get('Power_Bat1_avg5')
+		self.pcc_avg5 = (pcc5 if pcc5 is not None else d.get('ActivePower_PCC_Total', 0)) * 1000.0
+		self.bat1_avg5 = (bat5 if bat5 is not None else (d.get('Power_Bat1') or 0)) * 1000.0
 		self.inv_time = time.monotonic()
+
+	def on_aussen(self, v):
+		if -40.0 < v < 55.0:
+			self.aussen = v
+			self.aussen_time = time.monotonic()
 
 	def on_r290(self, d):
 		self.r290_hz = int(d.get('comp_freq_actual', 0) or 0)
@@ -165,6 +264,7 @@ class BatMonitor:
 		# fox2db: discharge counts fully, charging with BAT1_CHARGE_FACTOR)
 		bat1_eff = self.bat1 if self.bat1 < 0 else self.bat1 * BAT1_CHARGE_FACTOR
 		surplus = (self.pcc or 0.0) + bat1_eff + own_charge
+		ladesperre = self.ladesperre(vb, stale)
 		for bank, cfg in BANKS.items():
 			s = cfg['service']
 			soc = self.get(s, '/Soc') if self.get(s, '/Connected') in (1, 1.0) else None
@@ -188,6 +288,8 @@ class BatMonitor:
 					why[p] = '%s:FORCE_CHARGE(%.1f%%)' % (bank, soc)
 				elif stale:
 					why[p] = 'STALE'
+				elif surplus > PCC_SURPLUS_TH and ladesperre:
+					why[p] = '%s:LADESPERRE(peak %sh)' % (bank, self.ls_info.get('peak_h'))
 				elif surplus > PCC_SURPLUS_TH:
 					why[p] = '%s:PV_SURPLUS' % bank
 					if soc < 100.0:
@@ -238,13 +340,69 @@ class BatMonitor:
 			if rest > 0:
 				for p in charge:
 					sp[p] += int(min(rest / len(charge), CHARGE_MAX_PHASE - sp[p]))
-		log.info('%spcc %s W bat1 %s W pv %s W -> %s', '' if LIVE else 'DRY ',
+		fc = self.full_forecast()
+		eta = '  '.join('%s full %s' % (b, datetime.fromtimestamp(f['full_at'], TIMEZONE).strftime('%H:%M') if f['full_at'] else '-')
+						for b, f in fc.items())
+		log.info('%spcc %s W bat1 %s W pv %s W -> %s | ' + eta, '' if LIVE else 'DRY ',
 			None if self.pcc is None else round(self.pcc), round(self.bat1), None if self.pv is None else round(self.pv),
 			'  '.join('%s %+d W (%s)' % (p, sp[p], why[p]) for p in sorted(sp)))
 		self.setpoints = sp
 		self.setpoint_time = now
 		self.write_state(sp, why, surplus)
 		return True
+
+	def ladesperre(self, vb, stale):
+		"""fox2db_logic.h step(): charge block until the PCC peak window, summer only. True = do not charge from PV."""
+		now = time.time()
+		loc = datetime.now(TIMEZONE)
+		month = loc.month
+		if loc.date() != self.ls_day:                    # midnight reset
+			self.ls_day = loc.date()
+			self.peak_today = self.ls_latched = self.badweather_today = False
+		dc = dc_now(now, month)
+		if dc > 0 and self.aussen_time and time.monotonic() - self.aussen_time < AUSSEN_MAX_AGE:
+			dc *= dc_temp_factor(sun_pos(now)[0], self.aussen)
+		midnight = loc.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+		best_w, peak_h, win_end = 0.0, -1, -1
+		for h in range(5, 21):
+			w = dc_now(midnight + h * 3600, month)
+			if w > best_w:
+				best_w, peak_h = w, h
+			if w > PCC_PEAK_TH:
+				win_end = h
+		noon = solar_noon_utc(now)
+		if self.pcc is not None and not stale and self.pcc > PCC_PEAK_TH:
+			self.peak_today = True
+		# measured PV minus house load: export + Sofar Bat1 + what the Multis take (ESP: + EBox charger)
+		multis = 0.0
+		for c in BANKS.values():
+			for p in c['phases']:
+				a = self.get(vb, '/Ac/ActiveIn/%s/P' % p) if vb else None
+				multis += a or 0.0
+		ratio = ratio_now = -1.0
+		if dc > DC_RATIO_MIN and not stale and self.pcc_avg5 is not None:
+			ratio = (dc - (self.pcc_avg5 + multis + self.bat1_avg5)) / dc
+		if dc > DC_RATIO_MIN and not stale and self.pcc is not None:
+			ratio_now = (dc - (self.pcc + multis + self.bat1)) / dc
+		block = False
+		if LADESPERRE_ENABLE:
+			in_window = (month in LADESPERRE_MONTHS and best_w > PCC_PEAK_TH and win_end >= 0 and not self.peak_today
+						 and loc.hour <= peak_h and now < noon)
+			if in_window and ratio_now >= LADESPERRE_NOW_RATIO:
+				self.badweather_today = True
+			if not in_window:
+				self.ls_latched = False
+			elif ratio >= 0.0:
+				if not self.ls_latched and ratio <= LADESPERRE_RATIO:
+					self.ls_latched = True
+				elif self.ls_latched and ratio >= LADESPERRE_RATIO + LADESPERRE_HYST:
+					self.ls_latched = False
+			block = in_window and self.ls_latched and not self.badweather_today
+		self.ls_info = {'active': int(block), 'dc_expected_w': round(dc), 'ratio': round(ratio, 3),
+						'ratio_now': round(ratio_now, 3), 'peak_h': peak_h if best_w > PCC_PEAK_TH else -1,
+						'win_end_h': win_end, 'noon_h': round((noon - midnight) / 3600.0, 2),
+						'peak_today': int(self.peak_today), 'badweather_today': int(self.badweather_today)}
+		return block
 
 	def write_state(self, sp, why, surplus):
 		"""decisions of this cycle for victron2db.py; written to a temp file and renamed (never half a file)"""
@@ -253,7 +411,8 @@ class BatMonitor:
 				 'sp': {p: sp[p] for p in sorted(sp)}, 'rule': {p: why[p][:48] for p in sorted(why)},
 				 'balance_lead': self.lead, 'surplus_w': None if surplus is None else round(surplus),
 				 'prot': {s1: int(self.prot[s1]), s2: int(self.prot[s2])},
-				 'force': {s1: int(self.force[s1]), s2: int(self.force[s2])}}
+				 'force': {s1: int(self.force[s1]), s2: int(self.force[s2])},
+				 'forecast': self.full_forecast(), 'ladesperre': self.ls_info}
 		try:
 			with open(STATE_FILE + '.tmp', 'w') as f:
 				json.dump(state, f)
@@ -275,7 +434,31 @@ class BatMonitor:
 			log.info('SoC balance: back within %.1f %%', SOC_BALANCE_OFF)
 			self.lead = None
 
+	def sample_power(self):
+		"""DC power of each stack from its BMS every SEND_SECONDS, kept for ETA_WINDOW"""
+		now = time.monotonic()
+		for bank, cfg in BANKS.items():
+			h = self.power_hist[bank]
+			pw = self.get(cfg['service'], '/Dc/0/Power')
+			if pw is not None:
+				h.append((now, pw))
+			while h and now - h[0][0] > ETA_WINDOW:
+				h.popleft()
+
+	def full_forecast(self):
+		"""per stack: 5 min average charge power and the time 100 % SoC is reached at that power (None if not charging)"""
+		out = {}
+		for bank, cfg in BANKS.items():
+			h, soc = self.power_hist[bank], self.soc[bank]
+			avg = sum(p for _, p in h) / len(h) if h else None
+			eta = None
+			if avg is not None and soc is not None and avg >= ETA_MIN_W and soc < 100:
+				eta = int(time.time() + (100 - soc) / 100 * cfg['capacity_wh'] / avg * 3600)
+			out[bank] = {'avg5_w': None if avg is None else round(avg), 'full_at': eta}
+		return out
+
 	def send(self):
+		self.sample_power()
 		vb = self.vebus()
 		if vb is None:
 			return True
@@ -309,9 +492,15 @@ def main():
 
 	def on_connect(client, userdata, flags, reason_code, properties):
 		log.info('MQTT connected to %s (%s)', MQTT_HOST, reason_code)
-		client.subscribe([(INVERTER_TOPIC, 0), (R290_TOPIC, 0)])
+		client.subscribe([(INVERTER_TOPIC, 0), (R290_TOPIC, 0), (AUSSEN_TOPIC, 0)])
 
 	def on_message(client, userdata, msg):
+		if msg.topic == AUSSEN_TOPIC:
+			try:
+				bm.on_aussen(float(msg.payload))
+			except ValueError:
+				pass
+			return
 		try:
 			d = json.loads(msg.payload)
 		except ValueError:
