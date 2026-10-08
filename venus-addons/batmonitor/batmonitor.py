@@ -64,7 +64,7 @@ import paho.mqtt.client as mqtt
 from dbus.mainloop.glib import DBusGMainLoop
 from gi.repository import GLib
 
-VERSION = '0.17'
+VERSION = '0.18'
 LIVE = os.environ.get('BATMONITOR_LIVE') == '1'
 MQTT_HOST = os.environ.get('BATMONITOR_MQTT_HOST', '192.168.178.218')
 INVERTER_TOPIC = 'inverter/power_grid_exchange/json'
@@ -292,7 +292,9 @@ class BatMonitor:
 		# the Sofar holds its PCC at 0 with its own battery Bat1: a Bat1 discharge is no surplus (as dbus-pcc-grid,
 		# fox2db: discharge counts fully, charging with BAT1_CHARGE_FACTOR)
 		bat1_eff = self.bat1 if self.bat1 < 0 else self.bat1 * BAT1_CHARGE_FACTOR
-		surplus = (self.pcc or 0.0) + bat1_eff + own_charge
+		# own discharge subtracted (0.18, found by c/tests/test_logic.c): else the night floor, partly going into the
+		# Sofar battery, counted as PV surplus and the Multis switched to charging at night
+		surplus = (self.pcc or 0.0) + bat1_eff + own_charge - own_discharge
 		ladesperre = self.ladesperre(vb, stale)
 		# surplus includes the own charging: once charging, it holds down to SOYO_HOLD_TH instead of 200 W
 		charge_mode = surplus > PCC_SURPLUS_TH or (self.soyo_chg_prev and surplus > SOYO_HOLD_TH)
@@ -337,8 +339,9 @@ class BatMonitor:
 			# what the Multis already give (minus what of it goes into the Sofar battery) + the import still left
 			z2 = self.pcc + wp_eff
 			night_floor = night and wp_eff < WP_ON_TH   # the night base load would flow into the heat pump
-			deficit = own_discharge - max(self.bat1, 0.0) - KP * (z2 - SOYO_TARGET)
-			if z2 < PCC_IMPORT_TH or (self.soyo_prop_prev and deficit > SOYO_HOLD_TH):
+			house = z2 + own_charge           # own (force) charging is no house load: it comes from the grid
+			deficit = own_discharge - max(self.bat1, 0.0) - KP * (house - SOYO_TARGET)
+			if house < PCC_IMPORT_TH or (self.soyo_prop_prev and deficit > SOYO_HOLD_TH):
 				w = max(int(deficit), 0)          # never turn a discharge into charging (Sofar TOU charge)
 				if night_floor:
 					w = max(w, B_NIGHT)
