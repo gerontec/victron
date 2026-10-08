@@ -26,6 +26,7 @@
 #define STALE_SECONDS 180.0
 #define WP_MAX_AGE 150.0        /* s, older: no Z2 correction, WP_CAP as before */
 #define WP_ON_TH 300.0          /* W: heat pump counts as running (no night floor) */
+#define SEASON_MAX_AGE (2 * 86400)   /* s: older batmonitor/season -> month rule */
 /* batmonitor */
 #define SOC_MIN 5.0
 #define SOC_MIN_RELEASE 7.0
@@ -306,9 +307,12 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 	memset(out, 0, sizeof(*out));
 	int stale = in->inv_time == 0 || now - in->inv_time > STALE_SECONDS;
 	int wp_running = in->r290_time > 0 && now - in->r290_time < STALE_SECONDS && in->r290_hz > 0;
-	/* Z2 point = Z1 PCC + heat pump: the discharge serves only the house (0.19), winter only */
+	/* Z2 point = Z1 PCC + heat pump: the discharge serves only the house (0.19), winter only. Winter/summer from
+	   the measured energy (season.py on .218: summer when export > 2 x heat pump over 7 days, winter below 1 x,
+	   0.21), the months Oct-Apr only when that is missing or older than 2 days */
 	int wp_fresh = in->wp_time > 0 && now - in->wp_time < WP_MAX_AGE;
-	int winter = !(month >= SUMMER_FROM && month <= SUMMER_TO);
+	int season_ok = in->season && in->t - in->season_ts < SEASON_MAX_AGE;
+	int winter = season_ok ? in->season == BM_WINTER : !(month >= SUMMER_FROM && month <= SUMMER_TO);
 	double wp_eff = winter && wp_fresh && in->wp > 0 ? in->wp : 0.0;   /* summer: WP 100 % from the batteries */
 	double z2 = pcc + wp_eff;
 	int *sp = out->sp;
@@ -490,5 +494,7 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 	}
 	out->surplus = surplus;
 	out->wp_eff = wp_eff;
+	out->winter = winter;
+	out->season_measured = season_ok;
 	memcpy(st->setpoints, sp, sizeof(st->setpoints));
 }

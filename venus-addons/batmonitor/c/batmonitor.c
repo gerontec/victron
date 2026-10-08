@@ -43,11 +43,12 @@
 #include <unistd.h>
 #include "bm_logic.h"
 
-#define VERSION "0.20-c"
+#define VERSION "0.21-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
 #define WP_TOPIC "em0/power"          /* SDM72D, heat pump electrical power in W (sdm72d.py on .218, once a minute) */
+#define SEASON_TOPIC "batmonitor/season"   /* season.py on .218, hourly: {"mode": "summer"|"winter", ..., "ts"} */
 #define STATE_FILE_DEFAULT "/data/batmonitor/state.json"
 #define TZ_BERLIN "CET-1CEST,M3.5.0,M10.5.0/3"   /* Europe/Berlin without a zoneinfo file */
 #define SETPOINT_MAX_AGE 90.0
@@ -74,6 +75,8 @@ static struct {
 	double r290_time;
 	double aussen, aussen_time;
 	double wp, wp_time;
+	int season;
+	double season_ts;
 } mq;
 
 static double setpoint_time;
@@ -227,6 +230,7 @@ static void on_connect(struct mosquitto *m, void *ud, int rc)
 		mosquitto_subscribe(m, NULL, R290_TOPIC, 0);
 		mosquitto_subscribe(m, NULL, AUSSEN_TOPIC, 0);
 		mosquitto_subscribe(m, NULL, WP_TOPIC, 0);
+		mosquitto_subscribe(m, NULL, SEASON_TOPIC, 0);
 	}
 }
 
@@ -283,6 +287,15 @@ static void on_message(struct mosquitto *m, void *ud, const struct mosquitto_mes
 			mq.inv_time = mono();
 			pthread_mutex_unlock(&mq_lock);
 		}
+	} else if (strcmp(msg->topic, SEASON_TOPIC) == 0) {
+		const cJSON *mo = cJSON_GetObjectItemCaseSensitive(d, "mode");
+		int season = cJSON_IsString(mo) ? (strcmp(mo->valuestring, "summer") == 0 ? BM_SUMMER
+										   : strcmp(mo->valuestring, "winter") == 0 ? BM_WINTER : 0) : 0;
+		pthread_mutex_lock(&mq_lock);
+		mq.season = season;
+		mq.season_ts = jnum(d, "ts", 0, NULL);
+		pthread_mutex_unlock(&mq_lock);
+		LOG("season: %s (%s)", season == BM_SUMMER ? "summer" : season == BM_WINTER ? "winter" : "?", buf);
 	} else if (strcmp(msg->topic, R290_TOPIC) == 0) {
 		pthread_mutex_lock(&mq_lock);
 		mq.r290_hz = (int)jnum(d, "comp_freq_actual", 0, NULL);
@@ -384,6 +397,8 @@ static void write_state(const int *sp, char why[][WHY_LEN], double surplus)
 	cJSON_AddNumberToObject(o, "noon_h", round(o_.ls.noon_h * 100) / 100);
 	cJSON_AddNumberToObject(o, "peak_today", st.peak_today);
 	cJSON_AddNumberToObject(o, "badweather_today", st.badweather_today);
+	cJSON_AddStringToObject(js, "season", o_.winter ? "winter" : "summer");
+	cJSON_AddStringToObject(js, "season_source", o_.season_measured ? "measured" : "months");
 	o = cJSON_AddObjectToObject(js, "pi");
 	cJSON_AddNumberToObject(o, "armed", cfg.pi_armed);
 	cJSON_AddNumberToObject(o, "y_w", round(o_.pi.y));
@@ -442,6 +457,8 @@ static void calc(void)
 	in.aussen_time = mq.aussen_time;
 	in.wp = mq.wp;
 	in.wp_time = mq.wp_time;
+	in.season = mq.season;
+	in.season_ts = (time_t)mq.season_ts;
 	pthread_mutex_unlock(&mq_lock);
 	const char *vb = vebus();
 	for (int p = 0; p < NPH; p++) {

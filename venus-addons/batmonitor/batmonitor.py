@@ -37,6 +37,9 @@ Differences, all on purpose:
   z2 = pcc + WP (SDM72D em0/power) replaces pcc in the discharge rule, no night floor while the WP runs, WP_CAP only
   as fallback when em0/power is stale. Charging stays on the Z1 PCC. Summer mode (SUMMER_MONTHS): the heat pump is
   served 100 % from the batteries, discharge on the Z1 PCC as before.
+- winter/summer from measured energy (0.19, same in c/ 0.21-c): batmonitor/season from readers/season.py on .218
+  (summer when the export exceeds 2 x the heat pump energy over 7 days, winter below 1 x); the months Oct-Apr only
+  when that message is missing or older than 2 days.
 - charge block (0.15, user 2026-10-08): fox2db_logic.h Ladesperre with the clear-sky DC model (Meinel, NOAA sun
   position, strings fitted per field, tree horizon, temperature derating from aussen/temp), 1:1. Summer only
   (LADESPERRE_MONTHS, ESP: May-Aug): on a forecast 20 kW day PV surplus charging waits for the peak window
@@ -64,7 +67,7 @@ import paho.mqtt.client as mqtt
 from dbus.mainloop.glib import DBusGMainLoop
 from gi.repository import GLib
 
-VERSION = '0.18'
+VERSION = '0.19'
 LIVE = os.environ.get('BATMONITOR_LIVE') == '1'
 MQTT_HOST = os.environ.get('BATMONITOR_MQTT_HOST', '192.168.178.218')
 INVERTER_TOPIC = 'inverter/power_grid_exchange/json'
@@ -73,6 +76,8 @@ AUSSEN_TOPIC = 'aussen/temp'
 WP_TOPIC = 'em0/power'     # SDM72D, heat pump electrical power in W (sdm72d.py on .218, once a minute)
 WP_MAX_AGE = 150           # s, older: no Z2 correction, WP_CAP as before
 WP_ON_TH = 300.0           # W: heat pump counts as running (no night floor)
+SEASON_TOPIC = 'batmonitor/season'   # season.py on .218, hourly: {"mode": "summer"|"winter", ..., "ts"}
+SEASON_MAX_AGE = 2 * 86400           # s: older -> month rule
 
 BANKS = {
 	# Stack1 MUST feeds the middle unit (device 2 on the wall) = HQ2606P4NCH = Devices/0 = L1 (user photo 2026-10-08)
@@ -203,6 +208,8 @@ class BatMonitor:
 		self.aussen_time = 0.0
 		self.wp = None
 		self.wp_time = 0.0
+		self.season = None
+		self.season_ts = 0
 		# charge block day latches (ESP State: peak_today, ladesperre_latched, badweather_today)
 		self.ls_day = None
 		self.peak_today = self.ls_latched = self.badweather_today = False
@@ -228,6 +235,11 @@ class BatMonitor:
 		self.pcc_avg5 = (pcc5 if pcc5 is not None else d.get('ActivePower_PCC_Total', 0)) * 1000.0
 		self.bat1_avg5 = (bat5 if bat5 is not None else (d.get('Power_Bat1') or 0)) * 1000.0
 		self.inv_time = time.monotonic()
+
+	def on_season(self, d):
+		self.season = d.get('mode') if d.get('mode') in ('summer', 'winter') else None
+		self.season_ts = d.get('ts') or 0
+		log.info('season: %s', d)
 
 	def on_wp(self, v):
 		if -1000.0 < v < 30000.0:
@@ -275,7 +287,8 @@ class BatMonitor:
 		wp_running = self.r290_time and now - self.r290_time < STALE_SECONDS and self.r290_hz > 0
 		# Z2 point = Z1 PCC + heat pump, winter only: the discharge serves only the house
 		wp_fresh = self.wp_time and now - self.wp_time < WP_MAX_AGE
-		winter = month not in SUMMER_MONTHS
+		season_ok = self.season and time.time() - self.season_ts < SEASON_MAX_AGE
+		winter = self.season == 'winter' if season_ok else month not in SUMMER_MONTHS
 		wp_eff = self.wp if (winter and wp_fresh and self.wp and self.wp > 0) else 0.0
 		sp, why = {}, {}
 		discharge, charge = [], []
@@ -355,7 +368,7 @@ class BatMonitor:
 			rule += '|NIGHT' if night else ''
 			if wp_eff >= WP_ON_TH:
 				rule += '|Z2'
-			if not wp_fresh and month not in SUMMER_MONTHS and wp_running and w > WP_CAP:
+			if not wp_fresh and winter and wp_running and w > WP_CAP:
 				w = WP_CAP
 				rule += '|WP_CAP'
 			# SoC balancing: the stack more than SOC_BALANCE_ON ahead delivers alone, else equal shares
@@ -540,7 +553,7 @@ def main():
 
 	def on_connect(client, userdata, flags, reason_code, properties):
 		log.info('MQTT connected to %s (%s)', MQTT_HOST, reason_code)
-		client.subscribe([(INVERTER_TOPIC, 0), (R290_TOPIC, 0), (AUSSEN_TOPIC, 0), (WP_TOPIC, 0)])
+		client.subscribe([(INVERTER_TOPIC, 0), (R290_TOPIC, 0), (AUSSEN_TOPIC, 0), (WP_TOPIC, 0), (SEASON_TOPIC, 0)])
 
 	def on_message(client, userdata, msg):
 		if msg.topic in (AUSSEN_TOPIC, WP_TOPIC):
@@ -558,6 +571,8 @@ def main():
 			bm.on_inverter(d)
 		elif msg.topic == R290_TOPIC:
 			bm.on_r290(d)
+		elif msg.topic == SEASON_TOPIC:
+			bm.on_season(d)
 
 	client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id='batmonitor')
 	client.on_connect = on_connect

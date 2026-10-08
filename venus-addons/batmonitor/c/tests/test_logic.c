@@ -25,6 +25,7 @@ struct plant {
 	int sofar_dis, sofar_chg;      /* Sofar Bat1 may discharge / charge */
 	double soc[NBANK];
 	int wp_fresh, r290_hz, stale_inv;
+	int season, season_age_h;      /* batmonitor/season: 0 none, BM_SUMMER, BM_WINTER; age of its ts */
 	double aussen;
 };
 
@@ -82,6 +83,8 @@ static void simulate(struct run *r, const struct plant *pl, time_t t0, int n)
 		in->aussen_time = now;
 		in->wp = pl->wp;
 		in->wp_time = pl->wp_fresh ? now : 0;
+		in->season = pl->season;
+		in->season_ts = in->t - pl->season_age_h * 3600;
 		for (int p = 0; p < NPH; p++) {
 			in->ac_ok[p] = 1;
 			in->ac_in[p] = r->ac[p];
@@ -305,6 +308,32 @@ static void test_ladesperre_clouds_release(void)
 	CHECK(sum_sp(&r) > 0, "charging, sp sum %d", sum_sp(&r));
 }
 
+static void test_season_measured_overrides_months(void)
+{
+	struct run r;
+	struct plant pl = BASE(.house = 500, .wp = 1200, .r290_hz = 40, .season = BM_SUMMER, .season_age_h = 1);
+	simulate(&r, &pl, local_time(2026, 10, 20, 23, 0), 60);      /* October, but measured: still summer */
+	print_state("Oct night, season.py says summer", &r);
+	CHECK(!r.out.winter && r.out.season_measured, "measured summer used");
+	CHECK(abs(sum_sp(&r) + 1700) <= 60, "WP from the batteries, sp sum %d", sum_sp(&r));
+
+	pl.season = BM_WINTER;
+	simulate(&r, &pl, local_time(2026, 5, 10, 23, 0), 60);       /* May, but measured: still winter */
+	print_state("May night, season.py says winter", &r);
+	CHECK(r.out.winter && rule_has(&r, "|Z2"), "measured winter used, Z2 rule");
+	CHECK(abs(sum_sp(&r) + 500) <= 60, "Multis cover only the house, sp sum %d", sum_sp(&r));
+}
+
+static void test_season_stale_falls_back_to_months(void)
+{
+	struct run r;
+	struct plant pl = BASE(.house = 500, .wp = 1200, .r290_hz = 40, .season = BM_SUMMER, .season_age_h = 49);
+	simulate(&r, &pl, local_time(2026, 11, 20, 23, 0), 40);      /* summer message 49 h old: November = winter */
+	print_state("Nov night, season message 49 h old", &r);
+	CHECK(r.out.winter && !r.out.season_measured, "stale message: month rule (winter)");
+	CHECK(abs(sum_sp(&r) + 500) <= 60, "Z2: Multis cover only the house, sp sum %d", sum_sp(&r));
+}
+
 static void test_pi_shadow_not_armed(void)
 {
 	struct run r;
@@ -334,6 +363,8 @@ int main(void)
 	test_balance();
 	test_ladesperre_summer_vs_winter();
 	test_ladesperre_clouds_release();
+	test_season_measured_overrides_months();
+	test_season_stale_falls_back_to_months();
 	test_pi_shadow_not_armed();
 	printf("%d checks, %d failed\n", checks, fails);
 	return fails ? 1 : 0;
