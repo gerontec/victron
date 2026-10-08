@@ -13,6 +13,13 @@
  *       charge     own charge + KP * (pcc + bat1_eff - SOYO_TARGET)      (old: KP * (surplus - 200 W): +200 W export)
  *       discharge  own discharge - Bat1 charge - KP * (pcc - SOYO_TARGET) (old: -KP * pcc, back to IDLE once covered)
  *     both hold down to SOYO_HOLD_TH; entry thresholds unchanged (+200 W surplus, -100 W import)
+ *   - discharge regulated on the Z2 point (0.19, user 2026-10-08): the Sofar PCC sits at Z1 and includes the heat pump
+ *     (measured: WP 4.1 kW at night -> Sofar load +3.3 kW). The heat pump shall take the cheap Z1 grid power, the
+ *     batteries serve the expensive Z2 house power: z2 = pcc + WP (SDM72D em0/power, once a minute) replaces pcc in
+ *     the discharge rule and the PI's discharge side; no night floor while the WP runs; WP_CAP only as fallback when
+ *     em0/power is stale. Charging stays on the Z1 PCC (on Z2 the Sofar would refill the charging from its Bat1).
+ *     Winter only (Oct-Apr, as WP_CAP): in summer mode (SUMMER_FROM..SUMMER_TO) the heat pump may and must be served
+ *     100 % from the batteries, the discharge regulates on the Z1 PCC as before (user 2026-10-08).
  * PI prototype (not armed): BATMONITOR_PI=1 lets a velocity-form PI on y = PCC + Sofar Bat1 replace the soyo
  * discharge/charge amounts (same gates, same phase split). Without it the PI runs in shadow: every cycle one line
  * in PI_SHADOW_FILE with what soyo set and what the PI would set, to compare both before arming it.
@@ -32,10 +39,13 @@
 #include <time.h>
 #include <unistd.h>
 
-#define VERSION "0.18-c"
+#define VERSION "0.19-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
+#define WP_TOPIC "em0/power"          /* SDM72D, heat pump electrical power in W (sdm72d.py on .218, once a minute) */
+#define WP_MAX_AGE 150.0              /* s, older: no Z2 correction, WP_CAP as before */
+#define WP_ON_TH 300.0                /* W: heat pump counts as running (no night floor) */
 #define STATE_FILE_DEFAULT "/data/batmonitor/state.json"
 #define TZ_BERLIN "CET-1CEST,M3.5.0,M10.5.0/3"   /* Europe/Berlin without a zoneinfo file */
 
@@ -134,6 +144,7 @@ static struct {
 	int r290_hz;
 	double r290_time;
 	double aussen, aussen_time;
+	double wp, wp_time;
 } mq;
 
 /* controller state */
@@ -359,6 +370,7 @@ static void on_connect(struct mosquitto *m, void *ud, int rc)
 		mosquitto_subscribe(m, NULL, INVERTER_TOPIC, 0);
 		mosquitto_subscribe(m, NULL, R290_TOPIC, 0);
 		mosquitto_subscribe(m, NULL, AUSSEN_TOPIC, 0);
+		mosquitto_subscribe(m, NULL, WP_TOPIC, 0);
 	}
 }
 
@@ -369,6 +381,17 @@ static void on_message(struct mosquitto *m, void *ud, const struct mosquitto_mes
 	int n = msg->payloadlen < (int)sizeof(buf) - 1 ? msg->payloadlen : (int)sizeof(buf) - 1;
 	memcpy(buf, msg->payload, n);
 	buf[n] = 0;
+	if (strcmp(msg->topic, WP_TOPIC) == 0) {
+		char *end;
+		double v = strtod(buf, &end);
+		if (end != buf && v > -1000.0 && v < 30000.0) {
+			pthread_mutex_lock(&mq_lock);
+			mq.wp = v;
+			mq.wp_time = mono();
+			pthread_mutex_unlock(&mq_lock);
+		}
+		return;
+	}
 	if (strcmp(msg->topic, AUSSEN_TOPIC) == 0) {
 		char *end;
 		double v = strtod(buf, &end);
@@ -695,12 +718,18 @@ static void calc(void)
 	pthread_mutex_lock(&mq_lock);
 	int have_pcc = mq.have_pcc, have_pv = mq.have_pv;
 	double pcc = mq.pcc, pv = mq.pv, bat1 = mq.bat1, pcc_avg5 = mq.pcc_avg5, bat1_avg5 = mq.bat1_avg5,
-		   inv_time = mq.inv_time, r290_time = mq.r290_time, aussen = mq.aussen, aussen_time = mq.aussen_time;
+		   inv_time = mq.inv_time, r290_time = mq.r290_time, aussen = mq.aussen, aussen_time = mq.aussen_time,
+		   wp_w = mq.wp, wp_time = mq.wp_time;
 	int r290_hz = mq.r290_hz;
 	pthread_mutex_unlock(&mq_lock);
 
 	int stale = inv_time == 0 || now - inv_time > STALE_SECONDS;
 	int wp_running = r290_time > 0 && now - r290_time < STALE_SECONDS && r290_hz > 0;
+	/* Z2 point = Z1 PCC + heat pump: the discharge serves only the house (0.19) */
+	int wp_fresh = wp_time > 0 && now - wp_time < WP_MAX_AGE;
+	int winter = !(month >= SUMMER_FROM && month <= SUMMER_TO);
+	double wp_eff = winter && wp_fresh && wp_w > 0 ? wp_w : 0.0;   /* summer: WP 100 % from the batteries */
+	double z2 = pcc + wp_eff;
 	int sp[NPH] = {0}, discharge[NPH] = {0}, charge[NPH] = {0}, n_dis = 0, n_chg = 0;
 	int pi_ok[NPH] = {0}, pi_chg[NPH] = {0}, pi_dis[NPH] = {0}, n_pichg = 0, n_pidis = 0;
 	char why[NPH][96] = {{0}};
@@ -790,10 +819,11 @@ static void calc(void)
 		char rule[64];
 		/* deficit = what the Multis already give (minus what of it goes into the Sofar battery) + the import still
 		   left (0.18; old: -KP * pcc, which dropped back to IDLE as soon as the own discharge covered the import) */
-		double deficit = own_discharge - (bat1 > 0 ? bat1 : 0.0) - KP * (pcc - SOYO_TARGET);
-		if (pcc < PCC_IMPORT_TH || (soyo_prop_prev && deficit > SOYO_HOLD_TH)) {
+		double deficit = own_discharge - (bat1 > 0 ? bat1 : 0.0) - KP * (z2 - SOYO_TARGET);
+		int night_floor = night && wp_eff < WP_ON_TH;   /* the night base load would flow into the heat pump */
+		if (z2 < PCC_IMPORT_TH || (soyo_prop_prev && deficit > SOYO_HOLD_TH)) {
 			w = deficit > 0 ? (int)deficit : 0;   /* never turn a discharge into charging (Sofar TOU charge) */
-			if (night && w < B_NIGHT)
+			if (night_floor && w < B_NIGHT)
 				w = B_NIGHT;
 			if (w > W_MAX)
 				w = W_MAX;
@@ -801,12 +831,14 @@ static void calc(void)
 			soyo_prop_prev = 1;
 		} else {
 			soyo_prop_prev = 0;
-			w = night ? B_NIGHT : B_DAY_IDLE;
+			w = night_floor ? B_NIGHT : B_DAY_IDLE;
 			strcpy(rule, "IDLE");
 		}
 		if (night)
 			strcat(rule, "|NIGHT");
-		if (!(month >= SUMMER_FROM && month <= SUMMER_TO) && wp_running && w > WP_CAP) {
+		if (wp_eff >= WP_ON_TH)
+			strcat(rule, "|Z2");
+		if (!wp_fresh && !(month >= SUMMER_FROM && month <= SUMMER_TO) && wp_running && w > WP_CAP) {
 			w = WP_CAP;
 			strcat(rule, "|WP_CAP");
 		}
@@ -830,14 +862,19 @@ static void calc(void)
 		for (int p = 0; p < NPH; p++)
 			if (pi_ok[p])
 				applied += setpoints[p];
-		double b1 = bat1 > 0 ? bat1 * BAT1_CHARGE_FACTOR : (applied > 0 || night) ? bat1 : 0.0;
-		double y = (have_pcc ? pcc : 0.0) + b1, e = y - PI_TARGET;
+		double b1 = bat1 > 0 ? bat1 * BAT1_CHARGE_FACTOR : (applied > 0 || (night && wp_eff < WP_ON_TH)) ? bat1 : 0.0;
+		/* discharge side on the Z2 point (0.19), charge side on the Z1 PCC, as soyo */
+		double y = (have_pcc ? (applied > 0 ? pcc : z2) : 0.0) + b1, e = y - PI_TARGET;
 		if (fabs(e) < PI_DEADBAND)
 			e = 0;
 		double dt = pi_t_prev > 0 ? fmin(fmax(now - pi_t_prev, 1.0), 30.0) : CYCLE_SECONDS;
 		double u = applied + (pi_t_prev > 0 ? PI_KP * (e - pi_e_prev) : 0) + PI_KI * dt * e;
-		int dis_cap = (!(month >= SUMMER_FROM && month <= SUMMER_TO) && wp_running) ? WP_CAP : W_MAX;
+		int dis_cap = (!wp_fresh && !(month >= SUMMER_FROM && month <= SUMMER_TO) && wp_running) ? WP_CAP : W_MAX;
 		double u_max = (double)CHARGE_MAX_PHASE * n_pichg, u_min = n_pidis ? -dis_cap : 0;
+		/* crossing from discharge (Z2 side) into charging: never more than the real Z1 export, else the Sofar Bat1
+		   would feed the charging while the heat pump runs */
+		if (applied <= 0 && u > 0)
+			u = fmax(0.0, fmin(u, (have_pcc ? pcc : 0.0) + b1 - PI_TARGET));
 		u = fmax(u_min, fmin(u_max, u));
 		pi_e_prev = e;
 		pi_t_prev = now;
@@ -902,8 +939,8 @@ static void calc(void)
 			snprintf(spcc, sizeof(spcc), "%.0f", pcc);
 		if (have_pv)
 			snprintf(spv, sizeof(spv), "%.0f", pv);
-		LOG("%spcc %s W bat1 %.0f W pv %s W -> %s | %s | PI%s u %+.0f W", LIVE ? "" : "DRY ", spcc, bat1, spv, line, eta,
-			PI_ENABLE ? "" : " shadow", pi.u);
+		LOG("%spcc %s W wp %.0f W bat1 %.0f W pv %s W -> %s | %s | PI%s u %+.0f W", LIVE ? "" : "DRY ", spcc, wp_eff, bat1, spv,
+			line, eta, PI_ENABLE ? "" : " shadow", pi.u);
 		strcpy(last_rules, rules);
 		last_log = now;
 	}

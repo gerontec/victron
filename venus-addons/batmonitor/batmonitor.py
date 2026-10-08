@@ -32,6 +32,11 @@ Differences, all on purpose:
     charge     own charge + KP * (pcc + bat1_eff - SOYO_TARGET)       (old: KP * (surplus - 200 W) -> +200 W export)
     discharge  own discharge - Bat1 charge - KP * (pcc - SOYO_TARGET)  (old: -KP * pcc, back to IDLE once covered)
   both hold down to SOYO_HOLD_TH; entry thresholds unchanged (+200 W surplus, -100 W import).
+- discharge on the Z2 point in winter (0.17, same in c/batmonitor.c 0.19): the Sofar PCC sits at Z1 and includes the
+  heat pump; the heat pump shall take the cheap Z1 grid power, the batteries the expensive Z2 house power:
+  z2 = pcc + WP (SDM72D em0/power) replaces pcc in the discharge rule, no night floor while the WP runs, WP_CAP only
+  as fallback when em0/power is stale. Charging stays on the Z1 PCC. Summer mode (SUMMER_MONTHS): the heat pump is
+  served 100 % from the batteries, discharge on the Z1 PCC as before.
 - charge block (0.15, user 2026-10-08): fox2db_logic.h Ladesperre with the clear-sky DC model (Meinel, NOAA sun
   position, strings fitted per field, tree horizon, temperature derating from aussen/temp), 1:1. Summer only
   (LADESPERRE_MONTHS, ESP: May-Aug): on a forecast 20 kW day PV surplus charging waits for the peak window
@@ -59,12 +64,15 @@ import paho.mqtt.client as mqtt
 from dbus.mainloop.glib import DBusGMainLoop
 from gi.repository import GLib
 
-VERSION = '0.16'
+VERSION = '0.17'
 LIVE = os.environ.get('BATMONITOR_LIVE') == '1'
 MQTT_HOST = os.environ.get('BATMONITOR_MQTT_HOST', '192.168.178.218')
 INVERTER_TOPIC = 'inverter/power_grid_exchange/json'
 R290_TOPIC = 'r290/heatpump/all'
 AUSSEN_TOPIC = 'aussen/temp'
+WP_TOPIC = 'em0/power'     # SDM72D, heat pump electrical power in W (sdm72d.py on .218, once a minute)
+WP_MAX_AGE = 150           # s, older: no Z2 correction, WP_CAP as before
+WP_ON_TH = 300.0           # W: heat pump counts as running (no night floor)
 
 BANKS = {
 	# Stack1 MUST feeds the middle unit (device 2 on the wall) = HQ2606P4NCH = Devices/0 = L1 (user photo 2026-10-08)
@@ -193,6 +201,8 @@ class BatMonitor:
 		self.pcc_avg5 = self.bat1_avg5 = None
 		self.aussen = None
 		self.aussen_time = 0.0
+		self.wp = None
+		self.wp_time = 0.0
 		# charge block day latches (ESP State: peak_today, ladesperre_latched, badweather_today)
 		self.ls_day = None
 		self.peak_today = self.ls_latched = self.badweather_today = False
@@ -218,6 +228,11 @@ class BatMonitor:
 		self.pcc_avg5 = (pcc5 if pcc5 is not None else d.get('ActivePower_PCC_Total', 0)) * 1000.0
 		self.bat1_avg5 = (bat5 if bat5 is not None else (d.get('Power_Bat1') or 0)) * 1000.0
 		self.inv_time = time.monotonic()
+
+	def on_wp(self, v):
+		if -1000.0 < v < 30000.0:
+			self.wp = v
+			self.wp_time = time.monotonic()
 
 	def on_aussen(self, v):
 		if -40.0 < v < 55.0:
@@ -258,6 +273,10 @@ class BatMonitor:
 		stale = self.inv_time == 0 or now - self.inv_time > STALE_SECONDS
 		month = datetime.now(TIMEZONE).month
 		wp_running = self.r290_time and now - self.r290_time < STALE_SECONDS and self.r290_hz > 0
+		# Z2 point = Z1 PCC + heat pump, winter only: the discharge serves only the house
+		wp_fresh = self.wp_time and now - self.wp_time < WP_MAX_AGE
+		winter = month not in SUMMER_MONTHS
+		wp_eff = self.wp if (winter and wp_fresh and self.wp and self.wp > 0) else 0.0
 		sp, why = {}, {}
 		discharge, charge = [], []
 		# the meter already includes our own charging: use the measured AC-in, not the setpoints (the AC-in
@@ -316,20 +335,24 @@ class BatMonitor:
 		if discharge:
 			night = self.pv is not None and self.pv < NIGHT_PV_TH
 			# what the Multis already give (minus what of it goes into the Sofar battery) + the import still left
-			deficit = own_discharge - max(self.bat1, 0.0) - KP * (self.pcc - SOYO_TARGET)
-			if self.pcc < PCC_IMPORT_TH or (self.soyo_prop_prev and deficit > SOYO_HOLD_TH):
+			z2 = self.pcc + wp_eff
+			night_floor = night and wp_eff < WP_ON_TH   # the night base load would flow into the heat pump
+			deficit = own_discharge - max(self.bat1, 0.0) - KP * (z2 - SOYO_TARGET)
+			if z2 < PCC_IMPORT_TH or (self.soyo_prop_prev and deficit > SOYO_HOLD_TH):
 				w = max(int(deficit), 0)          # never turn a discharge into charging (Sofar TOU charge)
-				if night:
+				if night_floor:
 					w = max(w, B_NIGHT)
 				w = min(w, W_MAX)
 				rule = 'PROPORTIONAL'
 				self.soyo_prop_prev = True
 			else:
-				w = B_NIGHT if night else B_DAY_IDLE
+				w = B_NIGHT if night_floor else B_DAY_IDLE
 				rule = 'IDLE'
 				self.soyo_prop_prev = False
 			rule += '|NIGHT' if night else ''
-			if month not in SUMMER_MONTHS and wp_running and w > WP_CAP:
+			if wp_eff >= WP_ON_TH:
+				rule += '|Z2'
+			if not wp_fresh and month not in SUMMER_MONTHS and wp_running and w > WP_CAP:
 				w = WP_CAP
 				rule += '|WP_CAP'
 			# SoC balancing: the stack more than SOC_BALANCE_ON ahead delivers alone, else equal shares
@@ -514,12 +537,12 @@ def main():
 
 	def on_connect(client, userdata, flags, reason_code, properties):
 		log.info('MQTT connected to %s (%s)', MQTT_HOST, reason_code)
-		client.subscribe([(INVERTER_TOPIC, 0), (R290_TOPIC, 0), (AUSSEN_TOPIC, 0)])
+		client.subscribe([(INVERTER_TOPIC, 0), (R290_TOPIC, 0), (AUSSEN_TOPIC, 0), (WP_TOPIC, 0)])
 
 	def on_message(client, userdata, msg):
-		if msg.topic == AUSSEN_TOPIC:
+		if msg.topic in (AUSSEN_TOPIC, WP_TOPIC):
 			try:
-				bm.on_aussen(float(msg.payload))
+				(bm.on_aussen if msg.topic == AUSSEN_TOPIC else bm.on_wp)(float(msg.payload))
 			except ValueError:
 				pass
 			return
