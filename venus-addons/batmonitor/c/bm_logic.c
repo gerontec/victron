@@ -13,7 +13,8 @@
 #define KP 1.01
 #define B_NIGHT (468 * POWER_SCALE)
 #define B_DAY_IDLE (10 * POWER_SCALE)
-#define W_MAX (900 * POWER_SCALE)
+#define W_MAX 10000            /* W total discharge (0.22, user 2026-10-08; soyo was 900 * POWER_SCALE = 1800 W) */
+#define DISCHARGE_MAX_PHASE 4000   /* W per phase: MultiPlus-II 48/5000 continuous rating */
 #define PCC_IMPORT_TH -100.0
 #define PCC_SURPLUS_TH 200.0
 #define SOYO_TARGET 0.0         /* W at the PCC (0.18: was +200 W export in effect) */
@@ -27,6 +28,7 @@
 #define WP_MAX_AGE 150.0        /* s, older: no Z2 correction, WP_CAP as before */
 #define WP_ON_TH 300.0          /* W: heat pump counts as running (no night floor) */
 #define SEASON_MAX_AGE (2 * 86400)   /* s: older batmonitor/season -> month rule */
+#define WP_BAT_MAX_TRANSITION 1900.0 /* W: heat pump share from the batteries in spring/autumn (user 2026-10-08) */
 /* batmonitor */
 #define SOC_MIN 5.0
 #define SOC_MIN_RELEASE 7.0
@@ -238,11 +240,13 @@ static int ladesperre(const struct bm_cfg *cfg, const struct bm_in *in, struct b
 	return block;
 }
 
-/* discharge w (W, > 0) over the phases in dis[]; SoC balancing: the stack more than SOC_BALANCE_ON ahead
-   delivers alone, else equal shares */
+/* discharge w (W, > 0) over the phases in dis[], at most DISCHARGE_MAX_PHASE each; SoC balancing: the stack more
+   than SOC_BALANCE_ON ahead delivers alone, what its phases cannot give goes to the other phases (0.22) */
 static void alloc_discharge(int lead, int w, const int *dis, const char *rule, int *sp, char why[][WHY_LEN])
 {
-	int give[NPH] = {0}, n_give = 0, lead_ph;
+	int give[NPH] = {0}, n_give = 0, lead_ph, n_dis = 0;
+	for (int p = 0; p < NPH; p++)
+		n_dis += dis[p];
 	if (lead >= 0)
 		for (int i = 0; i < BM_BANKS[lead].nph; i++)
 			if (dis[BM_BANKS[lead].ph[i]]) {
@@ -256,11 +260,20 @@ static void alloc_discharge(int lead, int w, const int *dis, const char *rule, i
 				give[p] = 1;
 				n_give++;
 			}
+	int share = n_give ? (int)((double)w / n_give) : 0, spill = 0;
+	if (share > DISCHARGE_MAX_PHASE) {
+		spill = (share - DISCHARGE_MAX_PHASE) * n_give;
+		share = DISCHARGE_MAX_PHASE;
+	}
+	int n_rest = n_dis - n_give, extra = n_rest ? spill / n_rest : 0;
+	if (extra > DISCHARGE_MAX_PHASE)
+		extra = DISCHARGE_MAX_PHASE;
 	for (int p = 0; p < NPH; p++) {
 		if (!dis[p])
 			continue;
-		sp[p] = give[p] ? -(int)((double)w / n_give) : 0;
-		snprintf(why[p], WHY_LEN, "%s%s", rule, lead_ph && give[p] ? "|BALANCE" : lead_ph ? "|BALANCE_HOLD" : "");
+		sp[p] = give[p] ? -share : -extra;
+		snprintf(why[p], WHY_LEN, "%s%s", rule, lead_ph && give[p] ? "|BALANCE" : lead_ph ? (extra ? "|BALANCE_SPILL"
+				 : "|BALANCE_HOLD") : "");
 	}
 }
 
@@ -312,8 +325,13 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 	   0.21), the months Oct-Apr only when that is missing or older than 2 days */
 	int wp_fresh = in->wp_time > 0 && now - in->wp_time < WP_MAX_AGE;
 	int season_ok = in->season && in->t - in->season_ts < SEASON_MAX_AGE;
-	int winter = season_ok ? in->season == BM_WINTER : !(month >= SUMMER_FROM && month <= SUMMER_TO);
-	double wp_eff = winter && wp_fresh && in->wp > 0 ? in->wp : 0.0;   /* summer: WP 100 % from the batteries */
+	int season = season_ok ? in->season : (month >= SUMMER_FROM && month <= SUMMER_TO) ? BM_SUMMER : BM_WINTER;
+	int winter = season != BM_SUMMER;          /* transition counts as winter for the WP_CAP fallback */
+	/* the heat pump power the batteries must NOT cover: all of it in winter, the part above 1900 W in the
+	   transition (0.22), none in summer */
+	double wp_eff = 0.0;
+	if (wp_fresh && in->wp > 0)
+		wp_eff = season == BM_WINTER ? in->wp : season == BM_TRANSITION ? fmax(0.0, in->wp - WP_BAT_MAX_TRANSITION) : 0.0;
 	double z2 = pcc + wp_eff;
 	int *sp = out->sp;
 	char (*why)[WHY_LEN] = out->why;
@@ -406,7 +424,8 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 		/* the own charging (force charge of the other stack) is no house load: it comes from the grid (0.20) */
 		double house = z2 + own_charge;
 		double deficit = own_discharge - (bat1 > 0 ? bat1 : 0.0) - KP * (house - SOYO_TARGET);
-		int night_floor = night && wp_eff < WP_ON_TH;   /* the night base load would flow into the heat pump */
+		/* winter: the night base load would flow into the heat pump */
+		int night_floor = night && (season != BM_WINTER || !wp_fresh || in->wp < WP_ON_TH);
 		if (house < PCC_IMPORT_TH || (st->soyo_prop_prev && deficit > SOYO_HOLD_TH)) {
 			w = deficit > 0 ? (int)deficit : 0;   /* never turn a discharge into charging (Sofar TOU charge) */
 			if (night_floor && w < B_NIGHT)
@@ -423,7 +442,7 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 		if (night)
 			strcat(rule, "|NIGHT");
 		if (wp_eff >= WP_ON_TH)
-			strcat(rule, "|Z2");
+			strcat(rule, season == BM_TRANSITION ? "|WP1900" : "|Z2");
 		if (!wp_fresh && winter && wp_running && w > WP_CAP) {
 			w = WP_CAP;
 			strcat(rule, "|WP_CAP");
@@ -447,7 +466,8 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 		for (int p = 0; p < NPH; p++)
 			if (pi_ok[p])
 				applied += st->setpoints[p];
-		double b1 = bat1 > 0 ? bat1 * BAT1_CHARGE_FACTOR : (applied > 0 || (night && wp_eff < WP_ON_TH)) ? bat1 : 0.0;
+		double b1 = bat1 > 0 ? bat1 * BAT1_CHARGE_FACTOR
+					: (applied > 0 || (night && (season != BM_WINTER || !wp_fresh || in->wp < WP_ON_TH))) ? bat1 : 0.0;
 		/* discharge side on the Z2 point (0.19), charge side on the Z1 PCC, as soyo */
 		double y = (have_pcc ? (applied > 0 ? pcc : z2) : 0.0) + b1, e = y - PI_TARGET;
 		if (fabs(e) < PI_DEADBAND)
@@ -494,7 +514,7 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 	}
 	out->surplus = surplus;
 	out->wp_eff = wp_eff;
-	out->winter = winter;
+	out->season = season;
 	out->season_measured = season_ok;
 	memcpy(st->setpoints, sp, sizeof(st->setpoints));
 }

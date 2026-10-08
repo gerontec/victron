@@ -14,6 +14,7 @@
 #define WHY_LEN 96
 #define BM_SUMMER 1
 #define BM_WINTER 2
+#define BM_TRANSITION 3
 
 struct bm_bank {
 	const char *name, *service;
@@ -38,7 +39,7 @@ struct bm_in {
 	double r290_time;
 	double aussen, aussen_time;                             /* degC */
 	double wp, wp_time;                                     /* SDM72D heat pump W */
-	int season;                                             /* batmonitor/season: 0 none, BM_SUMMER, BM_WINTER */
+	int season;                                             /* batmonitor/season: 0 none, BM_SUMMER/WINTER/TRANSITION */
 	time_t season_ts;                                       /* its "ts" (unix) */
 	int ac_ok[NPH];
 	double ac_in[NPH];                                      /* vebus /Ac/ActiveIn/Lx/P, + = the Multi takes */
@@ -66,7 +67,7 @@ struct bm_out {
 	int sp[NPH];
 	char why[NPH][WHY_LEN];
 	double surplus, wp_eff;
-	int winter, season_measured;                 /* mode used this cycle; 1 = from batmonitor/season, 0 = months */
+	int season, season_measured;                 /* BM_SUMMER/WINTER/TRANSITION used; 1 = from batmonitor/season */
 	struct bm_ls ls;
 	struct bm_pi pi;
 	int lead_event;                              /* 1 = a bank took the lead, -1 = back within SOC_BALANCE_OFF */

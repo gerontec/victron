@@ -43,7 +43,7 @@
 #include <unistd.h>
 #include "bm_logic.h"
 
-#define VERSION "0.21-c"
+#define VERSION "0.22-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
@@ -290,12 +290,14 @@ static void on_message(struct mosquitto *m, void *ud, const struct mosquitto_mes
 	} else if (strcmp(msg->topic, SEASON_TOPIC) == 0) {
 		const cJSON *mo = cJSON_GetObjectItemCaseSensitive(d, "mode");
 		int season = cJSON_IsString(mo) ? (strcmp(mo->valuestring, "summer") == 0 ? BM_SUMMER
-										   : strcmp(mo->valuestring, "winter") == 0 ? BM_WINTER : 0) : 0;
+										   : strcmp(mo->valuestring, "winter") == 0 ? BM_WINTER
+										   : strcmp(mo->valuestring, "transition") == 0 ? BM_TRANSITION : 0) : 0;
 		pthread_mutex_lock(&mq_lock);
 		mq.season = season;
 		mq.season_ts = jnum(d, "ts", 0, NULL);
 		pthread_mutex_unlock(&mq_lock);
-		LOG("season: %s (%s)", season == BM_SUMMER ? "summer" : season == BM_WINTER ? "winter" : "?", buf);
+		LOG("season: %s (%s)", season == BM_SUMMER ? "summer" : season == BM_WINTER ? "winter"
+			: season == BM_TRANSITION ? "transition" : "?", buf);
 	} else if (strcmp(msg->topic, R290_TOPIC) == 0) {
 		pthread_mutex_lock(&mq_lock);
 		mq.r290_hz = (int)jnum(d, "comp_freq_actual", 0, NULL);
@@ -397,7 +399,8 @@ static void write_state(const int *sp, char why[][WHY_LEN], double surplus)
 	cJSON_AddNumberToObject(o, "noon_h", round(o_.ls.noon_h * 100) / 100);
 	cJSON_AddNumberToObject(o, "peak_today", st.peak_today);
 	cJSON_AddNumberToObject(o, "badweather_today", st.badweather_today);
-	cJSON_AddStringToObject(js, "season", o_.winter ? "winter" : "summer");
+	cJSON_AddStringToObject(js, "season", o_.season == BM_WINTER ? "winter" : o_.season == BM_TRANSITION ? "transition"
+							: "summer");
 	cJSON_AddStringToObject(js, "season_source", o_.season_measured ? "measured" : "months");
 	o = cJSON_AddObjectToObject(js, "pi");
 	cJSON_AddNumberToObject(o, "armed", cfg.pi_armed);

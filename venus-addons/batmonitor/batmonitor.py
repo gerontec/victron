@@ -40,6 +40,10 @@ Differences, all on purpose:
 - winter/summer from measured energy (0.19, same in c/ 0.21-c): batmonitor/season from readers/season.py on .218
   (summer when the export exceeds 2 x the heat pump energy over 7 days, winter below 1 x); the months Oct-Apr only
   when that message is missing or older than 2 days.
+- transition (0.20, same in c/ 0.22-c): season.py also reports "transition" (export between 1x and 2x the heat
+  pump energy); then the heat pump gets at most 1900 W from the batteries, the part above comes from the Z1 grid.
+  W_MAX raised to 10 kW total (user), at most 4 kW per phase (MultiPlus-II 48/5000 continuous); with SoC balancing
+  the part the leading stack cannot give spills to the other phases.
 - charge block (0.15, user 2026-10-08): fox2db_logic.h Ladesperre with the clear-sky DC model (Meinel, NOAA sun
   position, strings fitted per field, tree horizon, temperature derating from aussen/temp), 1:1. Summer only
   (LADESPERRE_MONTHS, ESP: May-Aug): on a forecast 20 kW day PV surplus charging waits for the peak window
@@ -67,7 +71,7 @@ import paho.mqtt.client as mqtt
 from dbus.mainloop.glib import DBusGMainLoop
 from gi.repository import GLib
 
-VERSION = '0.19'
+VERSION = '0.20'
 LIVE = os.environ.get('BATMONITOR_LIVE') == '1'
 MQTT_HOST = os.environ.get('BATMONITOR_MQTT_HOST', '192.168.178.218')
 INVERTER_TOPIC = 'inverter/power_grid_exchange/json'
@@ -91,7 +95,9 @@ POWER_SCALE = 2
 KP = 1.01
 B_NIGHT = 468 * POWER_SCALE        # W
 B_DAY_IDLE = 10 * POWER_SCALE      # W
-W_MAX = 900 * POWER_SCALE          # W, total (ESP: Soyo maximum)
+W_MAX = 10000              # W total discharge (0.20, user 2026-10-08; soyo was 900 * POWER_SCALE)
+DISCHARGE_MAX_PHASE = 4000 # W per phase: MultiPlus-II 48/5000 continuous rating
+WP_BAT_MAX_TRANSITION = 1900.0   # W: heat pump share from the batteries in spring/autumn (user 2026-10-08)
 PCC_IMPORT_TH = -100.0     # W
 PCC_SURPLUS_TH = 200.0     # W
 SOYO_TARGET = 0.0          # W at the PCC (0.16: was +200 W export in effect)
@@ -237,7 +243,7 @@ class BatMonitor:
 		self.inv_time = time.monotonic()
 
 	def on_season(self, d):
-		self.season = d.get('mode') if d.get('mode') in ('summer', 'winter') else None
+		self.season = d.get('mode') if d.get('mode') in ('summer', 'winter', 'transition') else None
 		self.season_ts = d.get('ts') or 0
 		log.info('season: %s', d)
 
@@ -288,8 +294,12 @@ class BatMonitor:
 		# Z2 point = Z1 PCC + heat pump, winter only: the discharge serves only the house
 		wp_fresh = self.wp_time and now - self.wp_time < WP_MAX_AGE
 		season_ok = self.season and time.time() - self.season_ts < SEASON_MAX_AGE
-		winter = self.season == 'winter' if season_ok else month not in SUMMER_MONTHS
-		wp_eff = self.wp if (winter and wp_fresh and self.wp and self.wp > 0) else 0.0
+		season = self.season if season_ok else ('summer' if month in SUMMER_MONTHS else 'winter')
+		winter = season != 'summer'        # transition counts as winter for the WP_CAP fallback
+		# the heat pump power the batteries must NOT cover: all in winter, above 1900 W in the transition, none in summer
+		wp_eff = 0.0
+		if wp_fresh and self.wp and self.wp > 0:
+			wp_eff = self.wp if season == 'winter' else max(0.0, self.wp - WP_BAT_MAX_TRANSITION) if season == 'transition' else 0.0
 		sp, why = {}, {}
 		discharge, charge = [], []
 		# the meter already includes our own charging: use the measured AC-in, not the setpoints (the AC-in
@@ -351,7 +361,8 @@ class BatMonitor:
 			night = self.pv is not None and self.pv < NIGHT_PV_TH
 			# what the Multis already give (minus what of it goes into the Sofar battery) + the import still left
 			z2 = self.pcc + wp_eff
-			night_floor = night and wp_eff < WP_ON_TH   # the night base load would flow into the heat pump
+			# winter: the night base load would flow into the heat pump
+			night_floor = night and (season != 'winter' or not wp_fresh or not self.wp or self.wp < WP_ON_TH)
 			house = z2 + own_charge           # own (force) charging is no house load: it comes from the grid
 			deficit = own_discharge - max(self.bat1, 0.0) - KP * (house - SOYO_TARGET)
 			if house < PCC_IMPORT_TH or (self.soyo_prop_prev and deficit > SOYO_HOLD_TH):
@@ -367,16 +378,22 @@ class BatMonitor:
 				self.soyo_prop_prev = False
 			rule += '|NIGHT' if night else ''
 			if wp_eff >= WP_ON_TH:
-				rule += '|Z2'
+				rule += '|WP1900' if season == 'transition' else '|Z2'
 			if not wp_fresh and winter and wp_running and w > WP_CAP:
 				w = WP_CAP
 				rule += '|WP_CAP'
 			# SoC balancing: the stack more than SOC_BALANCE_ON ahead delivers alone, else equal shares
 			lead_ph = [p for p in BANKS[self.lead]['phases'] if p in discharge] if self.lead else []
 			give = lead_ph or discharge
+			share, spill = int(w / len(give)), 0
+			if share > DISCHARGE_MAX_PHASE:         # per phase cap; what the leading stack cannot give spills over
+				spill, share = (share - DISCHARGE_MAX_PHASE) * len(give), DISCHARGE_MAX_PHASE
+			rest = [p for p in discharge if p not in give]
+			extra = min(int(spill / len(rest)), DISCHARGE_MAX_PHASE) if rest else 0
 			for p in discharge:
-				sp[p] = -int(w / len(give)) if p in give else 0
-				why[p] = rule + ('|BALANCE' if lead_ph and p in give else '|BALANCE_HOLD' if lead_ph else '')
+				sp[p] = -share if p in give else -extra
+				why[p] = rule + ('|BALANCE' if lead_ph and p in give else
+								 ('|BALANCE_SPILL' if extra else '|BALANCE_HOLD') if lead_ph else '')
 		if charge:
 			# the meter sees our own charging: surplus = pcc + charging of the last cycle (else it toggles every minute)
 			# fill the banks in CHARGE_PRIORITY order: each phase of a bank up to CHARGE_MAX_PHASE, the rest to the next bank

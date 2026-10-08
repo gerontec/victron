@@ -169,13 +169,32 @@ static void test_summer_wp_from_battery(void)
 	CHECK(!rule_has(&r, "|Z2"), "no |Z2 in summer");
 }
 
-static void test_summer_wp_capped_at_w_max(void)
+static void test_summer_wp_4kw_from_battery(void)
 {
 	struct run r;
 	struct plant pl = BASE(.house = 500, .wp = 4000, .r290_hz = 60);
 	simulate(&r, &pl, local_time(2026, 7, 15, 23, 0), 60);
 	print_state("summer night, WP 4 kW, Sofar empty", &r);
-	CHECK(sum_sp(&r) >= -1800 && sum_sp(&r) <= -1790, "W_MAX 1800 W, sp sum %d", sum_sp(&r));
+	CHECK(abs(sum_sp(&r) + 4500) <= 60, "house + WP 4.5 kW from the batteries (W_MAX 10 kW), sp sum %d", sum_sp(&r));
+	CHECK(fabs(r.pcc) <= 80, "no grid import, pcc %.0f", r.pcc);
+}
+
+static void test_w_max_and_phase_cap(void)
+{
+	struct run r;
+	struct plant pl = BASE(.house = 14000, .r290_hz = 0, .season = BM_SUMMER, .season_age_h = 1);
+	simulate(&r, &pl, local_time(2026, 7, 15, 23, 0), 60);
+	print_state("summer night, house 14 kW", &r);
+	CHECK(sum_sp(&r) >= -10000 && sum_sp(&r) <= -9990, "W_MAX 10 kW total, sp sum %d", sum_sp(&r));
+	for (int p = 0; p < NPH; p++)
+		CHECK(r.out.sp[p] >= -4000, "phase %d at most 4000 W, got %d", p, r.out.sp[p]);
+
+	pl = BASE(.house = 6000, .soc = {60, 50}, .season = BM_SUMMER, .season_age_h = 1);
+	simulate(&r, &pl, local_time(2026, 7, 15, 23, 0), 60);       /* Stack1 leads, but L1 alone cannot give 6 kW */
+	print_state("Stack1 leads, house 6 kW", &r);
+	CHECK(r.out.sp[0] == -4000 && rule_has(&r, "BALANCE_SPILL"), "L1 at 4000 W, the rest spills to L2/L3, got %d %d %d",
+		  r.out.sp[0], r.out.sp[1], r.out.sp[2]);
+	CHECK(fabs(r.pcc) <= 80, "house covered, pcc %.0f", r.pcc);
 }
 
 static void test_winter_night_floor(void)
@@ -314,13 +333,13 @@ static void test_season_measured_overrides_months(void)
 	struct plant pl = BASE(.house = 500, .wp = 1200, .r290_hz = 40, .season = BM_SUMMER, .season_age_h = 1);
 	simulate(&r, &pl, local_time(2026, 10, 20, 23, 0), 60);      /* October, but measured: still summer */
 	print_state("Oct night, season.py says summer", &r);
-	CHECK(!r.out.winter && r.out.season_measured, "measured summer used");
+	CHECK(r.out.season == BM_SUMMER && r.out.season_measured, "measured summer used");
 	CHECK(abs(sum_sp(&r) + 1700) <= 60, "WP from the batteries, sp sum %d", sum_sp(&r));
 
 	pl.season = BM_WINTER;
 	simulate(&r, &pl, local_time(2026, 5, 10, 23, 0), 60);       /* May, but measured: still winter */
 	print_state("May night, season.py says winter", &r);
-	CHECK(r.out.winter && rule_has(&r, "|Z2"), "measured winter used, Z2 rule");
+	CHECK(r.out.season == BM_WINTER && rule_has(&r, "|Z2"), "measured winter used, Z2 rule");
 	CHECK(abs(sum_sp(&r) + 500) <= 60, "Multis cover only the house, sp sum %d", sum_sp(&r));
 }
 
@@ -330,8 +349,27 @@ static void test_season_stale_falls_back_to_months(void)
 	struct plant pl = BASE(.house = 500, .wp = 1200, .r290_hz = 40, .season = BM_SUMMER, .season_age_h = 49);
 	simulate(&r, &pl, local_time(2026, 11, 20, 23, 0), 40);      /* summer message 49 h old: November = winter */
 	print_state("Nov night, season message 49 h old", &r);
-	CHECK(r.out.winter && !r.out.season_measured, "stale message: month rule (winter)");
+	CHECK(r.out.season == BM_WINTER && !r.out.season_measured, "stale message: month rule (winter)");
 	CHECK(abs(sum_sp(&r) + 500) <= 60, "Z2: Multis cover only the house, sp sum %d", sum_sp(&r));
+}
+
+static void test_transition_wp_1900(void)
+{
+	struct run r;
+	/* W_MAX (1800 W total) would hide the 1900 W limit with a big heat pump: day, house 0, WP 2500 W */
+	struct plant pl = BASE(.pv = 200, .house = 200, .wp = 2500, .r290_hz = 50, .season = BM_TRANSITION, .season_age_h = 1);
+	simulate(&r, &pl, local_time(2026, 10, 9, 14, 0), 60);
+	print_state("transition, WP 2.5 kW, house 0 net", &r);
+	CHECK(r.out.season == BM_TRANSITION, "transition used");
+	CHECK(fabs(r.pcc + 600) <= 40, "WP above 1900 W from the grid: pcc -600, got %.0f", r.pcc);
+	CHECK(abs(sum_sp(&r) + 1900) <= 30, "batteries give 1900 W to the heat pump, sp sum %d", sum_sp(&r));
+	CHECK(rule_has(&r, "|WP1900"), "rule |WP1900");
+
+	pl.wp = 1500;                                               /* below 1900 W: all from the batteries */
+	simulate(&r, &pl, local_time(2026, 10, 9, 14, 0), 60);
+	print_state("transition, WP 1.5 kW", &r);
+	CHECK(fabs(r.pcc) <= 60 && abs(sum_sp(&r) + 1500) <= 60, "WP 1.5 kW fully from the batteries, pcc %.0f sp %d",
+		  r.pcc, sum_sp(&r));
 }
 
 static void test_pi_shadow_not_armed(void)
@@ -350,7 +388,8 @@ int main(void)
 	test_winter_wp_from_grid();
 	test_winter_wp_5kw();
 	test_summer_wp_from_battery();
-	test_summer_wp_capped_at_w_max();
+	test_summer_wp_4kw_from_battery();
+	test_w_max_and_phase_cap();
 	test_winter_night_floor();
 	test_wp_running_no_night_floor();
 	test_day_surplus_to_zero();
@@ -365,6 +404,7 @@ int main(void)
 	test_ladesperre_clouds_release();
 	test_season_measured_overrides_months();
 	test_season_stale_falls_back_to_months();
+	test_transition_wp_1900();
 	test_pi_shadow_not_armed();
 	printf("%d checks, %d failed\n", checks, fails);
 	return fails ? 1 : 0;

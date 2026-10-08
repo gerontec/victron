@@ -1,20 +1,21 @@
 #!/usr/bin/python3
 """
-season.py - summer/winter mode for batmonitor from measured energy (Pi .218, cron hourly).
+season.py - summer/transition/winter mode for batmonitor from measured energy (Pi .218, cron hourly).
 
 Rule (user 2026-10-08): the heat pump may be served from the batteries once the PV surplus is large enough that the
 batteries refill anyway. Per day:
     export_kwh  = sold energy at the Sofar PCC (Z1): time-weighted mean of max(ActivePower_PCC_Total, 0) * 24 h,
                   wagodb.inverter_data (device_id 1)
     wp_kwh      = heat pump energy: max - min of sdm72d.total_import_active_energy
-Over a sliding window of WINDOW_DAYS (today included):
-    winter -> summer   when export_7d > SUMMER_FACTOR * wp_7d     (2x)
-    summer -> winter   when export_7d < WINTER_FACTOR * wp_7d     (1x, hysteresis against flapping in spring/autumn)
-The hysteresis is replayed over all days in the DB (inverter_data keeps ~90 days), so the script needs no state file;
-the first day starts in summer if its window is above the summer threshold, else in winter.
+Over a sliding window of WINDOW_DAYS (today included), ratio = export_7d / wp_7d:
+    summer       ratio above SUMMER_FACTOR (2x)              heat pump 100 % from the batteries
+    transition   between WINTER_FACTOR and SUMMER_FACTOR     heat pump at most 1900 W from the batteries (user 2026-10-08)
+    winter       ratio below WINTER_FACTOR (1x)              heat pump from the Z1 grid only
+A band is left only HYST beyond its threshold (against flapping); the modes are replayed over all days in the DB
+(inverter_data keeps ~90 days), so the script needs no state file; the first day starts in the band of its ratio.
 
 Output: retained MQTT batmonitor/season on the local broker (batmonitor in Venus subscribes .218):
-    {"mode": "summer"|"winter", "export_7d_kwh": .., "wp_7d_kwh": .., "ratio": .., "since": "YYYY-MM-DD", "ts": unix}
+    {"mode": "summer"|"transition"|"winter", "export_7d_kwh": .., "wp_7d_kwh": .., "ratio": .., "since": "YYYY-MM-DD", "ts": unix}
 batmonitor falls back to the month rule (Oct-Apr = winter) when the message is missing or older than 2 days.
 
 usage: season.py            compute + publish
@@ -30,6 +31,7 @@ from db_config import get_db_connection   # wagodb on 192.168.178.218
 WINDOW_DAYS = 7
 SUMMER_FACTOR = 2.0
 WINTER_FACTOR = 1.0
+HYST = 0.1
 MQTT_HOST, MQTT_TOPIC = "127.0.0.1", "batmonitor/season"
 
 
@@ -52,13 +54,18 @@ def replay(export, wp):
 		win = days[max(0, i - WINDOW_DAYS + 1): i + 1]
 		e7 = sum(export[x] for x in win)
 		w7 = sum(wp[x] for x in win)
+		r = e7 / w7 if w7 > 0 else float("inf")
 		new = mode
 		if mode is None:
-			new = "summer" if e7 > SUMMER_FACTOR * w7 else "winter"
-		elif mode == "winter" and e7 > SUMMER_FACTOR * w7:
+			new = "summer" if r > SUMMER_FACTOR else "winter" if r < WINTER_FACTOR else "transition"
+		elif mode == "winter" and r > WINTER_FACTOR + HYST:
+			new = "summer" if r > SUMMER_FACTOR + HYST else "transition"
+		elif mode == "transition" and r > SUMMER_FACTOR + HYST:
 			new = "summer"
-		elif mode == "summer" and e7 < WINTER_FACTOR * w7:
+		elif mode == "transition" and r < WINTER_FACTOR - HYST:
 			new = "winter"
+		elif mode == "summer" and r < SUMMER_FACTOR - HYST:
+			new = "winter" if r < WINTER_FACTOR - HYST else "transition"
 		if new != mode:
 			since = d
 		mode = new

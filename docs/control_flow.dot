@@ -1,8 +1,8 @@
 // Who controls the three-phase MultiPlus system, through which Venus D-Bus service, with which inputs.
-// State 2026-10-08 14:30. Render: dot -Tpdf control_flow.dot -o control_flow.pdf
+// State 2026-10-08 15:40. Render: dot -Tpdf control_flow.dot -o control_flow.pdf
 digraph victron_control {
 	graph [rankdir=TB, fontname="Helvetica", fontsize=11, nodesep=0.25, ranksep=0.55, newrank=true,
-	       label="external controllers -> Venus gateways -> VE.Bus (state 2026-10-08 14:30)\nsolid = active control path, dashed = read only / inactive",
+	       label="external controllers -> Venus gateways -> VE.Bus (state 2026-10-08 15:40)\nsolid = active control path, dashed = read only / inactive",
 	       labelloc=t];
 	node  [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=9, fillcolor="#ffffff"];
 	edge  [fontname="Helvetica", fontsize=8];
@@ -17,6 +17,7 @@ digraph victron_control {
 		ebox_mqtt [label=<<b>ebox / ebox_mqtt.py</b> (Pi host cron, 30 s)<br/>publishes to .218 and 127.0.0.1<br/>factor x1 (x2 only as fallback)>];
 		stackA [fillcolor="#fff3d6", label=<<b>Stack1 MUST</b> 300 Ah LFP<br/>CAN BMS>];
 		aussen [label=<<b>heizung3.py</b> PT1000<br/>MQTT <i>aussen/temp</i>>];
+		season [label=<<b>readers/season.py</b> (Pi .218, cron :05)<br/>7 d export (inverter_data) vs. WP (sdm72d)<br/>MQTT <i>batmonitor/season</i> summer / transition / winter>];
 		sdm72d [label=<<b>sdm72d.py</b> (Pi .218, rs485_batch 1/min)<br/>heat pump power, MQTT <i>em0/power</i><br/>(between Z2 and Z1)>];
 		meters [fillcolor="#fde2e2", label=<<b>Z1</b> grid connection, all incl. heat pump (cheap WP share)<br/><b>Z2</b> house without heat pump (expensive)<br/>Sofar PCC measures at Z1 (incl. heat pump)>];
 		r290 [label=<<b>r290mb.py</b><br/>MQTT <i>r290/heatpump/all</i>>];
@@ -35,13 +36,16 @@ digraph victron_control {
 
 		batmon [fillcolor="#ffe9d6", label=<
 			<table border="0" cellspacing="0" cellpadding="1">
-			<tr><td align="left"><b>batmonitor 0.19-c</b> (C, fallback batmonitor.py 0.17, 5 s cycle, 3 MB RSS)</td></tr>
+			<tr><td align="left"><b>batmonitor 0.22-c</b> (C, bm_logic.c tested: make test; fallback batmonitor.py 0.20; 5 s)</td></tr>
 			<tr><td align="left">in: PCC, Bat1, PV, avg5 (4 s), r290 comp_freq, aussen/temp</td></tr>
 			<tr><td align="left">in: BMS SoC + DC power per stack, vebus /Ac/ActiveIn/L1..L3/P</td></tr>
 			<tr><td align="left">bank SoC &lt; 5 %: no discharge until 7 %; &lt; 3 %: grid charge 500 W/phase until 5 %</td></tr>
-			<tr><td align="left">discharge (soyo, target 0 W): own output + 1.01 * import, hold to 20 W; night min 936 W; max 1800 W</td></tr>
-			<tr><td align="left">   <b>winter (Oct-Apr): on Z2 = PCC + WP</b> -&gt; heat pump from the cheap Z1 grid, no night floor while it runs</td></tr>
-			<tr><td align="left">   summer (May-Sep): on the Z1 PCC, heat pump 100 % from the batteries</td></tr>
+			<tr><td align="left">discharge (soyo, target 0 W): own output + 1.01 * import, hold to 20 W; night min 936 W</td></tr>
+			<tr><td align="left">   max 10 kW total, 4 kW per phase (leading stack spills to the other)</td></tr>
+			<tr><td align="left">   season from batmonitor/season (export_7d / WP_7d; months Oct-Apr only as fallback):</td></tr>
+			<tr><td align="left">   <b>winter (&lt; 1x): on Z2 = PCC + WP</b> -&gt; heat pump from the cheap Z1 grid, no night floor while it runs</td></tr>
+			<tr><td align="left">   <b>transition (1x..2x): heat pump at most 1900 W from the batteries</b>, the rest from the grid</td></tr>
+			<tr><td align="left">   summer (&gt; 2x): on the Z1 PCC, heat pump 100 % from the batteries</td></tr>
 			<tr><td align="left">   em0/power stale and R290 running (Oct-Apr): max 1000 W (old WP_CAP)</td></tr>
 			<tr><td align="left">PV surplus (PCC + 0.5 * Bat1 charge + AC-in &gt; 200 W): charge to PCC 0 W (Z1)</td></tr>
 			<tr><td align="left">   Stack1 first, up to 4200 W/phase charger cap, rest up to 4900 W/phase</td></tr>
@@ -148,6 +152,7 @@ digraph victron_control {
 	mqtt218 -> batmon [label="PCC/Bat1/PV 4 s\nr290, aussen/temp, em0/power"];
 	aussen -> mqtt218 [label="aussen/temp"];
 	sdm72d -> mqtt218 [label="em0/power"];
+	season -> mqtt218 [label="batmonitor/season"];
 	meters -> sofar [style=dashed, label="PCC CT at Z1"];
 	mqtt_local -> eboxbat [label="ebox/pwr"];
 	stackA -> canbms [label="CAN 500 kbit/s"];
