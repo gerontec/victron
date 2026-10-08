@@ -85,6 +85,7 @@ const struct bm_param BM_PARAMS[] = {
 	{"SOYO_TARGET",           P(soyo_target),               0,       -500,    500,     "W", "PCC target (+ = export)"},
 	{"B_NIGHT",               P(b_night),                   936,     0,       4000,    "W", "unused since 0.25-c (night follows PCC + Sofar Bat1), kept for env compatibility"},
 	{"FC_HYST",               P(fc_hyst),                   2,       0,       20,      "%", "forecast rule back on above target + this"},
+	{"SOFAR_TRICKLE",         P(sofar_trickle),             30,      0,       500,     "W", "night: stacks give this much more than the house needs, the Sofar battery charges gently instead of swinging"},
 };
 const int BM_NPARAMS = sizeof(BM_PARAMS) / sizeof(BM_PARAMS[0]);
 
@@ -523,7 +524,10 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 		   the Sofar battery with ~600 W at a 300 W house). pcc + bat1 is the load behind the Sofar however the Sofar
 		   splits it, so both regulators do not fight; the Sofar battery idles, the PCC stays near 0 */
 		double b1_def = night_floor ? bat1 : (bat1 > 0 ? bat1 : 0.0);
-		double deficit = own_discharge - b1_def - KP * (house - cfg->soyo_target);
+		/* 0.27 (user 2026-10-08): at night aim at pcc + bat1 = +SOFAR_TRICKLE, so the Sofar battery charges a few W
+		   steadily instead of swinging between charge and discharge around 0 */
+		double target = cfg->soyo_target + (night_floor ? cfg->sofar_trickle : 0.0);
+		double deficit = own_discharge - b1_def - KP * (house - target);
 		if (house < PCC_IMPORT_TH || ((st->soyo_prop_prev || night_floor) && deficit > SOYO_HOLD_TH)) {
 			w = deficit > 0 ? (int)deficit : 0;   /* never turn a discharge into charging (Sofar TOU charge) */
 			if (w > (int)cfg->w_max)

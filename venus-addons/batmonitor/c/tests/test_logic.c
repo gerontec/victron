@@ -230,16 +230,16 @@ static void test_winter_night_floor(void)
 	struct plant pl = BASE(.house = 500, .sofar_dis = 1, .sofar_chg = 1);
 	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 40);       /* no heat pump: the stacks take over the Sofar */
 	print_state("winter night, no WP, Sofar covers", &r);
-	CHECK(abs(sum_sp(&r) + 500) <= 30, "Multis cover the house 500 W (0.25: no fixed 936 W floor), sp sum %d", sum_sp(&r));
-	CHECK(fabs(r.bat1) <= 30, "Sofar Bat1 neither charged nor discharged, bat1 %.0f", r.bat1);
+	CHECK(abs(sum_sp(&r) + 530) <= 30, "Multis cover the house 500 W + 30 W trickle (0.25/0.27), sp sum %d", sum_sp(&r));
+	CHECK(r.bat1 >= 10 && r.bat1 <= 50, "Sofar Bat1 charges gently ~30 W, never discharges, bat1 %.0f", r.bat1);
 	CHECK(fabs(r.pcc) <= 30, "PCC near 0, pcc %.0f", r.pcc);
 	CHECK(pcc_swing(&r, 20) < 60, "no oscillation, swing %.0f", pcc_swing(&r, 20));
 
 	pl = BASE(.house = 300, .sofar_dis = 1, .sofar_chg = 1);
 	simulate(&r, &pl, local_time(2026, 10, 8, 20, 30), 40);      /* 2026-10-08: 936 W floor charged the Sofar +600 W */
 	print_state("night, house 300 W, Sofar charges/discharges", &r);
-	CHECK(abs(sum_sp(&r) + 300) <= 30, "Multis cover 300 W, not 936 W, sp sum %d", sum_sp(&r));
-	CHECK(fabs(r.bat1) <= 30, "the stacks do not charge the Sofar battery, bat1 %.0f", r.bat1);
+	CHECK(abs(sum_sp(&r) + 330) <= 30, "Multis cover 300 W + 30 W trickle, not 936 W, sp sum %d", sum_sp(&r));
+	CHECK(r.bat1 >= 10 && r.bat1 <= 50, "only the 30 W trickle goes into the Sofar battery, bat1 %.0f", r.bat1);
 }
 
 static void test_wp_running_no_night_floor(void)

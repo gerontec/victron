@@ -26,6 +26,9 @@
  *   - discharge split per bank (0.26, user 2026-10-08): without a SoC lead, Stack1 (L1 alone) gives as much as
  *     Stack2 (L2+L3): L1 50 %, L2/L3 25 % each, so both 300 Ah stacks drain alike; L1 above DISCHARGE_MAX_PHASE
  *     (4000 W) spills to L2/L3. The SoC balancing (lead stack delivers alone) is unchanged.
+ *   - night trickle (0.27, user 2026-10-08): the night regulation aims at PCC + Sofar Bat1 = +SOFAR_TRICKLE (30 W),
+ *     so the Sofar battery charges a few W steadily instead of swinging between charge and discharge around 0;
+ *     a full Sofar battery lets the 30 W go to the grid.
  * PI prototype (not armed): BATMONITOR_PI=1 lets a velocity-form PI on y = PCC + Sofar Bat1 replace the soyo
  * discharge/charge amounts (same gates, same phase split). Without it the PI runs in shadow: every cycle one line
  * in PI_SHADOW_FILE with what soyo set and what the PI would set, to compare both before arming it.
@@ -49,7 +52,7 @@
 #include <unistd.h>
 #include "bm_logic.h"
 
-#define VERSION "0.26-c"
+#define VERSION "0.27-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
@@ -432,7 +435,10 @@ static void write_state(const int *sp, char why[][WHY_LEN], double surplus)
 		cJSON_AddNumberToObject(ps, BM_PH[p], o_.pi.sp[p]);
 	char *s = cJSON_PrintUnformatted(js);
 	FILE *f = fopen(tmp, "w");
-	if (!f || fputs(s, f) < 0 || fclose(f) != 0 || rename(tmp, STATE_FILE) != 0)
+	int ok = f && fputs(s, f) >= 0;
+	if (f && fclose(f) != 0)                  /* always close: a failed fputs (disk full) must not leak the handle */
+		ok = 0;
+	if (!ok || rename(tmp, STATE_FILE) != 0)
 		LOGE("state file: write failed");
 	free(s);
 	cJSON_Delete(js);

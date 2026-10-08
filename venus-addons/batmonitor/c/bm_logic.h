@@ -35,6 +35,7 @@ struct bm_cfg {
 	double soc_balance_on, soc_balance_off;
 	double soyo_target, b_night;
 	double fc_hyst;
+	double sofar_trickle;
 };
 
 /* parameter table: name (env BATMONITOR_<name>), default, allowed range, unit, meaning */
