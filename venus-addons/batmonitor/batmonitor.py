@@ -46,7 +46,7 @@ import paho.mqtt.client as mqtt
 from dbus.mainloop.glib import DBusGMainLoop
 from gi.repository import GLib
 
-VERSION = '0.8'
+VERSION = '0.10'
 LIVE = os.environ.get('BATMONITOR_LIVE') == '1'
 MQTT_HOST = os.environ.get('BATMONITOR_MQTT_HOST', '192.168.178.218')
 INVERTER_TOPIC = 'inverter/power_grid_exchange/json'
@@ -83,8 +83,11 @@ CHARGE_MAX_PHASE = 4000    # W per phase, PV surplus charging
 CHARGE_PRIORITY = ('STACK1_MUST', 'STACK2_PYTES')   # PV surplus fills the banks in this order (user 2026-10-08):
                                                     # Stack1 has one 70 A charger (~4.3 h for 300 Ah), Stack2 two
                                                     # (140 A, ~2.1 h); Stack1 first, and Stack2 is charged gentler
+SOC_BALANCE_ON = 3.0      # % SoC difference between the stacks that starts balancing (user 2026-10-08: keep within +-3 %)
+SOC_BALANCE_OFF = 1.0     # % back to normal (equal discharge share / CHARGE_PRIORITY) below this difference
 BAT1_CHARGE_FACTOR = 0.5  # share of the Sofar Bat1 charging that counts as surplus (fox2db default)
 SEND_SECONDS = 10
+STATE_FILE = '/data/batmonitor/state.json'   # read by victron2db.py on the Pi host (-> wagodb.pv_victron bm_*)
 TIMEZONE = ZoneInfo('Europe/Berlin')
 
 log = logging.getLogger('batmonitor')
@@ -99,6 +102,8 @@ class BatMonitor:
 		self.r290_hz = 0
 		self.r290_time = 0.0
 		self.prot = {b: False for b in BANKS}
+		self.soc = {b: None for b in BANKS}
+		self.lead = None        # bank more than SOC_BALANCE_ON ahead (hysteresis down to SOC_BALANCE_OFF)
 		self.force = {b: False for b in BANKS}
 		self.setpoints = {p: 0 for c in BANKS.values() for p in c['phases']}
 		self.setpoint_time = 0.0
@@ -162,6 +167,7 @@ class BatMonitor:
 		for bank, cfg in BANKS.items():
 			s = cfg['service']
 			soc = self.get(s, '/Soc') if self.get(s, '/Connected') in (1, 1.0) else None
+			self.soc[bank] = soc
 			power = self.get(s, '/Dc/0/Power')
 			if soc is not None:
 				if soc < SOC_MIN:
@@ -191,6 +197,7 @@ class BatMonitor:
 					why[p] = '%s:CHARGING(%.0fW)' % (bank, power)
 				else:
 					discharge.append(p)
+		self.update_lead()
 		if discharge:
 			night = self.pv is not None and self.pv < NIGHT_PV_TH
 			if self.pcc < PCC_IMPORT_TH:
@@ -203,14 +210,21 @@ class BatMonitor:
 			if month not in SUMMER_MONTHS and wp_running and w > WP_CAP:
 				w = WP_CAP
 				rule += '|WP_CAP'
+			# SoC balancing: the stack more than SOC_BALANCE_ON ahead delivers alone, else equal shares
+			lead_ph = [p for p in BANKS[self.lead]['phases'] if p in discharge] if self.lead else []
+			give = lead_ph or discharge
 			for p in discharge:
-				sp[p] = -int(w / len(discharge))
-				why[p] = rule
+				sp[p] = -int(w / len(give)) if p in give else 0
+				why[p] = rule + ('|BALANCE' if lead_ph and p in give else '|BALANCE_HOLD' if lead_ph else '')
 		if charge:
 			# the meter sees our own charging: surplus = pcc + charging of the last cycle (else it toggles every minute)
 			# fill the banks in CHARGE_PRIORITY order: each phase of a bank up to CHARGE_MAX_PHASE, the rest to the next bank
 			rest = min(int((surplus - PCC_SURPLUS_TH) * KP), CHARGE_MAX_PHASE * len(charge))
-			for bank in CHARGE_PRIORITY:
+			# SoC balancing: the stack behind gets priority when the other is more than SOC_BALANCE_ON ahead
+			order = CHARGE_PRIORITY
+			if self.lead:
+				order = tuple(b for b in CHARGE_PRIORITY if b != self.lead) + (self.lead,)
+			for bank in order:
 				ph = [p for p in BANKS[bank]['phases'] if p in charge]
 				if not ph:
 					continue
@@ -224,7 +238,37 @@ class BatMonitor:
 			'  '.join('%s %+d W (%s)' % (p, sp[p], why[p]) for p in sorted(sp)))
 		self.setpoints = sp
 		self.setpoint_time = now
+		self.write_state(sp, why, surplus)
 		return True
+
+	def write_state(self, sp, why, surplus):
+		"""decisions of this cycle for victron2db.py; written to a temp file and renamed (never half a file)"""
+		s1, s2 = list(BANKS)[:2]
+		state = {'ts': int(time.time()), 'version': VERSION,
+				 'sp': {p: sp[p] for p in sorted(sp)}, 'rule': {p: why[p][:48] for p in sorted(why)},
+				 'balance_lead': self.lead, 'surplus_w': None if surplus is None else round(surplus),
+				 'prot': {s1: int(self.prot[s1]), s2: int(self.prot[s2])},
+				 'force': {s1: int(self.force[s1]), s2: int(self.force[s2])}}
+		try:
+			with open(STATE_FILE + '.tmp', 'w') as f:
+				json.dump(state, f)
+			os.replace(STATE_FILE + '.tmp', STATE_FILE)
+		except OSError as e:
+			log.error('state file: %s', e)
+
+	def update_lead(self):
+		"""bank whose SoC is more than SOC_BALANCE_ON above the other one; cleared below SOC_BALANCE_OFF"""
+		a, b = list(BANKS)[:2]
+		if self.soc[a] is None or self.soc[b] is None:
+			self.lead = None
+			return
+		diff = self.soc[a] - self.soc[b]
+		if self.lead is None and abs(diff) > SOC_BALANCE_ON:
+			self.lead = a if diff > 0 else b
+			log.info('SoC balance: %s ahead by %.1f %%', self.lead, abs(diff))
+		elif self.lead is not None and abs(diff) < SOC_BALANCE_OFF:
+			log.info('SoC balance: back within %.1f %%', SOC_BALANCE_OFF)
+			self.lead = None
 
 	def send(self):
 		vb = self.vebus()

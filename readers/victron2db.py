@@ -9,6 +9,9 @@ INSERT ... ON DUPLICATE KEY UPDATE (unique portal_id + ts), so a second run in t
 DB credentials: ~/.victron2db.cnf in my.cnf format ([client] host, user, password, database).
 Cron (pi):  * * * * * /usr/bin/python3 /home/pi/python/victron2db.py >/tmp/victron2db.log 2>&1
 Options:    --print   show the row, do not write
+batmonitor: its decisions of the last cycle come from /data/batmonitor/state.json (Venus /data = host /data)
+into the bm_* columns (setpoints, rules, SoC balancing lead, protection / forced charge flags, surplus);
+NULL if the file is missing or older than BM_STATE_MAX_AGE.
 """
 
 import json
@@ -23,6 +26,9 @@ import pymysql
 MQTT_HOST = '127.0.0.1'
 COLLECT_SECONDS = 5
 DB_CNF = os.path.expanduser('~/.victron2db.cnf')
+BM_STATE = '/data/batmonitor/state.json'
+BM_STATE_MAX_AGE = 120   # s
+BM_STACKS = (('s1', 'STACK1_MUST'), ('s2', 'STACK2_PYTES'))
 
 # column -> (service, path); 'vebus' takes the first instance seen; the batteries are told apart by /ProductName:
 # 'battery' = Speicher B (EBox, dbus-ebox-battery), 'battery_a' = Speicher A (CAN-bus BMS on can0)
@@ -162,6 +168,29 @@ def build_row(portal_id, values):
 	return row
 
 
+def batmonitor_columns():
+	"""bm_* columns from the batmonitor state file, all None if it is missing or stale"""
+	cols = {f'bm_l{ph}_{k}': None for ph in (1, 2, 3) for k in ('sp_w', 'rule')}
+	cols.update({'bm_balance_lead': None, 'bm_surplus_w': None})
+	cols.update({f'bm_{s}_{k}': None for s, _ in BM_STACKS for k in ('prot', 'force')})
+	try:
+		with open(BM_STATE) as f:
+			st = json.load(f)
+	except (OSError, ValueError):
+		return cols
+	if time.time() - st.get('ts', 0) > BM_STATE_MAX_AGE:
+		return cols
+	for ph in (1, 2, 3):
+		cols[f'bm_l{ph}_sp_w'] = st.get('sp', {}).get(f'L{ph}')
+		cols[f'bm_l{ph}_rule'] = st.get('rule', {}).get(f'L{ph}')
+	cols['bm_balance_lead'] = st.get('balance_lead')
+	cols['bm_surplus_w'] = st.get('surplus_w')
+	for s, name in BM_STACKS:
+		cols[f'bm_{s}_prot'] = st.get('prot', {}).get(name)
+		cols[f'bm_{s}_force'] = st.get('force', {}).get(name)
+	return cols
+
+
 def write(row):
 	cols = list(row)
 	sql = (f"INSERT INTO pv_victron ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))}) "
@@ -179,6 +208,7 @@ def main():
 	portal_id, values = collect()
 	row = build_row(portal_id, values)
 	filled = sum(1 for k, v in row.items() if v is not None and k not in ('ts', 'portal_id'))
+	row.update(batmonitor_columns())
 	if '--print' in sys.argv:
 		for k, v in row.items():
 			print(f'{k:26} {v}')

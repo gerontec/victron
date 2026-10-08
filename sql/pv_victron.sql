@@ -73,3 +73,18 @@ CREATE TABLE IF NOT EXISTS `pv_victron` (
   KEY `ix_ts` (`ts`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
   COMMENT='Victron-Anlage Lenggries: 3x MultiPlus-II 48/5000 (L1/L2/L3) + EBox, aus Venus OS (vebus/battery/system), 1 Zeile je Minute. Repo gerontec/victron, sql/pv_victron.sql.';
+
+-- 2026-10-08: batmonitor decisions (readers/victron2db.py from /data/batmonitor/state.json)
+ALTER TABLE pv_victron
+  ADD COLUMN bm_l1_sp_w SMALLINT NULL COMMENT 'batmonitor AcPowerSetpoint L1 (W, + charge)',
+  ADD COLUMN bm_l2_sp_w SMALLINT NULL COMMENT 'batmonitor AcPowerSetpoint L2 (W, + charge)',
+  ADD COLUMN bm_l3_sp_w SMALLINT NULL COMMENT 'batmonitor AcPowerSetpoint L3 (W, + charge)',
+  ADD COLUMN bm_l1_rule VARCHAR(48) NULL COMMENT 'batmonitor rule L1',
+  ADD COLUMN bm_l2_rule VARCHAR(48) NULL COMMENT 'batmonitor rule L2',
+  ADD COLUMN bm_l3_rule VARCHAR(48) NULL COMMENT 'batmonitor rule L3',
+  ADD COLUMN bm_balance_lead VARCHAR(16) NULL COMMENT 'stack more than 3 % SoC ahead (SoC balancing), NULL = balanced',
+  ADD COLUMN bm_s1_prot TINYINT NULL COMMENT 'Stack1 MUST discharge protection (SoC < 5 % until 7 %)',
+  ADD COLUMN bm_s2_prot TINYINT NULL COMMENT 'Stack2 Pytes discharge protection (SoC < 5 % until 7 %)',
+  ADD COLUMN bm_s1_force TINYINT NULL COMMENT 'Stack1 MUST forced grid charge (SoC < 3 % until 5 %)',
+  ADD COLUMN bm_s2_force TINYINT NULL COMMENT 'Stack2 Pytes forced grid charge (SoC < 3 % until 5 %)',
+  ADD COLUMN bm_surplus_w INT NULL COMMENT 'surplus used for charging: PCC + Sofar Bat1 + own AC-in charge (W)';

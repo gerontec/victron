@@ -79,7 +79,7 @@ if ($r) {
         's2_cvl_v' => v(num($r['cvl_v']), 'V', 'Stack2 charge voltage limit (DVCC)', 'pv_victron.cvl_v'),
         's2_ccl_a' => v(num($r['ccl_a']), 'A', 'Stack2 charge current limit', 'pv_victron.ccl_a'),
         's2_dcl_a' => v(num($r['dcl_a']), 'A', 'Stack2 discharge current limit (0 = discharge blocked)', 'pv_victron.dcl_a'),
-        's2_charge_request' => v($r['charge_request'] === null ? null : (bool)$r['charge_request'], 'bool', 'Stack2 forced charge request (SoC < 5 %, 11-13 h)', 'pv_victron.charge_request'),
+        's2_charge_request' => v($r['charge_request'] === null ? null : (bool)$r['charge_request'], 'bool', 'Stack2 ChargeRequest of dbus-ebox-battery (SoC < 5 %, 11-13 h; not used by batmonitor in Hub4Mode 3)', 'pv_victron.charge_request'),
         // Stack1 = MUST (CAN BMS on can0)
         's1_soc' => v(num($r['a_soc']), '%', 'Stack1 (MUST, CAN BMS, 300 Ah) state of charge', 'pv_victron.a_soc'),
         's1_soc_min_24h' => v(num($ext['s1_min'] ?? null), '%', 'Stack1 lowest SoC in the last 24 h', 'pv_victron.a_soc'),
@@ -98,6 +98,19 @@ if ($r) {
         'system_state' => v(num($r['system_state']), '', 'Venus system state', 'pv_victron.system_state'),
         'ess_setpoint_w' => v(num($r['ess_setpoint_w']), 'W', 'ESS grid setpoint (+ = import)', 'pv_victron.ess_setpoint_w'),
         'grid_kw' => v(kw($grid), 'kW', 'Grid value used by ESS: -(Sofar PCC + Bat1) with observer (dbus-pcc-grid), + = import', 'derived: pv_victron.grid_l1..l3_w'),
+        // batmonitor decisions (venus-addons/batmonitor, Hub4Mode 3)
+        'bm_l1_sp_w' => v(num($r['bm_l1_sp_w'] ?? null), 'W', 'batmonitor setpoint L1 (dev0, Stack2), + = charging', 'pv_victron.bm_l1_sp_w'),
+        'bm_l2_sp_w' => v(num($r['bm_l2_sp_w'] ?? null), 'W', 'batmonitor setpoint L2 (dev1, Stack1), + = charging', 'pv_victron.bm_l2_sp_w'),
+        'bm_l3_sp_w' => v(num($r['bm_l3_sp_w'] ?? null), 'W', 'batmonitor setpoint L3 (dev2, Stack2), + = charging', 'pv_victron.bm_l3_sp_w'),
+        'bm_l1_rule' => v($r['bm_l1_rule'] ?? null, 'text', 'batmonitor rule L1', 'pv_victron.bm_l1_rule'),
+        'bm_l2_rule' => v($r['bm_l2_rule'] ?? null, 'text', 'batmonitor rule L2', 'pv_victron.bm_l2_rule'),
+        'bm_l3_rule' => v($r['bm_l3_rule'] ?? null, 'text', 'batmonitor rule L3', 'pv_victron.bm_l3_rule'),
+        'bm_balance_lead' => v($r['bm_balance_lead'] ?? null, 'text', 'Stack more than 3 % SoC ahead (it alone feeds the house, the other is charged first); null = balanced', 'pv_victron.bm_balance_lead'),
+        'bm_surplus_kw' => v(kw($r['bm_surplus_w'] ?? null), 'kW', 'Surplus used for charging: Sofar PCC + Bat1 + own AC-in charging', 'pv_victron.bm_surplus_w'),
+        's1_discharge_blocked' => v(isset($r['bm_s1_prot']) ? (bool)$r['bm_s1_prot'] : null, 'bool', 'Stack1 discharge protection (SoC < 5 % until 7 %)', 'pv_victron.bm_s1_prot'),
+        's2_discharge_blocked' => v(isset($r['bm_s2_prot']) ? (bool)$r['bm_s2_prot'] : null, 'bool', 'Stack2 discharge protection (SoC < 5 % until 7 %)', 'pv_victron.bm_s2_prot'),
+        's1_forced_charge' => v(isset($r['bm_s1_force']) ? (bool)$r['bm_s1_force'] : null, 'bool', 'Stack1 forced grid charge (SoC < 3 % until 5 %)', 'pv_victron.bm_s1_force'),
+        's2_forced_charge' => v(isset($r['bm_s2_force']) ? (bool)$r['bm_s2_force'] : null, 'bool', 'Stack2 forced grid charge (SoC < 3 % until 5 %)', 'pv_victron.bm_s2_force'),
         'consumption_kw' => v(($r['consumption_l1_w'] === null) ? null : kw($r['consumption_l1_w'] + $r['consumption_l2_w'] + $r['consumption_l3_w']), 'kW', 'Consumption seen by Venus', 'derived'),
     ];
 }
