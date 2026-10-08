@@ -17,7 +17,7 @@
 - AC input current limit 35 A (L1 read back from the device; L2/L3 not read back yet).
 - Per-unit settings: private repo gerontec/victron-backup, `dev0.conf` .. `dev2.conf`.
 
-## Charge and discharge strategy (batmonitor 0.10, venus-addons/batmonitor)
+## Charge and discharge strategy (batmonitor 0.12, venus-addons/batmonitor)
 
 ESS runs in external control (Hub4Mode 3): batmonitor sets `/Hub4/L1..L3/AcPowerSetpoint` per phase
 (+ = charging from AC-in, - = feeding out of AC-in). It calculates every 60 s and re-sends every 10 s.
@@ -28,7 +28,9 @@ Charging (PV surplus)
 
 - surplus = Sofar PCC + Sofar Bat1 (discharge counts fully, charge with factor 0.5) + own measured AC-in
   charging. The Sofar holds its PCC at 0 with its own battery, so a Bat1 discharge is no surplus.
-- charge = 1.01 x (surplus - 200 W), at most 4000 W AC per phase (the 70 A charger of each MultiPlus;
+- charge = 1.01 x (surplus - 200 W), setpoint at most 4900 W AC per phase; the 70 A charger of each MultiPlus
+  caps at ~4.2 kW AC itself (3 x 70 A = 210 A DC; the priority order fills up to 4200 W per phase, a rest above
+  that goes to all phases alike;
   measured maximum 11.1 kW DC at 205 A for all three).
 - order: Stack1 (L2) first up to its maximum, the rest to Stack2 (L1 + L3, half each). Stack1 has one
   70 A charger (300 Ah in ~4.3 h), Stack2 two (140 A, ~2.1 h, 0.47 C); Stack2 is charged gentler.

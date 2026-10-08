@@ -46,7 +46,7 @@ import paho.mqtt.client as mqtt
 from dbus.mainloop.glib import DBusGMainLoop
 from gi.repository import GLib
 
-VERSION = '0.10'
+VERSION = '0.12'
 LIVE = os.environ.get('BATMONITOR_LIVE') == '1'
 MQTT_HOST = os.environ.get('BATMONITOR_MQTT_HOST', '192.168.178.218')
 INVERTER_TOPIC = 'inverter/power_grid_exchange/json'
@@ -79,7 +79,8 @@ SOC_MIN_RELEASE = 7.0      # %
 SOC_FORCE = 3.0            # %
 SOC_FORCE_RELEASE = 5.0    # %
 FORCE_CHARGE_W = 500       # W per phase
-CHARGE_MAX_PHASE = 4000    # W per phase, PV surplus charging
+CHARGE_MAX_PHASE = 4900    # W per phase, PV surplus charging (5000 VA rating, for sun peaks)
+CHARGER_CAP_PHASE = 4200   # W per phase the 70 A charger really takes (~70 A x 56 V / 0.94); priority fills up to this
 CHARGE_PRIORITY = ('STACK1_MUST', 'STACK2_PYTES')   # PV surplus fills the banks in this order (user 2026-10-08):
                                                     # Stack1 has one 70 A charger (~4.3 h for 300 Ah), Stack2 two
                                                     # (140 A, ~2.1 h); Stack1 first, and Stack2 is charged gentler
@@ -228,11 +229,15 @@ class BatMonitor:
 				ph = [p for p in BANKS[bank]['phases'] if p in charge]
 				if not ph:
 					continue
-				share = min(rest, CHARGE_MAX_PHASE * len(ph))
+				share = min(rest, CHARGER_CAP_PHASE * len(ph))
 				for p in ph:
 					sp[p] = int(share / len(ph))
 					why[p] += '|CHARGE'
 				rest -= share
+			# what is left after every charger got its real capacity: up to CHARGE_MAX_PHASE on all phases alike
+			if rest > 0:
+				for p in charge:
+					sp[p] += int(min(rest / len(charge), CHARGE_MAX_PHASE - sp[p]))
 		log.info('%spcc %s W bat1 %s W pv %s W -> %s', '' if LIVE else 'DRY ',
 			None if self.pcc is None else round(self.pcc), round(self.bat1), None if self.pv is None else round(self.pv),
 			'  '.join('%s %+d W (%s)' % (p, sp[p], why[p]) for p in sorted(sp)))
