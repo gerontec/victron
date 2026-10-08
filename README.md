@@ -151,6 +151,23 @@ Without data for 120 s the service exits and only registers again with fresh dat
 - Rules (1:1 from the soyo calculation of the former Waveshare ESP32): per-bank SoC protection (no discharge below 5 % until 7 %, grid charge 500 W per phase below 3 %), discharge proportional to grid import, PV surplus charging in stack priority up to the charger capacity, SoC balancing within ±3 %, heat-pump cap October to April.
 - Summer charge block (May to August): a clear-sky DC model (NOAA sun position, fitted strings, tree horizon) holds PV charging back until the 20 kW peak window on forecast sunny days; clouds release it. The rest of the year every watt of surplus charges at once.
 - State per cycle in `/data/batmonitor/state.json` (read by `readers/victron2db.py`). Logs are capped at 20 MB.
+- Control logic in `c/bm_logic.c` as a pure function (`bm_step`), tested on any host with a plant model: `make -C c test`.
+- Parameters with defaults and allowed ranges in `BM_PARAMS` (`c/bm_logic.c`), overridable in `/data/batmonitor/env` as
+  `BATMONITOR_<NAME>=value` (out-of-range values are ignored and logged); the effective list is logged at start:
+
+  | Parameter | Default | Meaning |
+  |---|---|---|
+  | `W_MAX` | 10000 W | total discharge |
+  | `DISCHARGE_MAX_PHASE` | 4000 W | discharge per phase |
+  | `CHARGE_MAX_PHASE` / `CHARGER_CAP_PHASE` | 4900 / 4200 W | PV charge per phase / real charger capacity |
+  | `WP_BAT_MAX_TRANSITION` | 1900 W | heat pump share from the batteries in spring/autumn |
+  | `WP_CAP` | 1000 W | discharge cap with the heat pump running when its meter is silent (winter) |
+  | `SOC_MIN` / `SOC_MIN_RELEASE` | 5 / 7 % | discharge protection |
+  | `SOC_FORCE` / `SOC_FORCE_RELEASE` / `FORCE_CHARGE_W` | 3 / 5 % / 500 W | grid force charge per phase |
+  | `SOC_BALANCE_ON` / `SOC_BALANCE_OFF` | 3 / 1 % | SoC balancing between the stacks |
+  | `SOYO_TARGET` | 0 W | PCC target |
+  | `B_NIGHT` | 936 W | night base discharge |
+- Season (summer / transition / winter) from `readers/season.py` on the Sofar host: 7-day export vs. heat pump energy.
 
 **PI prototype (not armed).** A velocity-form PI controller that drives PCC + Sofar Bat1 to 0 W is built in but only runs in shadow mode: every cycle it logs to `/data/batmonitor/pi_shadow.csv` what soyo sent and what the PI would have sent. `tools/compare.py` replays the PI in closed loop on the recorded disturbance and compares it with the measured soyo result (MAE/RMS, import/export Wh). `BATMONITOR_PI=1` would arm it; this is deliberately not done until enough sunny-day data shows it is better.
 

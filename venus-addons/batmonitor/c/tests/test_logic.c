@@ -29,6 +29,8 @@ struct plant {
 	double aussen;
 };
 
+static double r_override_w_max;     /* > 0: W_MAX for the next simulate() (parameter test) */
+
 struct run {
 	struct bm_cfg cfg;
 	struct bm_state st;
@@ -55,7 +57,9 @@ static time_t local_time(int y, int mo, int d, int h, int mi)
 static void simulate(struct run *r, const struct plant *pl, time_t t0, int n)
 {
 	memset(r, 0, sizeof(*r));
-	r->cfg.ladesperre = 1;
+	bm_cfg_default(&r->cfg);
+	if (r_override_w_max > 0)
+		bm_param_set(&r->cfg, 0, r_override_w_max);
 	bm_init(&r->st);
 	double now = 1000.0;
 	for (int k = 0; k < n; k++, now += CYCLE_SECONDS) {
@@ -372,6 +376,24 @@ static void test_transition_wp_1900(void)
 		  r.pcc, sum_sp(&r));
 }
 
+static void test_param_override(void)
+{
+	struct run r;
+	struct bm_cfg c;
+	bm_cfg_default(&c);
+	CHECK(c.w_max == 10000 && c.wp_bat_max_transition == 1900 && c.soc_min == 5, "defaults from BM_PARAMS");
+	CHECK(strcmp(BM_PARAMS[0].name, "W_MAX") == 0, "W_MAX is parameter 0");
+	CHECK(bm_param_set(&c, 0, 50000) == -1 && c.w_max == 10000, "out of range rejected, default kept");
+	CHECK(bm_param_set(&c, 0, 3000) == 0 && c.w_max == 3000, "in range accepted");
+
+	struct plant pl = BASE(.house = 6000, .season = BM_SUMMER, .season_age_h = 1);
+	r_override_w_max = 3000;
+	simulate(&r, &pl, local_time(2026, 7, 15, 23, 0), 40);
+	r_override_w_max = 0;
+	print_state("W_MAX=3000, house 6 kW", &r);
+	CHECK(sum_sp(&r) >= -3000 && sum_sp(&r) <= -2990, "W_MAX override 3000 W, sp sum %d", sum_sp(&r));
+}
+
 static void test_pi_shadow_not_armed(void)
 {
 	struct run r;
@@ -405,6 +427,7 @@ int main(void)
 	test_season_measured_overrides_months();
 	test_season_stale_falls_back_to_months();
 	test_transition_wp_1900();
+	test_param_override();
 	test_pi_shadow_not_armed();
 	printf("%d checks, %d failed\n", checks, fails);
 	return fails ? 1 : 0;

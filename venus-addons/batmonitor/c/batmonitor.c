@@ -43,7 +43,7 @@
 #include <unistd.h>
 #include "bm_logic.h"
 
-#define VERSION "0.22-c"
+#define VERSION "0.23-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
@@ -570,6 +570,7 @@ int main(void)
 	const char *e = getenv("BATMONITOR_LIVE"), *host = getenv("BATMONITOR_MQTT_HOST"), *l = getenv("BATMONITOR_LADESPERRE");
 	DBusError err;
 	LIVE = e && strcmp(e, "1") == 0;
+	bm_cfg_default(&cfg);
 	cfg.ladesperre = !l || strcmp(l, "1") == 0;
 	const char *pe = getenv("BATMONITOR_PI");
 	cfg.pi_armed = pe && strcmp(pe, "1") == 0;
@@ -592,6 +593,28 @@ int main(void)
 	dbus_connection_set_exit_on_disconnect(bus, FALSE);
 	LOG("batmonitor %s %s, cycle %d s, banks STACK1_MUST=L1, STACK2_PYTES=L2+L3, charge block %s, PI %s", VERSION,
 		LIVE ? "LIVE" : "DRY RUN", CYCLE_SECONDS, cfg.ladesperre ? "on" : "off", cfg.pi_armed ? "ARMED" : "shadow");
+	/* parameters: BATMONITOR_<NAME> overrides the default; out of range or not a number -> default stays */
+	{
+		char line[1024];
+		int o = 0;
+		for (int i = 0; i < BM_NPARAMS; i++) {
+			char env[64], *end;
+			snprintf(env, sizeof(env), "BATMONITOR_%s", BM_PARAMS[i].name);
+			const char *v = getenv(env);
+			int set = 0;
+			if (v && *v) {
+				double x = strtod(v, &end);
+				if (end == v || *end || bm_param_set(&cfg, i, x) != 0)
+					LOGE("%s=%s ignored (allowed %g..%g %s), default %g", env, v, BM_PARAMS[i].min, BM_PARAMS[i].max,
+						 BM_PARAMS[i].unit, BM_PARAMS[i].def);
+				else
+					set = 1;
+			}
+			o += snprintf(line + o, sizeof(line) - o, "%s%s=%g%s", i ? " " : "", BM_PARAMS[i].name,
+						  *bm_param_ptr(&cfg, i), set ? "*" : "");
+		}
+		LOG("params (* = from env): %s", line);
+	}
 
 	mosquitto_lib_init();
 	/* random client id: Pi and NCR fallback (both containers are "raspberrypi4") share the broker, a fixed id

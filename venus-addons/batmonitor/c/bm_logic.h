@@ -27,7 +27,26 @@ extern const char *BM_PH[NPH];
 struct bm_cfg {
 	int ladesperre;          /* BATMONITOR_LADESPERRE (default on) */
 	int pi_armed;            /* BATMONITOR_PI=1: the PI replaces the soyo amounts */
+	/* tunable parameters, defaults and limits in BM_PARAMS (bm_logic.c), env BATMONITOR_<NAME> in batmonitor.c */
+	double w_max, discharge_max_phase, charge_max_phase, charger_cap_phase;
+	double wp_bat_max_transition, wp_cap;
+	double soc_min, soc_min_release, soc_force, soc_force_release, force_charge_w;
+	double soc_balance_on, soc_balance_off;
+	double soyo_target, b_night;
 };
+
+/* parameter table: name (env BATMONITOR_<name>), default, allowed range, unit, meaning */
+struct bm_param {
+	const char *name;
+	unsigned off;            /* offsetof(struct bm_cfg, field) */
+	double def, min, max;
+	const char *unit, *help;
+};
+extern const struct bm_param BM_PARAMS[];
+extern const int BM_NPARAMS;
+void bm_cfg_default(struct bm_cfg *cfg);                       /* all BM_PARAMS defaults, ladesperre on, PI off */
+double *bm_param_ptr(struct bm_cfg *cfg, int i);
+int bm_param_set(struct bm_cfg *cfg, int i, double v);         /* 0 = set, -1 = outside min..max (unchanged) */
 
 /* everything one cycle reads; times are monotonic seconds like now, 0 = never received */
 struct bm_in {
