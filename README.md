@@ -22,6 +22,7 @@ The host stays a normal Debian system (apt, systemd, own services); Venus OS lar
 | `host/install_venus.sh` | installs unit, nspawn settings, udev rule and the rootfs tarball into a host root (`/`, pi-gen chroot, mmdebstrap tree) |
 | `host/files/venus-can-profile`, `can@.service` | CAN for Venus: host sets the bitrate, script switches the Venus CAN profile ([can.md](can.md)) |
 | `venus-addons/dbus-ebox-battery/` | battery service for the EBox (Pytes LFP without CAN): MQTT `ebox/pwr` → `com.victronenergy.battery.ebox` for DVCC/ESS |
+| `venus-addons/batmonitor/` | battery protection and charge/discharge control of the three MultiPlus phases on two separate stacks (ESS external control, Hub4Mode 3); C port in `c/`, reference `batmonitor.py` |
 | `pi-gen/stage-venus/03-venus/` | pi-gen step calling `host/install_venus.sh` with `files/venus-rootfs.tar.zst` |
 | `ncr/build_ncr.sh` | x86_64 variant: Debian trixie amd64 host (mmdebstrap) for a PC; runs the same armv7 Venus rootfs via qemu-user binfmt |
 | `tools/mk3_version.py` | reads the MK3-USB firmware version (MK2 protocol 'V' frame, 2400 8N1) |
@@ -32,7 +33,8 @@ The Venus OS source is not copied into this repository; it is referenced at the 
 
 - `venus/` is a git submodule of [victronenergy/venus](https://github.com/victronenergy/venus) at tag v3.81 (`git clone --recurse-submodules`, or `git submodule update --init`).
 - `venus-build/layers.lock` lists the commit of every Yocto layer the build used (bitbake, openembedded-core, meta-openembedded, meta-victronenergy, ...). The applications (dbus-systemcalc-py, gui-v2, venus-platform, flashmq, ...) are fetched by the recipes in meta-victronenergy at the revisions pinned there.
-- Own code lives here: `venus-addons/` (dbus-ebox-battery), `host/` (nspawn integration), `pi-gen/`, `ncr/`, `tools/`.
+- Own code lives here: `venus-addons/` (dbus-ebox-battery, batmonitor), `host/` (nspawn integration), `pi-gen/`, `ncr/`, `tools/`.
+- `venus-addons/batmonitor/c/include/` holds two unmodified third-party headers for building inside Venus, where only the shared libraries exist: `mosquitto.h` 2.0.22 (EPL-2.0 or BSD-3-Clause) and `cjson/cJSON.h` 1.7.19 (MIT).
 - The 42 Victron packages without public recipe (mk2-dbus, hub4control, vrmlogger, ...) are not redistributed; `host/prepare_venus_rootfs.sh` installs them from the official feed. List, versions, license fields and functions: [nonOpenSource.md](nonOpenSource.md).
 
 ## Venus OS build
@@ -140,6 +142,17 @@ The EBox (2 × 15 kWh Pytes, 16S LFP, 6 modules of 100 Ah, only a serial console
 | `/Info/ChargeRequest` | 1 below 5 % SoC until 8 %, **only from 11:00 to 13:00** (Europe/Berlin): hub4control switches ESS to Recharge and charges from the grid; PV surplus charges at any time |
 
 Without data for 120 s the service exits and only registers again with fresh data, so the MultiPlus fall back to their own charge settings. In practice the three MultiPlus-II 48/5000 limit charging to about 11 kW (3 × 70 A).
+
+## batmonitor
+
+`venus-addons/batmonitor/` replaces the VE.Bus battery monitor (off in all three units) for a system whose phases sit on separate battery banks: Stack1 (CAN BMS) feeds L1, Stack2 (EBox) feeds L2 + L3. Only the BMS SoC counts. It runs in Venus as a daemontools service and writes `/Hub4/L1..L3/AcPowerSetpoint` in Hub4Mode 3.
+
+- **C port** `c/batmonitor.c` (live): 5 s cycle (the Sofar PCC arrives every 4 s), about 3 MB RSS instead of 23 MB for Python. Build inside Venus with `make -C /data/batmonitor/c` (the image has gcc and the dbus headers); `install.sh` copies and builds. `batmonitor.py` stays as the reference and fallback (`BATMONITOR_PYTHON=1` in `/data/batmonitor/env`).
+- Rules (1:1 from the soyo calculation of the former Waveshare ESP32): per-bank SoC protection (no discharge below 5 % until 7 %, grid charge 500 W per phase below 3 %), discharge proportional to grid import, PV surplus charging in stack priority up to the charger capacity, SoC balancing within ±3 %, heat-pump cap October to April.
+- Summer charge block (May to August): a clear-sky DC model (NOAA sun position, fitted strings, tree horizon) holds PV charging back until the 20 kW peak window on forecast sunny days; clouds release it. The rest of the year every watt of surplus charges at once.
+- State per cycle in `/data/batmonitor/state.json` (read by `readers/victron2db.py`). Logs are capped at 20 MB.
+
+**PI prototype (not armed).** A velocity-form PI controller that drives PCC + Sofar Bat1 to 0 W is built in but only runs in shadow mode: every cycle it logs to `/data/batmonitor/pi_shadow.csv` what soyo sent and what the PI would have sent. `tools/compare.py` replays the PI in closed loop on the recorded disturbance and compares it with the measured soyo result (MAE/RMS, import/export Wh). `BATMONITOR_PI=1` would arm it; this is deliberately not done until enough sunny-day data shows it is better.
 
 ## MK3-USB
 
