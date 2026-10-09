@@ -25,6 +25,8 @@ The host stays a normal Debian system (apt, systemd, own services); Venus OS lar
 | `venus-addons/batmonitor/` | battery protection and charge/discharge control of the three MultiPlus phases on two separate stacks (ESS external control, Hub4Mode 3); C port in `c/`, reference `batmonitor.py` |
 | `pi-gen/stage-venus/03-venus/` | pi-gen step calling `host/install_venus.sh` with `files/venus-rootfs.tar.zst` |
 | `ncr/build_ncr.sh` | x86_64 variant: Debian trixie amd64 host (mmdebstrap) for a PC; runs the same armv7 Venus rootfs via qemu-user binfmt |
+| `web/victron_api.php` | JSON/Markdown API over `wagodb.pv_victron` (latest row + 24 h SoC range), data source of the FUXA view |
+| `web/fuxa_victron_project.py` | generates the FUXA project of venus.heissa.de (WebAPI device on `victron_api.php`, one view: grid/ATS, Pi, three MultiPlus, both stacks incl. Pytes pack cycles): `python3 web/fuxa_victron_project.py victron_api.json > project.json` |
 | `tools/mk3_version.py` | reads the MK3-USB firmware version (MK2 protocol 'V' frame, 2400 8N1) |
 
 ## Sources
