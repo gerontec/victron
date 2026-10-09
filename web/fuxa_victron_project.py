@@ -11,7 +11,7 @@ from html import escape
 API, DEV = 'https://heissa.de/web1/victron_api.php', 'd_victron_api'
 FG, MUTED, STROKE = '#e5e7eb', '#9ca3af', '#cbd5e1'
 GREEN, ORANGE, BLUE, GREY = '#22c55e', '#f59e0b', '#60a5fa', '#6b7280'
-SCALE = 2
+SCALE = 1.6
 W, H = 1460, 800
 
 # ---- tags: one per victron_api.php value -------------------------------------------------------
@@ -104,50 +104,74 @@ text(1340, 33, '◂ Heat pump', 13, 'bold', 'middle', '#93c5fd')
 click_tile(1250, 14, 180, 28, 'nav_ww', {'action': 'onOpenTab', 'actparam': 'https://fuxa.heissa.de/', 'actoptions': {'newTab': False}})
 
 # ---- Pi 4 / Venus (far left) --------------------------------------------------------------------
-box(30, 60, 380, 150, '#1e1b3a')
+box(30, 60, 310, 150, '#1e1b3a')
 text(48, 86, 'Raspberry Pi 4 · Venus OS v3.81', 15, 'bold')
 text(48, 106, '192.168.178.119 · MK3-USB → VE.Bus', 12, fill=MUTED)
 rows = [('VE.Bus', 'vebus_state_text', '', None), ('switch', 'vebus_mode_text', '', None), ('error', 'vebus_error', '', 0),
-        ('DC', 'dc_v', 'V', 2), ('DC current', 'dc_a', 'A', 1), ('AC-out', 'ac_out_kw', 'kW', 2)]
+        ('DC', 'dc_v', 'V', 2), ('DC curr.', 'dc_a', 'A', 1), ('AC-out', 'ac_out_kw', 'kW', 2)]
 for i, (lab, key, unit, dig) in enumerate(rows):
-    x, y = 48 + (i % 2) * 185, 132 + (i // 2) * 24
+    x, y = 48 + (i % 2) * 145, 132 + (i // 2) * 24
     text(x, y, lab, 13, fill=MUTED)
-    value(x + 170, y, key, unit, dig, 14, anchor='end')
+    value(x + 132, y, key, unit, dig, 14, anchor='end')
 
-# ---- ATS: motorised 3-phase changeover switch in front of AC-in ----------------------------------
-box(450, 60, 330, 125, '#2a1a1c')
-text(468, 86, 'ATS · motorised changeover switch 3~', 15, 'bold')
-text(468, 110, 'grid → AC-in L1 / L2 / L3 of the MultiPlus', 13, fill=MUTED)
-text(468, 156, 'AC-in current limit', 13, fill=MUTED)
-value(760, 156, 'ac_in_limit_a', 'A', 0, 15, anchor='end')
+# ---- grid side (user 2026-10-09): Z1 -> Z2 -> junction: A to the rotary switch (position I, normal),
+#      B through the MCB to AC-in of the three MultiPlus; their AC-out1 goes to position II (only on grid failure)
+GRIDC = '#94a3b8'
+G = {'fill': 'none', 'stroke': GRIDC, 'stroke-width': 7, 'stroke-linecap': 'round', 'stroke-linejoin': 'round'}
+box(370, 70, 100, 50, '#1f2937', 8)
+text(420, 92, 'Z1', 15, 'bold', 'middle')
+text(420, 111, 'grid meter', 11, 'normal', 'middle', MUTED)
+box(510, 70, 100, 50, '#1f2937', 8)
+text(560, 92, 'Z2', 15, 'bold', 'middle')
+text(560, 111, 'house meter', 11, 'normal', 'middle', MUTED)
+shape('path', dict(G, d='M470,95 L510,95'))
+shape('path', dict(G, d='M610,95 L840,95'))                 # branch A -> rotary switch I
+shape('circle', {'cx': 660, 'cy': 95, 'r': 7, 'fill': GRIDC, 'stroke': 'none'})
+text(700, 86, 'A', 13, 'bold', fill=GRIDC)
+shape('path', dict(G, d='M660,95 L660,140'))                # branch B -> MCB
+text(668, 132, 'B', 13, 'bold', fill=GRIDC)
+box(590, 140, 140, 50, '#2a1a1c', 6)
+text(604, 160, 'MCB 3~ → AC-in', 13, 'bold')
+text(604, 181, 'AC-in limit', 11, fill=MUTED)
+value(720, 181, 'ac_in_limit_a', 'A', 0, 12, anchor='end')
 
-# ---- house sub-distribution: busbar 3~, each phase on the AC-out1 of one MultiPlus ---------------
+# rotary changeover switch 3~: I = grid (branch A), II = AC-out1 of the MultiPlus (backup), output -> house
+box(840, 60, 230, 130, '#2a1a1c')
+text(856, 84, 'ATS · rotary switch 3~', 15, 'bold')
+text(856, 106, 'I  = grid (branch A) · normal', 12, fill=MUTED)
+text(856, 126, 'II = AC-out1 of the MultiPlus', 12, fill=MUTED)
+text(856, 146, '      only on grid failure', 12, fill=MUTED)
+text(856, 176, 'manual · position not reported', 11, fill=MUTED)
+shape('path', dict(G, d='M1070,125 L1110,125'))             # output -> house
+
+# ---- house: fed by the rotary switch; AC-out1 per unit (backup leg) -------------------------------
 PURPLE = '#a78bfa'
-box(820, 60, 330, 125, '#251a33')
-text(838, 86, 'House sub-distribution · busbar 3~', 15, 'bold')
+box(1110, 60, 320, 130, '#251a33')
+text(1126, 84, 'House · via rotary switch', 15, 'bold')
+text(1126, 104, 'AC-out1 → switch II (backup leg)', 11, fill=MUTED)
 for i, (ph, key) in enumerate((('L1', 'l1_ac_out_w'), ('L2', 'l2_ac_out_w'), ('L3', 'l3_ac_out_w'))):
-    text(838, 112 + i * 22, f'{ph} ← AC-out1 {ph}', 13, fill=MUTED)
-    value(1130, 112 + i * 22, key, 'W', 0, 15, anchor='end')
-text(838, 178, 'total', 11, fill=MUTED)
-value(1130, 178, 'ac_out_kw', 'kW', 2, 12, 'normal', anchor='end')
-text(30, 52, 'AC-in / DC: + charging (green) · − feeding the house (orange) · AC-out1 → busbar (purple)', 11, fill=MUTED)
+    text(1126, 126 + i * 20, f'AC-out1 {ph}', 13, fill=MUTED)
+    value(1300, 126 + i * 20, key, 'W', 0, 14, anchor='end')
+text(1320, 146, 'total', 11, fill=MUTED)
+value(1420, 146, 'ac_out_kw', 'kW', 2, 12, 'normal', anchor='end')
+text(30, 52, 'AC-in / DC: + charging (green) · − feeding the house (orange) · AC-out1 → rotary switch II (purple)', 11, fill=MUTED)
 
-# AC bus from the ATS to the three MultiPlus
+# AC bus from the MCB to the three MultiPlus
 # physical order on the wall (user 2026-10-08): unit 1 left = L2, unit 2 middle = L1 (master, Stack1), unit 3 right = L3
 CX = {'l2': 230, 'l1': 730, 'l3': 1230}
 LEFT, RIGHT = min(CX.values()), max(CX.values())
-line('M615,185 L615,235', 'ac_in_kw', 50 / 1000, color=GREY)
+line('M660,190 L660,235', 'ac_in_kw', 50 / 1000, color=GREY)
 line(f'M{LEFT - 50},235 L{RIGHT - 50},235', 'ac_in_kw', 50 / 1000)
 for p, x in CX.items():
     line(f'M{x - 50},235 L{x - 50},275', f'{p}_ac_in_w', 50)
 text(LEFT - 40, 228, 'AC-in 3~', 12, fill=MUTED)
-# AC-out1 of each unit up to the busbar of the sub-distribution (purple)
+# AC-out1 of each unit up to the rotary switch, position II (purple)
 AO = {'fill': 'none', 'stroke': PURPLE, 'stroke-width': 5, 'stroke-linecap': 'round', 'stroke-linejoin': 'round'}
 for x in CX.values():
     shape('path', dict(AO, d=f'M{x + 120},275 L{x + 120},255'))
 shape('path', dict(AO, d=f'M{LEFT + 120},255 L{RIGHT + 120},255'))
-shape('path', dict(AO, d='M985,255 L985,185'))
-text(RIGHT + 128, 268, 'AC-out1', 12, fill=PURPLE)
+shape('path', dict(AO, d='M955,255 L955,190'))
+text(963, 222, 'AC-out1 → II', 12, fill=PURPLE)
 # MK3-USB from the Pi only to unit 1 (left, L2); the other units hang on the VE.Bus chain unit 1 - 2 - 3
 VB = {'fill': 'none', 'stroke': BLUE, 'stroke-width': 2.5, 'stroke-dasharray': '7 5'}
 shape('path', dict(VB, d=f'M{CX["l2"] + 50},210 L{CX["l2"] + 50},275'))
