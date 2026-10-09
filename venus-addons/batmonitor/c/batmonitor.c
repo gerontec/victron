@@ -43,6 +43,8 @@
  *     (transition: its part above 1900 W; summer unchanged). Accepted side effect: while the Sofar can (Bat1 up to
  *     2.5 kW, its own PCC regulation at Z1) it covers the heat pump from Bat1 -> PV into the stacks, Bat1 into the WP
  *     (~15 % extra conversion loss on that part). Only a Sofar CT on Z2 or a Bat1 discharge limit avoids that.
+ *   - full_at with the measured charger power (0.31-c, user 2026-10-09): each MultiPlus delivers ~3.6 kW DC at the BMS
+ *     at its limit (65-67 A, flat over 53.6-54.6 V; AC-in ~4040 W), not 70 A x U: CHARGER_DC_W caps the forecast.
  * PI prototype (not armed): BATMONITOR_PI=1 lets a velocity-form PI on y = PCC + Sofar Bat1 replace the soyo
  * discharge/charge amounts (same gates, same phase split). Without it the PI runs in shadow: every cycle one line
  * in PI_SHADOW_FILE with what soyo set and what the PI would set, to compare both before arming it.
@@ -66,7 +68,7 @@
 #include <unistd.h>
 #include "bm_logic.h"
 
-#define VERSION "0.30-c"
+#define VERSION "0.31-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"

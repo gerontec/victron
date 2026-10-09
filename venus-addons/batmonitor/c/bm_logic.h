@@ -37,6 +37,7 @@ struct bm_cfg {
 	double fc_hyst;
 	double sofar_trickle;
 	double charger_a, charge_eff;   /* real charge ceiling per phase = charger_a x BMS voltage / charge_eff (0.29-c) */
+	double charger_dc_w;            /* measured DC at the BMS per MultiPlus at its limit, full_at forecast (0.31-c) */
 };
 
 /* parameter table: name (env BATMONITOR_<name>), default, allowed range, unit, meaning */

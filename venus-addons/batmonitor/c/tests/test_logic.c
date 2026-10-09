@@ -625,17 +625,18 @@ static void test_fc_charger_limit(void)
 	struct bm_cfg cfg;
 	struct bm_fc_out o;
 	bm_cfg_default(&cfg);
-	/* June noon, 19 kW PV: 3 x 70 A x 56 V = 11.76 kW at most, Stack2 (2 units) from 20 % needs >= 80 % x 15.36 kWh
-	   / 7.84 kW = 1.57 h, Stack1 (1 unit) 3.13 h */
+	/* June noon, 19 kW PV: 3 x 3.6 kW DC at most (measured), Stack2 (2 units) from 20 % needs >= 80 % x 15.36 kWh
+	   / 7.2 kW = 1.71 h, Stack1 (1 unit) 3.41 h */
 	time_t t = local_time(2026, 6, 20, 11, 0);
 	struct bm_fc_in fi = fc_base(t, 20, 20, 3900, 7800);
 	fi.volt_ok[0] = fi.volt_ok[1] = 1;
 	fi.volt[0] = fi.volt[1] = 56.0;
 	fc_slots(&fi, 2026, 6, 20, 0.95, 1.0);
 	bm_full_forecast(&cfg, &fi, &o);
-	print_fc("June 11:00, SoC 20, chargers at 70 A", &o);
-	CHECK(o.full_at[1] - t >= (time_t)(0.8 * 15360 / 7840 * 3600) - 300, "Stack2 not faster than 2 x 70 A x 56 V");
-	CHECK(o.full_at[0] - t >= (time_t)(0.8 * 15360 / 3920 * 3600) - 300, "Stack1 not faster than 70 A x 56 V");
+	print_fc("June 11:00, SoC 20, chargers at 3.6 kW DC", &o);
+	CHECK(o.full_at[1] - t >= (time_t)(0.8 * 15360 / 7200 * 3600) - 300, "Stack2 not faster than 2 x 3.6 kW DC");
+	CHECK(o.full_at[0] - t >= (time_t)(0.8 * 15360 / 3600 * 3600) - 300, "Stack1 not faster than 3.6 kW DC");
+	CHECK(o.full_at[1] - t <= (time_t)(0.8 * 15360 / 7200 * 3600) + 600, "Stack2 at the 3.6 kW limit, not slower");
 }
 
 int main(void)

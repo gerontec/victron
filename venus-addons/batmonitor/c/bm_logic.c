@@ -95,6 +95,7 @@ const struct bm_param BM_PARAMS[] = {
 	{"SOFAR_TRICKLE",         P(sofar_trickle),             30,      0,       500,     "W", "night: stacks give this much more than the house needs, the Sofar battery charges gently instead of swinging"},
 	{"CHARGER_A",             P(charger_a),                 70,      0,       70,      "A", "MultiPlus-II 48/5000 charger current per unit (DC), ceiling = this x BMS voltage"},
 	{"CHARGE_EFF",            P(charge_eff),                0.93,    0.7,     1.0,     "",  "AC-in per DC at the charger limit (measured 2026-10-09: 4050 W AC at 70 A x 53.7 V)"},
+	{"CHARGER_DC_W",          P(charger_dc_w),              3600,    500,     5000,    "W", "full_at forecast: DC at the BMS per MultiPlus at its limit (measured 2026-10-09: ~3.6 kW, 65-67 A, flat over 53.6-54.6 V)"},
 };
 const int BM_NPARAMS = sizeof(BM_PARAMS) / sizeof(BM_PARAMS[0]);
 
@@ -693,7 +694,8 @@ static double fc_pv(const struct bm_fc_in *in, time_t t, double anchor, int *wea
 /* Steps from now to sunset in FC_STEP: the stacks start with their measured charge power, the change of the expected
    PV against now (x FC_CHARGE_EFF; house load and the Sofar battery's share taken as they are now) is given like
    alloc_charge: more power in CHARGE_PRIORITY order (lead stack last) up to the real charger ceiling
-   (bm_charge_cap x FC_CHARGE_EFF per unit: 70 A x BMS voltage); less power taken in the reverse order. A full stack's power moves to the other one.
+   (bm_charge_cap x FC_CHARGE_EFF per unit, at most CHARGER_DC_W: the MultiPlus deliver ~3.6 kW DC at the BMS, not
+   70 A x U, measured 2026-10-09); less power taken in the reverse order. A full stack's power moves to the other one.
    Only while the sun is up. */
 void bm_full_forecast(const struct bm_cfg *cfg, const struct bm_fc_in *in, struct bm_fc_out *out)
 {
@@ -711,16 +713,18 @@ void bm_full_forecast(const struct bm_cfg *cfg, const struct bm_fc_in *in, struc
 		out->anchor = fmax(0.05, fmin(3.0, in->pv_sofar / clear_sofar));
 	double pv0 = fc_pv(in, in->t, out->anchor, &w0), p0 = 0;
 	out->pv_now_w = pv0;
-	double soc[NBANK], pb[NBANK] = {0};
+	double soc[NBANK], pb[NBANK] = {0}, cap[NBANK];
 	int active[NBANK], any = 0;
 	for (int b = 0; b < NBANK; b++) {
 		active[b] = in->soc_ok[b] && in->has_avg[b];
 		soc[b] = in->soc[b];
+		cap[b] = fmin(fmin(cfg->charger_cap_phase, bm_charge_cap(cfg, in->volt_ok[b], in->volt[b])) * FC_CHARGE_EFF,
+					  cfg->charger_dc_w) * BM_BANKS[b].nph;
 		if (!active[b])
 			continue;
 		any = 1;
 		p0 += in->avg[b];
-		pb[b] = fmax(0.0, in->avg[b]);
+		pb[b] = fmin(fmax(0.0, in->avg[b]), cap[b]);
 		if (soc[b] >= 100) {
 			out->full_at[b] = in->t;
 			pb[b] = 0;
@@ -745,9 +749,7 @@ void bm_full_forecast(const struct bm_cfg *cfg, const struct bm_fc_in *in, struc
 			int b = order[i];
 			if (!active[b] || soc[b] >= 100)
 				continue;
-			double cap = fmin(cfg->charger_cap_phase, bm_charge_cap(cfg, in->volt_ok[b], in->volt[b]))
-						 * FC_CHARGE_EFF * BM_BANKS[b].nph;
-			double more = fmin(diff, fmax(0.0, cap - pb[b]));
+			double more = fmin(diff, fmax(0.0, cap[b] - pb[b]));
 			pb[b] += more;
 			diff -= more;
 		}
