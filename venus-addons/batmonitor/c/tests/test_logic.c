@@ -538,6 +538,35 @@ static void test_forecast_overrides_winter(void)
 	CHECK(!r.out.fc_active && rule_has(&r, "|Z2"), "stale forecast ignored");
 }
 
+static void test_forecast_bad_caps_wp(void)
+{
+	struct run r;
+	struct plant pl = BASE(.house = 500, .wp = 1600, .r290_hz = 60, .season = BM_TRANSITION, .season_age_h = 1,
+						   .soc = {50, 50});
+	simulate(&r, &pl, local_time(2026, 10, 10, 2, 0), 60);       /* no forecast: WP fully from the stacks (< 1900 W) */
+	print_state("transition, no forecast, WP 1.6 kW", &r);
+	CHECK(!r.out.fc_bad && abs(sum_sp(&r) + 2100) <= 60, "house + whole WP, sp sum %d", sum_sp(&r));
+
+	pl.fc_target = 100;                                          /* rain day ahead: free_kwh 0 */
+	simulate(&r, &pl, local_time(2026, 10, 10, 2, 0), 60);
+	print_state("transition, forecast target 100 %, WP 1.6 kW", &r);
+	CHECK(r.out.fc_bad && rule_has(&r, "|FCBAD"), "bad forecast flagged");
+	CHECK(abs(sum_sp(&r) + 1300) <= 60, "house + half the WP, sp sum %d", sum_sp(&r));
+
+	pl.wp = 5000;                                                /* 50 % = 2500 W > 1900 W: the transition cap stays */
+	simulate(&r, &pl, local_time(2026, 10, 10, 2, 0), 60);
+	CHECK(abs(sum_sp(&r) + 2400) <= 60, "house + 1900 W, sp sum %d", sum_sp(&r));
+
+	pl.wp = 3000;
+	pl.season = BM_SUMMER;
+	simulate(&r, &pl, local_time(2026, 10, 10, 2, 0), 60);
+	CHECK(abs(sum_sp(&r) + 2000) <= 60, "summer: house + half the WP, sp sum %d", sum_sp(&r));
+
+	pl.fc_target = 90;                                           /* good forecast: whole WP again */
+	simulate(&r, &pl, local_time(2026, 10, 10, 2, 0), 60);
+	CHECK(!r.out.fc_bad && abs(sum_sp(&r) + 3500) <= 60, "target 90 %%: house + whole WP, sp sum %d", sum_sp(&r));
+}
+
 static void test_pi_shadow_not_armed(void)
 {
 	struct run r;
@@ -727,6 +756,7 @@ int main(void)
 	test_transition_wp_1900();
 	test_param_override();
 	test_forecast_overrides_winter();
+	test_forecast_bad_caps_wp();
 	test_pi_shadow_not_armed();
 	test_fc_sunset_limits();
 	test_fc_clouds_later();

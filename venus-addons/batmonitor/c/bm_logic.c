@@ -95,6 +95,8 @@ const struct bm_param BM_PARAMS[] = {
 	{"SOFAR_TRICKLE",         P(sofar_trickle),             30,      0,       500,     "W", "night: stacks give this much more than the house needs, the Sofar battery charges gently instead of swinging"},
 	{"CHARGER_A",             P(charger_a),                 70,      0,       70,      "A", "MultiPlus-II 48/5000 charger current per unit (DC), ceiling = this x BMS voltage"},
 	{"CHARGE_EFF",            P(charge_eff),                0.93,    0.7,     1.0,     "",  "AC-in per DC at the charger limit (measured 2026-10-09: 4050 W AC at 70 A x 53.7 V)"},
+	{"FC_BAD_TARGET",         P(fc_bad_target),             100,     0,       101,     "%", "bad forecast when target_soc >= this (100 = the day's PV does not exceed the day load, free_kwh 0); 101 = off"},
+	{"WP_BAT_SHARE_BAD",      P(wp_bat_share_bad),          50,      0,       100,     "%", "bad forecast: the stacks cover at most this share of the heat pump (summer/transition, winter stays 0)"},
 	{"CHARGER_DC_W",          P(charger_dc_w),              3600,    500,     5000,    "W", "full_at forecast: DC at the BMS per MultiPlus at its limit (measured 2026-10-09: ~3.6 kW, 65-67 A, flat over 53.6-54.6 V)"},
 };
 const int BM_NPARAMS = sizeof(BM_PARAMS) / sizeof(BM_PARAMS[0]);
@@ -459,6 +461,10 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 		out->fc_active = st->fc_active;
 		out->fc_target = fc_ok ? in->fc_target : -1;
 		out->fc_min_soc = min_soc;
+		/* bad forecast (0.37-c, user 2026-10-10: rain day): the next day's PV will not refill the stacks
+		   (target_soc >= FC_BAD_TARGET, i.e. free_kwh 0), so they cover at most WP_BAT_SHARE_BAD % of the heat pump */
+		int fc_fresh = cfg->forecast && in->fc_target >= 0 && in->fc_ts > 0 && in->t - in->fc_ts < FC_MAX_AGE;
+		out->fc_bad = fc_fresh && !st->fc_active && in->fc_target >= cfg->fc_bad_target;
 		if (st->fc_active)
 			season = BM_SUMMER;        /* serve the heat pump like in summer */
 	}
@@ -466,8 +472,14 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 	/* the heat pump power the batteries must NOT cover: all of it in winter, the part above 1900 W in the
 	   transition (0.22), none in summer */
 	double wp_eff = 0.0;
-	if (wp_fresh && in->wp > 0)
-		wp_eff = season == BM_WINTER ? in->wp : season == BM_TRANSITION ? fmax(0.0, in->wp - cfg->wp_bat_max_transition) : 0.0;
+	if (wp_fresh && in->wp > 0 && season == BM_WINTER)
+		wp_eff = in->wp;
+	else if (wp_fresh && in->wp > 0) {
+		double share = season == BM_TRANSITION ? fmin(in->wp, cfg->wp_bat_max_transition) : in->wp;
+		if (out->fc_bad)
+			share = fmin(share, in->wp * cfg->wp_bat_share_bad / 100.0);
+		wp_eff = in->wp - share;
+	}
 	double z2 = pcc + wp_eff;
 	int *sp = out->sp;
 	char (*why)[WHY_LEN] = out->why;
@@ -607,6 +619,8 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 			strcat(rule, season == BM_TRANSITION ? "|WP1900" : "|Z2");
 		if (st->fc_active)
 			strcat(rule, "|FC");
+		if (out->fc_bad && wp_fresh && in->wp >= WP_ON_TH)
+			strcat(rule, "|FCBAD");
 		if (!wp_fresh && winter && wp_running && w > (int)cfg->wp_cap) {
 			w = (int)cfg->wp_cap;
 			strcat(rule, "|WP_CAP");

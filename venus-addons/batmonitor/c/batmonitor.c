@@ -76,7 +76,7 @@
 #include <unistd.h>
 #include "bm_logic.h"
 
-#define VERSION "0.36-c"
+#define VERSION "0.37-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
@@ -546,6 +546,7 @@ static void write_state(const int *sp, char why[][WHY_LEN], double surplus)
 	cJSON_AddStringToObject(js, "season_source", o_.season_measured ? "measured" : "months");
 	o = cJSON_AddObjectToObject(js, "forecast_rule");
 	cJSON_AddNumberToObject(o, "active", o_.fc_active);
+	cJSON_AddNumberToObject(o, "bad", o_.fc_bad);
 	cJSON_AddNumberToObject(o, "target_soc", o_.fc_target);
 	cJSON_AddNumberToObject(o, "min_soc", o_.fc_min_soc);
 	o = cJSON_AddObjectToObject(js, "pi");
