@@ -135,20 +135,33 @@ text(604, 160, 'MCB 3~ → AC-in', 13, 'bold')
 text(604, 181, 'AC-in limit', 11, fill=MUTED)
 value(720, 181, 'ac_in_limit_a', 'A', 0, 12, anchor='end')
 
-# rotary changeover switch 3~: I = grid (branch A), II = AC-out1 of the MultiPlus (backup), output -> house
-box(840, 60, 230, 130, '#2a1a1c')
-text(856, 84, 'ATS · rotary switch 3~', 15, 'bold')
-text(856, 106, 'I  = grid (branch A) · normal', 12, fill=MUTED)
-text(856, 126, 'II = AC-out1 of the MultiPlus', 12, fill=MUTED)
-text(856, 146, '      only on grid failure', 12, fill=MUTED)
-text(856, 176, 'manual · position not reported', 11, fill=MUTED)
-shape('path', dict(G, d='M1070,125 L1110,125'))             # output -> house
+# rotary changeover switch 3~ (ATS): common -> house; I = grid (branch A, normal), II = AC-out1 of the MultiPlus.
+# blade on II only while Venus reports a grid failure (grid_lost: VE.Bus active input 240, the Multis invert)
+ATS_BG = '#2a1a1c'
+box(840, 60, 230, 130, ATS_BG)
+shape('path', dict(G, d='M840,95 L890,95'))                 # I
+shape('path', {'d': 'M955,190 L955,152', 'fill': 'none', 'stroke': '#a78bfa', 'stroke-width': 5, 'stroke-linecap': 'round'})  # II
+shape('path', dict(G, d='M1010,125 L1070,125'))             # common -> house
+
+
+def blade(d, on_lost):
+    """switch blade, visible while grid_lost == on_lost, else drawn in the box colour"""
+    on, off = {'type': 2, 'color': '', 'stroke': FG}, {'type': 2, 'color': '', 'stroke': ATS_BG}
+    lo, hi = (on, off) if not on_lost else (off, on)
+    shape('path', {'d': d, 'fill': 'none', 'stroke': FG if not on_lost else ATS_BG, 'stroke-width': 5, 'stroke-linecap': 'round'},
+          'grid_lost', [dict(lo, min=-1, max=0.5), dict(hi, min=0.5, max=2)])
+
+
+blade('M1010,125 L892,97', 0)                                 # default: grid -> house
+blade('M1010,125 L957,150', 1)                                # grid failure: UPS (AC-out1) -> house
+for cx, cy in ((890, 95), (955, 152), (1010, 125)):
+    shape('circle', {'cx': cx, 'cy': cy, 'r': 6, 'fill': FG, 'stroke': 'none'})
 
 # ---- house: fed by the rotary switch; AC-out1 per unit (backup leg) -------------------------------
 PURPLE = '#a78bfa'
 box(1110, 60, 320, 130, '#251a33')
-text(1126, 84, 'House · via rotary switch', 15, 'bold')
-text(1126, 104, 'AC-out1 → switch II (backup leg)', 11, fill=MUTED)
+text(1126, 84, 'House', 15, 'bold')
+text(1126, 104, 'AC-out1 = UPS leg of the ATS', 11, fill=MUTED)
 for i, (ph, key) in enumerate((('L1', 'l1_ac_out_w'), ('L2', 'l2_ac_out_w'), ('L3', 'l3_ac_out_w'))):
     text(1126, 126 + i * 20, f'AC-out1 {ph}', 13, fill=MUTED)
     value(1300, 126 + i * 20, key, 'W', 0, 14, anchor='end')
@@ -171,7 +184,7 @@ for x in CX.values():
     shape('path', dict(AO, d=f'M{x + 120},275 L{x + 120},255'))
 shape('path', dict(AO, d=f'M{LEFT + 120},255 L{RIGHT + 120},255'))
 shape('path', dict(AO, d='M955,255 L955,190'))
-text(963, 222, 'AC-out1 → II', 12, fill=PURPLE)
+text(963, 222, 'AC-out1 · UPS', 12, fill=PURPLE)
 # MK3-USB from the Pi only to unit 1 (left, L2); the other units hang on the VE.Bus chain unit 1 - 2 - 3
 VB = {'fill': 'none', 'stroke': BLUE, 'stroke-width': 2.5, 'stroke-dasharray': '7 5'}
 shape('path', dict(VB, d=f'M{CX["l2"] + 50},210 L{CX["l2"] + 50},275'))

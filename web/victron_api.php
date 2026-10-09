@@ -49,6 +49,7 @@ if ($r) {
         'vebus_mode' => v(num($r['vebus_mode']), '', 'Switch position (1 Charger only, 2 Inverter only, 3 On, 4 Off)', 'pv_victron.vebus_mode'),
         'vebus_mode_text' => v($VEBUS_MODE[num($r['vebus_mode'])] ?? null, 'text', 'Switch position', 'derived'),
         'vebus_error' => v(num($r['vebus_error']), '', 'VE.Bus error code, 0 = ok', 'pv_victron.vebus_error'),
+        'grid_lost' => v($r['active_input'] === null ? null : ((int)$r['active_input'] === 240 ? 1 : 0), '', 'Grid failure reported by Venus: VE.Bus active input 240 = AC-in disconnected (the Multis invert, state 9); 1 = rotary switch to the UPS leg (AC-out1)', 'pv_victron.active_input'),
         'ac_in_f_hz' => v(num($r['ac_in_f_hz']), 'Hz', 'Grid frequency at AC-in', 'pv_victron.ac_in_f_hz'),
         'ac_in_limit_a' => v(num($r['ac_in_limit_a']), 'A', 'AC input current limit', 'pv_victron.ac_in_limit_a'),
         'ac_in_kw' => v(kw($acin), 'kW', 'Power drawn at AC-in by all three MultiPlus, + = from the grid (charging), - = fed back', 'derived'),
