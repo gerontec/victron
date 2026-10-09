@@ -691,12 +691,13 @@ static double fc_pv(const struct bm_fc_in *in, time_t t, double anchor, int *wea
 	return clear * fc_kt(in, t, weather) * f;
 }
 
-/* Steps from now to sunset in FC_STEP: the stacks start with their measured charge power, the change of the expected
-   PV against now (x FC_CHARGE_EFF; house load and the Sofar battery's share taken as they are now) is given like
-   alloc_charge: more power in CHARGE_PRIORITY order (lead stack last) up to the real charger ceiling
-   (bm_charge_cap x FC_CHARGE_EFF per unit, at most CHARGER_DC_W: the MultiPlus deliver ~3.6 kW DC at the BMS, not
-   70 A x U, measured 2026-10-09); less power taken in the reverse order. A full stack's power moves to the other one.
-   Only while the sun is up. */
+/* Steps from now to sunset in FC_STEP: the stacks together get their measured charge power plus the change of the
+   expected PV against now (x FC_CHARGE_EFF; house load and the Sofar battery's share taken as they are now). Each
+   step that total is split like alloc_charge: CHARGE_PRIORITY order, the lead stack last, each up to the real charger
+   ceiling (bm_charge_cap x FC_CHARGE_EFF per unit, at most CHARGER_DC_W: the MultiPlus deliver ~3.6 kW DC at the BMS,
+   not 70 A x U, measured 2026-10-09). The lead follows the simulated SoC with SOC_BALANCE_ON/OFF like update_lead
+   (0.32-c: a paused stack catches up instead of waiting until the other one is full). A full stack's power moves to
+   the other one. Only while the sun is up. */
 void bm_full_forecast(const struct bm_cfg *cfg, const struct bm_fc_in *in, struct bm_fc_out *out)
 {
 	memset(out, 0, sizeof(*out));
@@ -725,47 +726,49 @@ void bm_full_forecast(const struct bm_cfg *cfg, const struct bm_fc_in *in, struc
 		any = 1;
 		p0 += in->avg[b];
 		pb[b] = fmin(fmax(0.0, in->avg[b]), cap[b]);
-		if (soc[b] >= 100) {
+		if (soc[b] >= 100)
 			out->full_at[b] = in->t;
-			pb[b] = 0;
-		}
 	}
 	if (!any)
 		return;
-	int order[NBANK], k = 0;
-	for (int i = 0; i < NBANK; i++)
-		if (CHARGE_PRIORITY[i] != in->lead)
-			order[k++] = CHARGE_PRIORITY[i];
-	if (in->lead >= 0)
-		order[k++] = in->lead;
+	double total0 = 0;
+	for (int b = 0; b < NBANK; b++)
+		if (active[b] && soc[b] < 100)
+			total0 += pb[b];
+	p0 = total0;                                    /* what the stacks take now, at most their chargers */
+	int lead = in->lead;
 	for (time_t t = in->t + FC_STEP; t < in->t + 86400; t += FC_STEP) {
 		int w;
-		double pv = fc_pv(in, t - FC_STEP / 2, out->anchor, &w), sum = 0;
+		double pv = fc_pv(in, t - FC_STEP / 2, out->anchor, &w);
 		out->rest_kwh += pv * FC_STEP / 3600000.0;
-		for (int b = 0; b < NBANK; b++)
-			sum += pb[b];
-		double diff = fmax(0.0, p0 + FC_CHARGE_EFF * (pv - pv0)) - sum;
-		for (int i = 0; i < k && diff > 0; i++) {              /* more: priority order up to the charger */
+		if (active[0] && active[1]) {                  /* update_lead on the simulated SoC */
+			double d = soc[0] - soc[1];
+			if (lead < 0 && fabs(d) > cfg->soc_balance_on)
+				lead = d > 0 ? 0 : 1;
+			else if (lead >= 0 && (lead == 0 ? d : -d) < cfg->soc_balance_off)
+				lead = -1;          /* no longer ahead: a 5 min step can jump over the +-1 % window of update_lead */
+		}
+		int order[NBANK], k = 0;
+		for (int i = 0; i < NBANK; i++)
+			if (CHARGE_PRIORITY[i] != lead)
+				order[k++] = CHARGE_PRIORITY[i];
+		if (lead >= 0)
+			order[k++] = lead;
+		double rest = fmax(0.0, p0 + FC_CHARGE_EFF * (pv - pv0));
+		for (int i = 0; i < k; i++) {                  /* alloc_charge: priority order up to the charger */
 			int b = order[i];
+			pb[b] = 0;
 			if (!active[b] || soc[b] >= 100)
 				continue;
-			double more = fmin(diff, fmax(0.0, cap[b] - pb[b]));
-			pb[b] += more;
-			diff -= more;
-		}
-		for (int i = k - 1; i >= 0 && diff < 0; i--) {         /* less: the last in priority gives first */
-			int b = order[i];
-			double less = fmin(-diff, pb[b]);
-			pb[b] -= less;
-			diff += less;
+			pb[b] = fmin(rest, cap[b]);
+			rest -= pb[b];
 		}
 		for (int b = 0; b < NBANK; b++) {
 			if (!active[b] || soc[b] >= 100)
 				continue;
 			soc[b] += pb[b] * FC_STEP / 3600.0 / BM_BANKS[b].capacity_wh * 100.0;
 			if (soc[b] >= 100) {
-				soc[b] = 100;
-				pb[b] = 0;                          /* its power goes to the other stack next step */
+				soc[b] = 100;                       /* its power goes to the other stack next step */
 				out->full_at[b] = t;
 			}
 		}

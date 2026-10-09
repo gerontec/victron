@@ -620,6 +620,25 @@ static void test_fc_full_stack_moves_power(void)
 	CHECK(o.full_at[1] && o.full_at[1] < local_time(2026, 6, 20, 16, 0), "Stack2 gets Stack1's share, full before 16:00");
 }
 
+static void test_fc_paused_stack_catches_up(void)
+{
+	struct bm_cfg cfg;
+	struct bm_fc_out o;
+	bm_cfg_default(&cfg);
+	/* 9 Oct 11:10 (real): Stack1 53 % paused as the lead, Stack2 51.3 % alone at 3.5 kW; reality: both full at
+	   13:17 / 13:19. 0.31-c said 14:40 for Stack1 (waited until Stack2 was full) */
+	time_t t = local_time(2026, 10, 9, 11, 10);
+	struct bm_fc_in fi = fc_base(t, 53, 51.3, 0, 3483);
+	fi.lead = 0;
+	fc_slots(&fi, 2026, 10, 9, 0.62, 0.69);
+	bm_full_forecast(&cfg, &fi, &o);
+	print_fc("Oct 11:10, Stack1 paused as lead", &o);
+	/* the absolute time depends on the 3.5 kW of this cloud minute taken as the 5 min mean; the point is the lead:
+	   Stack1 must not wait until Stack2 is full (0.31-c: 14:50 vs 13:10, 100 min apart) */
+	CHECK(o.full_at[0] && o.full_at[1] && labs((long)(o.full_at[0] - o.full_at[1])) <= 15 * 60,
+		  "both stacks full within 15 min of each other");
+}
+
 static void test_fc_charger_limit(void)
 {
 	struct bm_cfg cfg;
@@ -674,6 +693,7 @@ int main(void)
 	test_fc_anchor();
 	test_fc_full_stack_moves_power();
 	test_fc_charger_limit();
+	test_fc_paused_stack_catches_up();
 	printf("%d checks, %d failed\n", checks, fails);
 	return fails ? 1 : 0;
 }

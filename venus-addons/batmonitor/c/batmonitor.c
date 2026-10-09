@@ -45,6 +45,10 @@
  *     (~15 % extra conversion loss on that part). Only a Sofar CT on Z2 or a Bat1 discharge limit avoids that.
  *   - full_at with the measured charger power (0.31-c, user 2026-10-09): each MultiPlus delivers ~3.6 kW DC at the BMS
  *     at its limit (65-67 A, flat over 53.6-54.6 V; AC-in ~4040 W), not 70 A x U: CHARGER_DC_W caps the forecast.
+ *   - full_at (0.32-c, user 2026-10-09): the forecast splits the power each step like alloc_charge and lets the SoC lead
+ *     follow the simulated SoC (a paused stack catches up instead of waiting until the other one is full: 9 Oct the
+ *     forecast jumped to 14:40 while one stack paused); once a stack reports 100 %, full_at holds the time it got
+ *     there until the SoC drops below 100 again (was: the current time). After a restart that time is the restart.
  * PI prototype (not armed): BATMONITOR_PI=1 lets a velocity-form PI on y = PCC + Sofar Bat1 replace the soyo
  * discharge/charge amounts (same gates, same phase split). Without it the PI runs in shadow: every cycle one line
  * in PI_SHADOW_FILE with what soyo set and what the PI would set, to compare both before arming it.
@@ -68,7 +72,7 @@
 #include <unistd.h>
 #include "bm_logic.h"
 
-#define VERSION "0.31-c"
+#define VERSION "0.32-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
@@ -382,6 +386,7 @@ static void sample_power(void)
 }
 
 static struct bm_fc_out fc_out;                    /* bm_full_forecast of the current cycle (calc) */
+static time_t full_reached[NBANK];                  /* first cycle with SoC 100, 0 = below 100 */
 
 /* average charge power over ETA_WINDOW per stack, then the weather forecast (fc_out, by day) or, at night, the time
    100 % SoC is reached at that power (0 = none) */
@@ -393,6 +398,10 @@ static void full_forecast(int b, int *has_avg, double *avg, long *full_at)
 	for (int i = 0; i < hist_n[b]; i++)
 		s += hist[b][i].p;
 	*avg = *has_avg ? s / hist_n[b] : 0;
+	if (full_reached[b]) {
+		*full_at = (long)full_reached[b];
+		return;
+	}
 	if (fc_out.soc_sunset[b] >= 0) {
 		*full_at = (long)fc_out.full_at[b];
 		return;
@@ -429,6 +438,13 @@ static void run_full_forecast(const struct bm_in *in)
 	}
 	pthread_mutex_unlock(&mq_lock);
 	bm_full_forecast(&cfg, &fi, &fc_out);
+	for (int b = 0; b < NBANK; b++)
+		if (!st.soc_ok[b])
+			continue;
+		else if (st.soc[b] < 100)
+			full_reached[b] = 0;
+		else if (!full_reached[b])
+			full_reached[b] = in->t;
 }
 
 static void write_state(const int *sp, char why[][WHY_LEN], double surplus)
