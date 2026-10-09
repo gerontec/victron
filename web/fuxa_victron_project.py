@@ -141,7 +141,7 @@ ATS_BG = '#2a1a1c'
 box(840, 60, 230, 130, ATS_BG)
 shape('path', dict(G, d='M840,95 L890,95'))                 # I
 shape('path', {'d': 'M890,190 L890,160', 'fill': 'none', 'stroke': '#a78bfa', 'stroke-width': 5, 'stroke-linecap': 'round'})  # II
-shape('path', dict(G, d='M1010,125 L1070,125'))             # common -> house
+shape('path', dict(G, d='M1010,125 L1110,125'))             # common -> house box
 
 
 def blade(d, on_lost):
