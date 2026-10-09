@@ -140,7 +140,7 @@ value(720, 181, 'ac_in_limit_a', 'A', 0, 12, anchor='end')
 ATS_BG = '#2a1a1c'
 box(840, 60, 230, 130, ATS_BG)
 shape('path', dict(G, d='M840,95 L890,95'))                 # I
-shape('path', {'d': 'M955,190 L955,152', 'fill': 'none', 'stroke': '#a78bfa', 'stroke-width': 5, 'stroke-linecap': 'round'})  # II
+shape('path', {'d': 'M890,190 L890,160', 'fill': 'none', 'stroke': '#a78bfa', 'stroke-width': 5, 'stroke-linecap': 'round'})  # II
 shape('path', dict(G, d='M1010,125 L1070,125'))             # common -> house
 
 
@@ -153,8 +153,8 @@ def blade(d, on_lost):
 
 
 blade('M1010,125 L892,97', 0)                                 # default: grid -> house
-blade('M1010,125 L957,150', 1)                                # grid failure: UPS (AC-out1) -> house
-for cx, cy in ((890, 95), (955, 152), (1010, 125)):
+blade('M1010,125 L892,158', 1)                                # grid failure: UPS (AC-out1) -> house
+for cx, cy in ((890, 95), (890, 160), (1010, 125)):
     shape('circle', {'cx': cx, 'cy': cy, 'r': 6, 'fill': FG, 'stroke': 'none'})
 
 # ---- house: fed by the rotary switch; AC-out1 per unit (backup leg) -------------------------------
@@ -183,8 +183,8 @@ AO = {'fill': 'none', 'stroke': PURPLE, 'stroke-width': 5, 'stroke-linecap': 'ro
 for x in CX.values():
     shape('path', dict(AO, d=f'M{x + 120},275 L{x + 120},255'))
 shape('path', dict(AO, d=f'M{LEFT + 120},255 L{RIGHT + 120},255'))
-shape('path', dict(AO, d='M955,255 L955,190'))
-text(963, 222, 'AC-out1 · UPS', 12, fill=PURPLE)
+shape('path', dict(AO, d='M890,255 L890,190'))
+text(898, 222, 'AC-out1 · UPS', 12, fill=PURPLE)
 # MK3-USB from the Pi only to unit 1 (left, L2); the other units hang on the VE.Bus chain unit 1 - 2 - 3
 VB = {'fill': 'none', 'stroke': BLUE, 'stroke-width': 2.5, 'stroke-dasharray': '7 5'}
 shape('path', dict(VB, d=f'M{CX["l2"] + 50},210 L{CX["l2"] + 50},275'))
