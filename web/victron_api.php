@@ -79,6 +79,9 @@ if ($r) {
         's2_cvl_v' => v(num($r['cvl_v']), 'V', 'Stack2 charge voltage limit (DVCC)', 'pv_victron.cvl_v'),
         's2_ccl_a' => v(num($r['ccl_a']), 'A', 'Stack2 charge current limit', 'pv_victron.ccl_a'),
         's2_dcl_a' => v(num($r['dcl_a']), 'A', 'Stack2 discharge current limit (0 = discharge blocked)', 'pv_victron.dcl_a'),
+        's2_p1_cycles' => v(num($r['ebox_p1_cycles'] ?? null), 'cycles', 'Stack2 Pytes pack 1 cycle count (BMS "CYCLE Times" via ebox stat 1, refreshed every 6 h)', 'pv_victron.ebox_p1_cycles'),
+        's2_p2_cycles' => v(num($r['ebox_p2_cycles'] ?? null), 'cycles', 'Stack2 Pytes pack 2 cycle count (BMS "CYCLE Times" via ebox stat 2, refreshed every 6 h)', 'pv_victron.ebox_p2_cycles'),
+        's2_p3_cycles' => v(num($r['ebox_p3_cycles'] ?? null), 'cycles', 'Stack2 Pytes pack 3 cycle count (BMS "CYCLE Times" via ebox stat 3, refreshed every 6 h)', 'pv_victron.ebox_p3_cycles'),
         's2_charge_request' => v($r['charge_request'] === null ? null : (bool)$r['charge_request'], 'bool', 'Stack2 ChargeRequest of dbus-ebox-battery (SoC < 5 %, 11-13 h; not used by batmonitor in Hub4Mode 3)', 'pv_victron.charge_request'),
         // Stack1 = MUST (CAN BMS on can0)
         's1_soc' => v(num($r['a_soc']), '%', 'Stack1 (MUST, CAN BMS, 300 Ah) state of charge', 'pv_victron.a_soc'),

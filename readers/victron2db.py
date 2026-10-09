@@ -12,6 +12,8 @@ Options:    --print   show the row, do not write
 batmonitor: its decisions of the last cycle come from /data/batmonitor/state.json (Venus /data = host /data)
 into the bm_* columns (setpoints, rules, SoC balancing lead, protection / forced charge flags, surplus);
 NULL if the file is missing or older than BM_STATE_MAX_AGE.
+EBox pack counters (cycle count per Pytes pack) from the cache of ebox_mqtt.py (EBOX_STAT, `ebox stat <n>`, refreshed
+every 6 h) into ebox_p1..p3_cycles; NULL if missing or older than EBOX_STAT_MAX_AGE.
 """
 
 import json
@@ -29,6 +31,9 @@ DB_CNF = os.path.expanduser('~/.victron2db.cnf')
 BM_STATE = '/data/batmonitor/state.json'
 BM_STATE_MAX_AGE = 120   # s
 BM_STACKS = (('s1', 'STACK1_MUST'), ('s2', 'STACK2_PYTES'))
+EBOX_STAT = '/home/pi/sofar/ebox_stat.json'
+EBOX_STAT_MAX_AGE = 2 * 86400   # s
+EBOX_PACKS = 3
 
 # column -> (service, path); 'vebus' takes the first instance seen; the batteries are told apart by /ProductName:
 # 'battery' = Speicher B (EBox, dbus-ebox-battery), 'battery_a' = Speicher A (CAN-bus BMS on can0)
@@ -191,6 +196,21 @@ def batmonitor_columns():
 	return cols
 
 
+def ebox_stat_columns():
+	"""ebox_p<n>_cycles from the ebox_mqtt.py cache, all None if it is missing or stale"""
+	cols = {f'ebox_p{n}_cycles': None for n in range(1, EBOX_PACKS + 1)}
+	try:
+		with open(EBOX_STAT) as f:
+			st = json.load(f)
+	except (OSError, ValueError):
+		return cols
+	if time.time() - st.get('ts', 0) > EBOX_STAT_MAX_AGE:
+		return cols
+	for n in range(1, EBOX_PACKS + 1):
+		cols[f'ebox_p{n}_cycles'] = st.get('packs', {}).get(str(n), {}).get('cycles')
+	return cols
+
+
 def write(row):
 	cols = list(row)
 	sql = (f"INSERT INTO pv_victron ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))}) "
@@ -209,6 +229,7 @@ def main():
 	row = build_row(portal_id, values)
 	filled = sum(1 for k, v in row.items() if v is not None and k not in ('ts', 'portal_id'))
 	row.update(batmonitor_columns())
+	row.update(ebox_stat_columns())
 	if '--print' in sys.argv:
 		for k, v in row.items():
 			print(f'{k:26} {v}')
