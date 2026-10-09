@@ -36,6 +36,7 @@ struct bm_cfg {
 	double soyo_target, b_night;
 	double fc_hyst;
 	double sofar_trickle;
+	double charger_a, charge_eff;   /* real charge ceiling per phase = charger_a x BMS voltage / charge_eff (0.29-c) */
 };
 
 /* parameter table: name (env BATMONITOR_<name>), default, allowed range, unit, meaning */
@@ -71,6 +72,8 @@ struct bm_in {
 	double soc[NBANK];
 	int power_ok[NBANK];
 	double power[NBANK];                                    /* BMS /Dc/0/Power, + = charge */
+	int volt_ok[NBANK];
+	double volt[NBANK];                                     /* BMS /Dc/0/Voltage */
 };
 
 struct bm_ls { int active, peak_h, win_end_h; double dc, ratio, ratio_now, noon_h; };
@@ -99,9 +102,13 @@ struct bm_out {
 	struct bm_pi pi;
 	int lead_event;                              /* 1 = a bank took the lead, -1 = back within SOC_BALANCE_OFF */
 	double lead_diff;
+	double chg_cap[NPH];                         /* W AC: charge ceiling per phase used this cycle */
 };
 
 void bm_init(struct bm_state *st);
+/* charge ceiling of one phase (W AC): charger_a x BMS voltage of its bank / charge_eff, at most CHARGE_MAX_PHASE;
+   without a plausible voltage CHARGER_CAP_PHASE (no spill above it any more) */
+double bm_charge_cap(const struct bm_cfg *cfg, int volt_ok, double volt);
 void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *st, struct bm_out *out);
 
 /* clear-sky model (fox2db_logic.h), exposed for tests */
@@ -116,6 +123,8 @@ struct bm_fc_in {
 	int soc_ok[NBANK];
 	double soc[NBANK];
 	int has_avg[NBANK];
+	int volt_ok[NBANK];
+	double volt[NBANK];                 /* BMS voltage: charger ceiling charger_a x U per unit */
 	double avg[NBANK];                  /* 5 min mean BMS /Dc/0/Power, + = charge */
 	int have_pv;
 	double pv_sofar;                    /* W, measured Sofar PV1 + PV2 */

@@ -57,8 +57,7 @@
 #define FC_ANCHOR_TAU 5400.0    /* s: the measured/model ratio of now fades into the weather forecast */
 #define FC_ANCHOR_MIN_W 500.0   /* modelled Sofar PV below this: no anchor (dawn, dusk) */
 #define FC_SLOT_REACH 5400      /* s: an OWM slot stands for its time +- 1.5 h */
-#define FC_CHARGE_EFF 0.92      /* additional PV (AC) -> stack DC */
-#define FC_CHARGER_DC_PHASE (70.0 * 56.0)   /* W: MultiPlus-II 48/5000 charger 70 A at 56 V, the DC limit per unit (user) */
+#define FC_CHARGE_EFF 0.90      /* AC-in -> stack DC at the BMS (measured 2026-10-09: 0.90-0.92) */
 
 const char *BM_PH[NPH] = {"L1", "L2", "L3"};
 /* Stack1 MUST feeds the middle unit = HQ2606P4NCH = Devices/0 = L1 (user photo 2026-10-08) */
@@ -94,6 +93,8 @@ const struct bm_param BM_PARAMS[] = {
 	{"B_NIGHT",               P(b_night),                   936,     0,       4000,    "W", "unused since 0.25-c (night follows PCC + Sofar Bat1), kept for env compatibility"},
 	{"FC_HYST",               P(fc_hyst),                   2,       0,       20,      "%", "forecast rule back on above target + this"},
 	{"SOFAR_TRICKLE",         P(sofar_trickle),             30,      0,       500,     "W", "night: stacks give this much more than the house needs, the Sofar battery charges gently instead of swinging"},
+	{"CHARGER_A",             P(charger_a),                 70,      0,       70,      "A", "MultiPlus-II 48/5000 charger current per unit (DC), ceiling = this x BMS voltage"},
+	{"CHARGE_EFF",            P(charge_eff),                0.93,    0.7,     1.0,     "",  "AC-in per DC at the charger limit (measured 2026-10-09: 4050 W AC at 70 A x 53.7 V)"},
 };
 const int BM_NPARAMS = sizeof(BM_PARAMS) / sizeof(BM_PARAMS[0]);
 
@@ -360,9 +361,18 @@ static void alloc_discharge(const struct bm_cfg *cfg, int lead, int w, const int
 	}
 }
 
+double bm_charge_cap(const struct bm_cfg *cfg, int volt_ok, double volt)
+{
+	if (!volt_ok || volt < 40 || volt > 62)
+		return cfg->charger_cap_phase;
+	return fmin(cfg->charge_max_phase, cfg->charger_a * volt / cfg->charge_eff);
+}
+
 /* charge rest (W) over the phases in chg[]: the banks in CHARGE_PRIORITY order up to their real charger capacity,
-   the stack behind first; what is left up to CHARGE_MAX_PHASE on all phases alike */
-static void alloc_charge(const struct bm_cfg *cfg, int lead, double rest, const int *chg, int n_chg, int *sp, char why[][WHY_LEN])
+   the stack behind first; what is left up to CHARGE_MAX_PHASE on all phases alike. cap[] (0.29-c): the real ceiling
+   per phase (charger 70 A x BMS voltage); with a measured voltage nothing spills above it */
+static void alloc_charge(const struct bm_cfg *cfg, int lead, double rest, const int *chg, int n_chg, const double *cap,
+						 int *sp, char why[][WHY_LEN])
 {
 	int order[NBANK], k = 0;
 	for (int i = 0; i < NBANK; i++)
@@ -377,7 +387,10 @@ static void alloc_charge(const struct bm_cfg *cfg, int lead, double rest, const 
 				ph[n++] = BM_BANKS[b].ph[j];
 		if (!n)
 			continue;
-		double share = fmin(rest, cfg->charger_cap_phase * n);
+		double bank_cap = 0;
+		for (int j = 0; j < n; j++)
+			bank_cap += fmin(cfg->charger_cap_phase, cap[ph[j]]);
+		double share = fmin(rest, bank_cap);
 		for (int j = 0; j < n; j++) {
 			sp[ph[j]] = (int)(share / n);
 			strncat(why[ph[j]], "|CHARGE", WHY_LEN - 1 - strlen(why[ph[j]]));
@@ -387,7 +400,7 @@ static void alloc_charge(const struct bm_cfg *cfg, int lead, double rest, const 
 	if (rest > 0)
 		for (int p = 0; p < NPH; p++)
 			if (chg[p])
-				sp[p] += (int)fmin(rest / n_chg, cfg->charge_max_phase - sp[p]);
+				sp[p] += (int)fmax(0.0, fmin(rest / n_chg, fmin(cfg->charge_max_phase, cap[p]) - sp[p]));
 }
 
 /* one cycle: the ESP soyo calculation per bank, the charge block and the PI prototype */
@@ -441,6 +454,9 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 	double z2 = pcc + wp_eff;
 	int *sp = out->sp;
 	char (*why)[WHY_LEN] = out->why;
+	for (int b = 0; b < NBANK; b++)
+		for (int i = 0; i < BM_BANKS[b].nph; i++)
+			out->chg_cap[BM_BANKS[b].ph[i]] = bm_charge_cap(cfg, in->volt_ok[b], in->volt[b]);
 	int discharge[NPH] = {0}, charge[NPH] = {0}, n_dis = 0, n_chg = 0;
 	int pi_ok[NPH] = {0}, pi_chg[NPH] = {0}, pi_dis[NPH] = {0}, n_pichg = 0, n_pidis = 0;
 
@@ -563,9 +579,14 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 		}
 		alloc_discharge(cfg, st->lead, w, discharge, rule, sp, why);
 	}
-	if (n_chg)
+	if (n_chg) {
+		double cap_sum = 0;
+		for (int p = 0; p < NPH; p++)
+			if (charge[p])
+				cap_sum += out->chg_cap[p];
 		alloc_charge(cfg, st->lead, fmin((int)(own_charge + KP * ((have_pcc ? pcc : 0.0) + bat1_eff - cfg->soyo_target)),
-									cfg->charge_max_phase * n_chg), charge, n_chg, sp, why);
+									cap_sum), charge, n_chg, out->chg_cap, sp, why);
+	}
 	st->soyo_chg_prev = n_chg > 0;
 	if (!n_dis)
 		st->soyo_prop_prev = 0;
@@ -589,7 +610,10 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 		double dt = st->pi_t_prev > 0 ? fmin(fmax(now - st->pi_t_prev, 1.0), 30.0) : CYCLE_SECONDS;
 		double u = applied + (st->pi_t_prev > 0 ? PI_KP * (e - st->pi_e_prev) : 0) + PI_KI * dt * e;
 		double dis_cap = (!wp_fresh && winter && wp_running) ? cfg->wp_cap : cfg->w_max;
-		double u_max = cfg->charge_max_phase * n_pichg, u_min = n_pidis ? -dis_cap : 0;
+		double u_max = 0, u_min = n_pidis ? -dis_cap : 0;
+		for (int p = 0; p < NPH; p++)
+			if (pi_chg[p])
+				u_max += out->chg_cap[p];
 		/* crossing from discharge (Z2 side) into charging: never more than the real Z1 export, else the Sofar Bat1
 		   would feed the charging while the heat pump runs */
 		if (applied <= 0 && u > 0)
@@ -605,7 +629,7 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 			if (pi_ok[p])
 				snprintf(pwhy[p], WHY_LEN, "PI(%+.0f)", u);
 		if (u > 0)
-			alloc_charge(cfg, st->lead, u, pi_chg, n_pichg, psp, pwhy);
+			alloc_charge(cfg, st->lead, u, pi_chg, n_pichg, out->chg_cap, psp, pwhy);
 		else if (u < 0) {
 			char rule[32];
 			snprintf(rule, sizeof(rule), "PI(%+.0f)", u);
@@ -665,8 +689,8 @@ static double fc_pv(const struct bm_fc_in *in, time_t t, double anchor, int *wea
 
 /* Steps from now to sunset in FC_STEP: the stacks start with their measured charge power, the change of the expected
    PV against now (x FC_CHARGE_EFF; house load and the Sofar battery's share taken as they are now) is given like
-   alloc_charge: more power in CHARGE_PRIORITY order (lead stack last) up to the charger capacity, never above
-   FC_CHARGER_DC_PHASE per unit (3 x 70 A x 56 V = 11.76 kW in all); less power taken in the reverse order. A full stack's power moves to the other one.
+   alloc_charge: more power in CHARGE_PRIORITY order (lead stack last) up to the real charger ceiling
+   (bm_charge_cap x FC_CHARGE_EFF per unit: 70 A x BMS voltage); less power taken in the reverse order. A full stack's power moves to the other one.
    Only while the sun is up. */
 void bm_full_forecast(const struct bm_cfg *cfg, const struct bm_fc_in *in, struct bm_fc_out *out)
 {
@@ -693,7 +717,7 @@ void bm_full_forecast(const struct bm_cfg *cfg, const struct bm_fc_in *in, struc
 			continue;
 		any = 1;
 		p0 += in->avg[b];
-		pb[b] = fmin(fmax(0.0, in->avg[b]), FC_CHARGER_DC_PHASE * BM_BANKS[b].nph);
+		pb[b] = fmax(0.0, in->avg[b]);
 		if (soc[b] >= 100) {
 			out->full_at[b] = in->t;
 			pb[b] = 0;
@@ -718,7 +742,8 @@ void bm_full_forecast(const struct bm_cfg *cfg, const struct bm_fc_in *in, struc
 			int b = order[i];
 			if (!active[b] || soc[b] >= 100)
 				continue;
-			double cap = fmin(cfg->charger_cap_phase * FC_CHARGE_EFF, FC_CHARGER_DC_PHASE) * BM_BANKS[b].nph;
+			double cap = fmin(cfg->charger_cap_phase, bm_charge_cap(cfg, in->volt_ok[b], in->volt[b]))
+						 * FC_CHARGE_EFF * BM_BANKS[b].nph;
 			double more = fmin(diff, fmax(0.0, cap - pb[b]));
 			pb[b] += more;
 			diff -= more;

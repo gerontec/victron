@@ -33,6 +33,10 @@
  *     (which ran past sunset), bm_full_forecast steps to sunset with the PV from the clear-sky model x the OWM slot kt
  *     x the correction of forecast.py (weather_data on heissa), anchored to the measured Sofar PV; a stack not full
  *     by sunset gets full_at null and soc_sunset. At night (force charge from the grid) the linear ETA as before.
+ *   - real charge ceiling (0.29-c, user 2026-10-09): per phase CHARGER_A (70 A) x BMS voltage of its stack /
+ *     CHARGE_EFF (0.93: L1 saturated at 4000-4080 W AC with setpoint 4200 W at 53.7 V), for the soyo setpoints, the
+ *     spill (was up to CHARGE_MAX_PHASE 4900 W, more than the charger takes), the PI limit and the full_at forecast.
+ *     Without a BMS voltage CHARGER_CAP_PHASE (4200 W), no spill above it.
  * PI prototype (not armed): BATMONITOR_PI=1 lets a velocity-form PI on y = PCC + Sofar Bat1 replace the soyo
  * discharge/charge amounts (same gates, same phase split). Without it the PI runs in shadow: every cycle one line
  * in PI_SHADOW_FILE with what soyo set and what the PI would set, to compare both before arming it.
@@ -56,7 +60,7 @@
 #include <unistd.h>
 #include "bm_logic.h"
 
-#define VERSION "0.28-c"
+#define VERSION "0.29-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
@@ -399,6 +403,8 @@ static void run_full_forecast(const struct bm_in *in)
 	fi.lead = st.lead;
 	for (int b = 0; b < NBANK; b++) {
 		double s = 0;
+		fi.volt_ok[b] = in->volt_ok[b];
+		fi.volt[b] = in->volt[b];
 		fi.soc_ok[b] = st.soc_ok[b];
 		fi.soc[b] = st.soc[b];
 		fi.has_avg[b] = hist_n[b] > 0;
@@ -470,6 +476,9 @@ static void write_state(const int *sp, char why[][WHY_LEN], double surplus)
 	cJSON_AddNumberToObject(o, "kt_now", round(fc_out.kt_now * 1000) / 1000);
 	cJSON_AddNumberToObject(o, "pv_model_w", round(fc_out.pv_now_w));
 	cJSON_AddNumberToObject(o, "pv_rest_kwh", round(fc_out.rest_kwh * 10) / 10);
+	o = cJSON_AddObjectToObject(js, "charge_cap_w");
+	for (int p = 0; p < NPH; p++)
+		cJSON_AddNumberToObject(o, BM_PH[p], round(o_.chg_cap[p]));
 	o = cJSON_AddObjectToObject(js, "ladesperre");
 	cJSON_AddNumberToObject(o, "active", o_.ls.active);
 	cJSON_AddNumberToObject(o, "dc_expected_w", round(o_.ls.dc));
@@ -564,6 +573,7 @@ static void calc(void)
 		double conn;
 		in.bms_ok[b] = get(s, "/Connected", &conn) == 0 && conn == 1.0 && get(s, "/Soc", &in.soc[b]) == 0;
 		in.power_ok[b] = get(s, "/Dc/0/Power", &in.power[b]) == 0;
+		in.volt_ok[b] = get(s, "/Dc/0/Voltage", &in.volt[b]) == 0;
 	}
 
 	bm_step(&cfg, &in, &st, &o_);

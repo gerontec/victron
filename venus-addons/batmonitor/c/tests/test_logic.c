@@ -29,6 +29,7 @@ struct plant {
 	double fc_target;              /* batmonitor/forecast target SoC, 0 = none */
 	int fc_age_h;
 	double aussen;
+	double volt[NBANK];            /* BMS voltage, 0 = none; given: the Multis saturate at 70 A x U / 0.93 (real) */
 };
 
 static double r_override_w_max;     /* > 0: W_MAX for the next simulate() (parameter test) */
@@ -101,13 +102,20 @@ static void simulate(struct run *r, const struct plant *pl, time_t t0, int n)
 			in->bms_ok[b] = 1;
 			in->soc[b] = pl->soc[b];
 			in->power_ok[b] = 1;
+			in->volt_ok[b] = pl->volt[b] > 0;
+			in->volt[b] = pl->volt[b];
 			in->power[b] = 0;
 			for (int i = 0; i < BM_BANKS[b].nph; i++)
 				in->power[b] += r->ac[BM_BANKS[b].ph[i]];
 		}
 		bm_step(&r->cfg, in, &r->st, &r->out);
-		for (int p = 0; p < NPH; p++)
+		for (int p = 0; p < NPH; p++) {
 			r->ac[p] = r->out.sp[p];     /* the Multis follow within one cycle */
+			for (int b = 0; b < NBANK; b++)
+				for (int i = 0; i < BM_BANKS[b].nph; i++)
+					if (BM_BANKS[b].ph[i] == p && pl->volt[b] > 0 && r->ac[p] > 70.0 * pl->volt[b] / 0.93)
+						r->ac[p] = 70.0 * pl->volt[b] / 0.93;   /* charger limit */
+		}
 		if (r->n < 1000)
 			r->pcc_hist[r->n++] = r->pcc;
 	}
@@ -260,6 +268,22 @@ static void test_day_surplus_to_zero(void)
 	CHECK(fabs(r.pcc) <= 60, "charging to PCC 0, pcc %.0f", r.pcc);
 	CHECK(abs(sum_sp(&r) - 4200) <= 60, "Multis take 4200 W, sp sum %d", sum_sp(&r));
 	CHECK(pcc_swing(&r, 20) < 100, "no oscillation, swing %.0f", pcc_swing(&r, 20));
+}
+
+static void test_real_charge_ceiling(void)
+{
+	struct run r;
+	/* 0.29-c: 16 kW PV, house 0.8 kW: with the BMS voltage 53.7 V no phase above 70 A x 53.7 V / 0.93 = 4042 W */
+	struct plant pl = BASE(.pv = 16000, .house = 800, .soc = {50, 50}, .volt = {53.7, 53.7});
+	simulate(&r, &pl, local_time(2026, 3, 10, 12, 0), 40);
+	print_state("day, PV 16 kW, BMS 53.7 V", &r);
+	for (int p = 0; p < NPH; p++)
+		CHECK(r.out.sp[p] <= 4043 && r.out.sp[p] >= 4000, "phase %d at the real ceiling ~4042 W, got %d", p, r.out.sp[p]);
+	CHECK(fabs(r.out.chg_cap[0] - 4041.9) < 1, "charge_cap L1 %.1f", r.out.chg_cap[0]);
+	CHECK(r.pcc > 2500, "the rest is exported, pcc %.0f", r.pcc);
+	struct plant pl2 = BASE(.pv = 16000, .house = 800, .soc = {50, 50});
+	simulate(&r, &pl2, local_time(2026, 3, 10, 12, 0), 40);
+	CHECK(sum_sp(&r) == 3 * 4200, "without a BMS voltage CHARGER_CAP_PHASE per phase, no spill, sp sum %d", sum_sp(&r));
 }
 
 static void test_day_sofar_covers_house(void)
@@ -582,6 +606,8 @@ static void test_fc_charger_limit(void)
 	   / 7.84 kW = 1.57 h, Stack1 (1 unit) 3.13 h */
 	time_t t = local_time(2026, 6, 20, 11, 0);
 	struct bm_fc_in fi = fc_base(t, 20, 20, 3900, 7800);
+	fi.volt_ok[0] = fi.volt_ok[1] = 1;
+	fi.volt[0] = fi.volt[1] = 56.0;
 	fc_slots(&fi, 2026, 6, 20, 0.95, 1.0);
 	bm_full_forecast(&cfg, &fi, &o);
 	print_fc("June 11:00, SoC 20, chargers at 70 A", &o);
@@ -602,6 +628,7 @@ int main(void)
 	test_winter_night_floor();
 	test_wp_running_no_night_floor();
 	test_day_surplus_to_zero();
+	test_real_charge_ceiling();
 	test_day_sofar_covers_house();
 	test_day_sofar_saturated();
 	test_force_charge();
