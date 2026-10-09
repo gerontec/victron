@@ -49,6 +49,10 @@
  *     follow the simulated SoC (a paused stack catches up instead of waiting until the other one is full: 9 Oct the
  *     forecast jumped to 14:40 while one stack paused); once a stack reports 100 %, full_at holds the time it got
  *     there until the SoC drops below 100 again (was: the current time). After a restart that time is the restart.
+ *   - peak model out (0.33-c, user 2026-10-09): the clear-sky peak model of the charge block (fox2db_logic.h, as the
+ *     Waveshare ESP sent it in sofar/state until 2026-10-08) goes retained to PEAK_MODEL_TOPIC once a minute:
+ *     {"ts", "peak_h", "win_end_h", "ratio", "ratio_now", "dc_expected_w", "noon_h", "peak_today", "badweather_today",
+ *     "ladesperre_active", "version"}; r290_boost.py on .218 reads it for its peak reserve.
  * PI prototype (not armed): BATMONITOR_PI=1 lets a velocity-form PI on y = PCC + Sofar Bat1 replace the soyo
  * discharge/charge amounts (same gates, same phase split). Without it the PI runs in shadow: every cycle one line
  * in PI_SHADOW_FILE with what soyo set and what the PI would set, to compare both before arming it.
@@ -72,13 +76,15 @@
 #include <unistd.h>
 #include "bm_logic.h"
 
-#define VERSION "0.32-c"
+#define VERSION "0.33-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
 #define WP_TOPIC "em0/power"          /* SDM72D, heat pump electrical power in W (sdm72d.py on .218, once a minute) */
 #define SEASON_TOPIC "batmonitor/season"   /* season.py on .218, hourly: {"mode": "summer"|"winter", ..., "ts"} */
 #define FORECAST_TOPIC "batmonitor/forecast"   /* forecast.py on .218, hourly: {"target_soc", ..., "ts"} */
+#define PEAK_MODEL_TOPIC "batmonitor/peak_model"   /* out, retained, every PEAK_MODEL_SECONDS: for r290_boost.py */
+#define PEAK_MODEL_SECONDS 60.0
 #define STATE_FILE_DEFAULT "/data/batmonitor/state.json"
 #define TZ_BERLIN "CET-1CEST,M3.5.0,M10.5.0/3"   /* Europe/Berlin without a zoneinfo file */
 #define SETPOINT_MAX_AGE 90.0
@@ -119,6 +125,7 @@ static struct { double t, p; } hist[NBANK][ETA_MAX_N];
 static int hist_n[NBANK];
 
 static DBusConnection *bus;
+static struct mosquitto *mosq_g;                    /* for the peak model publish */
 
 static double mono(void)
 {
@@ -557,6 +564,23 @@ static void pi_shadow_log(double pcc, double bat1, double pv, const int *sp, cha
 		rename(PI_SHADOW_FILE, PI_SHADOW_FILE ".1");
 }
 
+/* the charge block's clear-sky peak model, retained, once a minute (same fields as the ESP's sofar/state model) */
+static void publish_peak_model(double now)
+{
+	static double last;
+	if (!mosq_g || (last > 0 && now - last < PEAK_MODEL_SECONDS))
+		return;
+	char buf[512];
+	int n = snprintf(buf, sizeof(buf), "{\"ts\":%ld,\"peak_h\":%d,\"win_end_h\":%d,\"ratio\":%.3f,\"ratio_now\":%.3f,"
+					 "\"dc_expected_w\":%.0f,\"noon_h\":%.2f,\"peak_today\":%d,\"badweather_today\":%d,"
+					 "\"ladesperre_active\":%d,\"version\":\"%s\"}", (long)time(NULL), o_.ls.peak_h, o_.ls.win_end_h,
+					 o_.ls.ratio, o_.ls.ratio_now, o_.ls.dc, o_.ls.noon_h, st.peak_today, st.badweather_today,
+					 o_.ls.active, VERSION);
+	if (n > 0 && n < (int)sizeof(buf)
+		&& mosquitto_publish(mosq_g, NULL, PEAK_MODEL_TOPIC, n, buf, 1, true) == MOSQ_ERR_SUCCESS)
+		last = now;
+}
+
 /* one cycle: collect the inputs, bm_step, then log, PI shadow line and state file */
 static void calc(void)
 {
@@ -646,6 +670,7 @@ static void calc(void)
 	}
 	setpoint_time = in.now;
 	write_state(sp, o_.why, o_.surplus);
+	publish_peak_model(in.now);
 }
 
 static void send_setpoints(void)
@@ -757,6 +782,7 @@ int main(void)
 	if (mosquitto_connect_async(mosq, host, 1883, 60) != MOSQ_ERR_SUCCESS)
 		LOGE("MQTT connect to %s failed, retrying in the loop", host);
 	mosquitto_loop_start(mosq);
+	mosq_g = mosq;
 
 	struct sigaction sa = {0};
 	sa.sa_handler = on_signal;
