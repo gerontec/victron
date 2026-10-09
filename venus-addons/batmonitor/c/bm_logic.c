@@ -77,7 +77,7 @@ static const double KT_MONTH[13] = {0, .331, .402, .563, .838, .909, .880, .840,
 const struct bm_param BM_PARAMS[] = {
 	/* name                   field                         default  min      max      unit */
 	{"W_MAX",                 P(w_max),                     10000,   0,       12000,   "W", "total discharge (soyo was 1800 W)"},
-	{"DISCHARGE_MAX_PHASE",   P(discharge_max_phase),       4000,    0,       5000,    "W", "discharge per phase (MP2 48/5000 continuous)"},
+	{"DISCHARGE_MAX_PHASE",   P(discharge_max_phase),       3800,    0,       5000,    "W", "discharge per phase (0.34: below the MP2 4 kW limit, better efficiency; SoC balancing catches up)"},
 	{"CHARGE_MAX_PHASE",      P(charge_max_phase),          4900,    0,       5000,    "W", "PV charge per phase (5000 VA peaks)"},
 	{"CHARGER_CAP_PHASE",     P(charger_cap_phase),         4200,    0,       5000,    "W", "real charger capacity per phase, priority fill"},
 	{"WP_BAT_MAX_TRANSITION", P(wp_bat_max_transition),     1900,    0,       10000,   "W", "heat pump share from the batteries in the transition"},

@@ -149,6 +149,7 @@ Without data for 120 s the service exits and only registers again with fresh dat
 
 - **C port** `c/batmonitor.c` (live): 5 s cycle (the Sofar PCC arrives every 4 s), about 3 MB RSS instead of 23 MB for Python. Build inside Venus with `make -C /data/batmonitor/c` (the image has gcc and the dbus headers); `install.sh` copies and builds. `batmonitor.py` stays as the reference and fallback (`BATMONITOR_PYTHON=1` in `/data/batmonitor/env`).
 - Rules (1:1 from the soyo calculation of the former Waveshare ESP32): per-bank SoC protection (no discharge below 5 % until 7 %, grid charge 500 W per phase below 3 %), discharge proportional to grid import, PV surplus charging in stack priority up to the charger capacity, SoC balancing within ±3 %, heat-pump cap October to April.
+- Discharge split (0.26-c): every battery bank delivers the same power, so the two 300 Ah stacks drain alike. Stack1 (MUST) feeds only L1, Stack2 (Pytes) feeds L2 + L3, hence L1 50 %, L2 25 %, L3 25 % (Unit 2 discharges twice as much as Unit 1 / Unit 3). Each phase is capped at `DISCHARGE_MAX_PHASE` = 3800 W (0.34-c): 4000 W is the MultiPlus-II 48/5000 limit but not its best operating point. Above 7.6 kW total, L1 stays at 3800 W and the rest goes to L2/L3; Stack2 then drains faster, and the SoC balancing (one stack more than 3 % ahead discharges alone until the gap is below 1 %) catches up later.
 - Summer charge block (May to August): a clear-sky DC model (NOAA sun position, fitted strings, tree horizon) holds PV charging back until the 20 kW peak window on forecast sunny days; clouds release it. The rest of the year every watt of surplus charges at once.
 - State per cycle in `/data/batmonitor/state.json` (read by `readers/victron2db.py`). Logs are capped at 20 MB.
 - Control logic in `c/bm_logic.c` as a pure function (`bm_step`), tested on any host with a plant model: `make -C c test`.
@@ -158,7 +159,7 @@ Without data for 120 s the service exits and only registers again with fresh dat
   | Parameter | Default | Meaning |
   |---|---|---|
   | `W_MAX` | 10000 W | total discharge |
-  | `DISCHARGE_MAX_PHASE` | 4000 W | discharge per phase |
+  | `DISCHARGE_MAX_PHASE` | 3800 W | discharge per phase (since 0.34-c; 4000 W is the MP2 limit, not its best operating point) |
   | `CHARGE_MAX_PHASE` / `CHARGER_CAP_PHASE` | 4900 / 4200 W | PV charge per phase / real charger capacity |
   | `WP_BAT_MAX_TRANSITION` | 1900 W | heat pump share from the batteries in spring/autumn |
   | `WP_CAP` | 1000 W | discharge cap with the heat pump running when its meter is silent (winter) |

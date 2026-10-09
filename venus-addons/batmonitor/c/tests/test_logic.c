@@ -203,12 +203,12 @@ static void test_w_max_and_phase_cap(void)
 	print_state("summer night, house 14 kW", &r);
 	CHECK(sum_sp(&r) >= -10000 && sum_sp(&r) <= -9990, "W_MAX 10 kW total, sp sum %d", sum_sp(&r));
 	for (int p = 0; p < NPH; p++)
-		CHECK(r.out.sp[p] >= -4000, "phase %d at most 4000 W, got %d", p, r.out.sp[p]);
+		CHECK(r.out.sp[p] >= -3800, "phase %d at most 3800 W, got %d", p, r.out.sp[p]);
 
 	pl = BASE(.house = 6000, .soc = {60, 50}, .season = BM_SUMMER, .season_age_h = 1);
 	simulate(&r, &pl, local_time(2026, 7, 15, 23, 0), 60);       /* Stack1 leads, but L1 alone cannot give 6 kW */
 	print_state("Stack1 leads, house 6 kW", &r);
-	CHECK(r.out.sp[0] == -4000 && rule_has(&r, "BALANCE_SPILL"), "L1 at 4000 W, the rest spills to L2/L3, got %d %d %d",
+	CHECK(r.out.sp[0] == -3800 && rule_has(&r, "BALANCE_SPILL"), "L1 at 3800 W, the rest spills to L2/L3, got %d %d %d",
 		  r.out.sp[0], r.out.sp[1], r.out.sp[2]);
 	CHECK(fabs(r.pcc) <= 80, "house covered, pcc %.0f", r.pcc);
 }
@@ -224,10 +224,10 @@ static void test_bank_split(void)
 	CHECK(abs(sum_sp(&r) + 2000) <= 30, "house covered, sp sum %d", sum_sp(&r));
 
 	pl = BASE(.house = 9000, .season = BM_SUMMER, .season_age_h = 1);
-	simulate(&r, &pl, local_time(2026, 7, 15, 23, 0), 60);       /* L1 would need 4500 W: capped, rest to L2/L3 */
+	simulate(&r, &pl, local_time(2026, 7, 15, 23, 0), 60);       /* L1 would need 4500 W: capped at 3800 W, rest to L2/L3 */
 	print_state("bank split, house 9 kW", &r);
-	CHECK(r.out.sp[0] == -4000, "L1 capped at 4000 W, got %d", r.out.sp[0]);
-	CHECK(abs(r.out.sp[1] + 2500) <= 30 && abs(r.out.sp[2] + 2500) <= 30, "L2/L3 take the spill, got %d %d",
+	CHECK(r.out.sp[0] == -3800, "L1 capped at 3800 W, got %d", r.out.sp[0]);
+	CHECK(abs(r.out.sp[1] + 2600) <= 30 && abs(r.out.sp[2] + 2600) <= 30, "L2/L3 take the spill, got %d %d",
 		  r.out.sp[1], r.out.sp[2]);
 	CHECK(fabs(r.pcc) <= 80, "house covered, pcc %.0f", r.pcc);
 }

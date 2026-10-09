@@ -78,14 +78,18 @@ Discharging (feeding the house)
   (before 0.18 it fell back to idle once covered and toggled). The own force charging of a stack is no house load,
   it comes from the grid.
 - idle: 20 W by day, 936 W at night (PV < 100 W; not in winter while the heat pump runs).
-- at most 10 kW in total and 4 kW per phase (MultiPlus-II 48/5000 continuous).
+- at most 10 kW in total and 3800 W per phase (0.34-c; 4 kW is the MultiPlus-II 48/5000 limit, not its best
+  operating point).
+- equal power per stack (0.26-c): Stack1 feeds only L1, Stack2 feeds L2 + L3, so L1 gets 50 %, L2 and L3 25 % each
+  (Unit 2 twice Unit 1 / Unit 3). Above 7.6 kW L1 stays at 3800 W and the rest goes to L2/L3; the faster drain of
+  Stack2 is caught up later by the SoC balancing.
 - no feed-in while a stack is being charged or at PV surplus; Sofar data older than 3 min -> 0;
   setpoints older than 90 s -> 0.
 - heat pump meter silent (> 150 s) in winter/transition with the R290 running: at most 1000 W (old soyo cap).
 
 SoC balancing (keep the stacks within +-3 %)
 
-- one stack more than 3 % ahead: it alone feeds the house (up to 4 kW per phase, the rest spills to the other
+- one stack more than 3 % ahead: it alone feeds the house (up to 3800 W per phase, the rest spills to the other
   stack's phases) and the other one is charged first; back to normal when the difference is below 1 %.
 
 Protection, per stack
@@ -105,7 +109,7 @@ Parameters (`/data/batmonitor/env`, `BATMONITOR_<NAME>=value`, defaults in `BM_P
 | Parameter | Default | Meaning |
 |---|---|---|
 | `W_MAX` | 10000 W | total discharge |
-| `DISCHARGE_MAX_PHASE` | 4000 W | discharge per phase |
+| `DISCHARGE_MAX_PHASE` | 3800 W | discharge per phase (since 0.34-c; 4000 W is the MP2 limit, not its best operating point) |
 | `CHARGE_MAX_PHASE` / `CHARGER_CAP_PHASE` | 4900 / 4200 W | PV charge per phase / real charger capacity |
 | `WP_BAT_MAX_TRANSITION` | 1900 W | heat pump share from the batteries in the transition |
 | `WP_CAP` | 1000 W | discharge cap when the heat pump meter is silent |
