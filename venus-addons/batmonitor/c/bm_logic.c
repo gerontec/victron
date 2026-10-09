@@ -288,7 +288,8 @@ static int ladesperre(const struct bm_cfg *cfg, const struct bm_in *in, struct b
 
 /* discharge w (W, > 0) over the phases in dis[], at most DISCHARGE_MAX_PHASE each, equal power per bank (0.26); SoC balancing: the stack more
    than SOC_BALANCE_ON ahead delivers alone, what its phases cannot give goes to the other phases (0.22) */
-static void alloc_discharge(const struct bm_cfg *cfg, int lead, int w, const int *dis, const char *rule, int *sp, char why[][WHY_LEN])
+static void alloc_discharge(const struct bm_cfg *cfg, int lead, int w, const int *dis, const double *dcap, const char *rule, int *sp,
+							char why[][WHY_LEN])
 {
 	int give[NPH] = {0}, n_give = 0, lead_ph, n_dis = 0;
 	for (int p = 0; p < NPH; p++)
@@ -300,7 +301,7 @@ static void alloc_discharge(const struct bm_cfg *cfg, int lead, int w, const int
 				n_give++;
 			}
 	lead_ph = n_give > 0;
-	int dmax = (int)cfg->discharge_max_phase;
+	(void)cfg;
 	if (!lead_ph) {
 		/* no lead (0.26, user 2026-10-08): every bank delivers the same power, so the two 300 Ah stacks drain alike:
 		   Stack1 alone on L1 gives as much as Stack2 on L2+L3 (L1 50 %, L2/L3 25 % each). What a phase cannot give
@@ -326,16 +327,16 @@ static void alloc_discharge(const struct bm_cfg *cfg, int lead, int w, const int
 			int n_free = 0;
 			for (int p = 0; p < NPH; p++)
 				if (dis[p]) {
-					if (want[p] > dmax) {
-						over += want[p] - dmax;
-						want[p] = dmax;
-					} else if (want[p] < dmax)
+					if (want[p] > dcap[p]) {
+						over += want[p] - dcap[p];
+						want[p] = dcap[p];
+					} else if (want[p] < dcap[p])
 						n_free++;
 				}
 			if (over <= 0 || !n_free)
 				break;
 			for (int p = 0; p < NPH; p++)
-				if (dis[p] && want[p] < dmax)
+				if (dis[p] && want[p] < dcap[p])
 					want[p] += over / n_free;
 		}
 		for (int p = 0; p < NPH; p++)
@@ -345,14 +346,22 @@ static void alloc_discharge(const struct bm_cfg *cfg, int lead, int w, const int
 			}
 		return;
 	}
+	double give_cap = 1e9, rest_cap = 1e9;              /* phases of one bank share one cap */
+	for (int p = 0; p < NPH; p++)
+		if (dis[p]) {
+			if (give[p])
+				give_cap = fmin(give_cap, dcap[p]);
+			else
+				rest_cap = fmin(rest_cap, dcap[p]);
+		}
 	int share = n_give ? (int)((double)w / n_give) : 0, spill = 0;
-	if (share > dmax) {
-		spill = (share - dmax) * n_give;
-		share = dmax;
+	if (share > give_cap) {
+		spill = (share - (int)give_cap) * n_give;
+		share = (int)give_cap;
 	}
 	int n_rest = n_dis - n_give, extra = n_rest ? spill / n_rest : 0;
-	if (extra > dmax)
-		extra = dmax;
+	if (extra > rest_cap)
+		extra = (int)rest_cap;
 	for (int p = 0; p < NPH; p++) {
 		if (!dis[p])
 			continue;
@@ -367,6 +376,13 @@ double bm_charge_cap(const struct bm_cfg *cfg, int volt_ok, double volt)
 	if (!volt_ok || volt < 40 || volt > 62)
 		return cfg->charger_cap_phase;
 	return fmin(cfg->charge_max_phase, cfg->charger_a * volt / cfg->charge_eff);
+}
+
+double bm_bms_cap_phase(const struct bm_cfg *cfg, int bank, int volt_ok, double volt, double amps, int charge)
+{
+	double u = (volt_ok && volt >= 40 && volt <= 62) ? volt : BM_NOMINAL_V;
+	double w = fmax(0.0, amps) * u;
+	return (charge ? w / cfg->charge_eff : w * cfg->charge_eff) / BM_BANKS[bank].nph;
 }
 
 /* charge rest (W) over the phases in chg[]: the banks in CHARGE_PRIORITY order up to their real charger capacity,
@@ -456,8 +472,21 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 	int *sp = out->sp;
 	char (*why)[WHY_LEN] = out->why;
 	for (int b = 0; b < NBANK; b++)
-		for (int i = 0; i < BM_BANKS[b].nph; i++)
-			out->chg_cap[BM_BANKS[b].ph[i]] = bm_charge_cap(cfg, in->volt_ok[b], in->volt[b]);
+		for (int i = 0; i < BM_BANKS[b].nph; i++) {
+			int p = BM_BANKS[b].ph[i];
+			double c = bm_charge_cap(cfg, in->volt_ok[b], in->volt[b]), d = cfg->discharge_max_phase;
+			out->ccl_bind[p] = out->dcl_bind[p] = 0;
+			if (in->lim_ok[b]) {                 /* 0.35-c: the BMS's own CCL / DCL (MUST CAN 0x351) */
+				double bc = bm_bms_cap_phase(cfg, b, in->volt_ok[b], in->volt[b], in->ccl[b], 1);
+				double bd = bm_bms_cap_phase(cfg, b, in->volt_ok[b], in->volt[b], in->dcl[b], 0);
+				out->ccl_bind[p] = bc < fmin(c, cfg->charger_cap_phase);
+				out->dcl_bind[p] = bd < d;
+				c = fmin(c, bc);
+				d = fmin(d, bd);
+			}
+			out->chg_cap[p] = c;
+			out->dis_cap[p] = d;
+		}
 	int discharge[NPH] = {0}, charge[NPH] = {0}, n_dis = 0, n_chg = 0;
 	int pi_ok[NPH] = {0}, pi_chg[NPH] = {0}, pi_dis[NPH] = {0}, n_pichg = 0, n_pidis = 0;
 
@@ -582,7 +611,7 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 			w = (int)cfg->wp_cap;
 			strcat(rule, "|WP_CAP");
 		}
-		alloc_discharge(cfg, st->lead, w, discharge, rule, sp, why);
+		alloc_discharge(cfg, st->lead, w, discharge, out->dis_cap, rule, sp, why);
 	}
 	if (n_chg) {
 		double cap_sum = 0;
@@ -592,6 +621,10 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 		alloc_charge(cfg, st->lead, fmin((int)(own_charge + KP * (chg_ref + bat1_eff - cfg->soyo_target)),
 									cap_sum), charge, n_chg, out->chg_cap, sp, why);
 	}
+	for (int p = 0; p < NPH; p++)                       /* the BMS limit cut this phase's setpoint */
+		if ((sp[p] > 0 && out->ccl_bind[p] && sp[p] >= (int)out->chg_cap[p] - 1) ||
+			(sp[p] < 0 && out->dcl_bind[p] && -sp[p] >= (int)out->dis_cap[p] - 1))
+			strncat(why[p], sp[p] > 0 ? "|CCL" : "|DCL", WHY_LEN - 1 - strlen(why[p]));
 	st->soyo_chg_prev = n_chg > 0;
 	if (!n_dis)
 		st->soyo_prop_prev = 0;
@@ -637,7 +670,7 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 		else if (u < 0) {
 			char rule[32];
 			snprintf(rule, sizeof(rule), "PI(%+.0f)", u);
-			alloc_discharge(cfg, st->lead, (int)-u, pi_dis, rule, psp, pwhy);
+			alloc_discharge(cfg, st->lead, (int)-u, pi_dis, out->dis_cap, rule, psp, pwhy);
 		}
 		for (int p = 0; p < NPH; p++)
 			if (!pi_ok[p])

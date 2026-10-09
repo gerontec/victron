@@ -15,6 +15,7 @@
 #define BM_SUMMER 1
 #define BM_WINTER 2
 #define BM_TRANSITION 3
+#define BM_NOMINAL_V 51.2          /* 16S LFP, for BMS current limits without a voltage */
 
 struct bm_bank {
 	const char *name, *service;
@@ -75,6 +76,8 @@ struct bm_in {
 	double power[NBANK];                                    /* BMS /Dc/0/Power, + = charge */
 	int volt_ok[NBANK];
 	double volt[NBANK];                                     /* BMS /Dc/0/Voltage */
+	int lim_ok[NBANK];                                      /* the BMS sends /Info/MaxCharge/DischargeCurrent */
+	double ccl[NBANK], dcl[NBANK];                          /* A DC (CAN 0x351 of the MUST: 100 A, tapering to 0 near full) */
 };
 
 struct bm_ls { int active, peak_h, win_end_h; double dc, ratio, ratio_now, noon_h; };
@@ -104,12 +107,17 @@ struct bm_out {
 	int lead_event;                              /* 1 = a bank took the lead, -1 = back within SOC_BALANCE_OFF */
 	double lead_diff;
 	double chg_cap[NPH];                         /* W AC: charge ceiling per phase used this cycle */
+	double dis_cap[NPH];                         /* W AC: discharge ceiling per phase used this cycle */
+	int ccl_bind[NPH], dcl_bind[NPH];            /* 1 = the BMS current limit is below the charger / phase limit */
 };
 
 void bm_init(struct bm_state *st);
 /* charge ceiling of one phase (W AC): charger_a x BMS voltage of its bank / charge_eff, at most CHARGE_MAX_PHASE;
    without a plausible voltage CHARGER_CAP_PHASE (no spill above it any more) */
 double bm_charge_cap(const struct bm_cfg *cfg, int volt_ok, double volt);
+/* BMS current limit of a bank as W AC per phase (0.35-c): charge CCL x U / charge_eff, discharge DCL x U x charge_eff,
+   split over the bank's phases; U = BMS voltage, BM_NOMINAL_V without a plausible one */
+double bm_bms_cap_phase(const struct bm_cfg *cfg, int bank, int volt_ok, double volt, double amps, int charge);
 void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *st, struct bm_out *out);
 
 /* clear-sky model (fox2db_logic.h), exposed for tests */

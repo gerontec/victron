@@ -92,6 +92,13 @@ SoC balancing (keep the stacks within +-3 %)
 - one stack more than 3 % ahead: it alone feeds the house (up to 3800 W per phase, the rest spills to the other
   stack's phases) and the other one is charged first; back to normal when the difference is below 1 %.
 
+BMS current limits (0.35-c)
+
+- per stack the BMS's own CCL / DCL (D-Bus /Info/MaxChargeCurrent, /Info/MaxDischargeCurrent; MUST: CAN 0x351)
+  cap its phases at CCL x U / 0.90 (charge) and DCL x U x 0.90 (discharge), split over the stack's phases.
+  DVCC follows only the EBox (586 A), so without this the MUST's taper (15 A at 99 %, 0 A full) was ignored.
+  Rule tag |CCL / |DCL when the limit cut the setpoint.
+
 Protection, per stack
 
 - SoC < 5 %: no discharge until 7 %.

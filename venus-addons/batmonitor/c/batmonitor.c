@@ -76,7 +76,7 @@
 #include <unistd.h>
 #include "bm_logic.h"
 
-#define VERSION "0.34-c"
+#define VERSION "0.35-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
@@ -99,6 +99,7 @@ static int LIVE, hub4mode_set;
 static struct bm_cfg cfg;
 static struct bm_state st;
 static struct bm_out o_;                            /* result of the last bm_step */
+static struct bm_in in_last;                        /* its input (BMS limits for the state file) */
 static char STATE_FILE[256] = STATE_FILE_DEFAULT;   /* BATMONITOR_STATE_FILE: other path for a dry test run */
 static volatile sig_atomic_t stop_flag;
 
@@ -510,6 +511,20 @@ static void write_state(const int *sp, char why[][WHY_LEN], double surplus)
 	o = cJSON_AddObjectToObject(js, "charge_cap_w");
 	for (int p = 0; p < NPH; p++)
 		cJSON_AddNumberToObject(o, BM_PH[p], round(o_.chg_cap[p]));
+	o = cJSON_AddObjectToObject(js, "discharge_cap_w");
+	for (int p = 0; p < NPH; p++)
+		cJSON_AddNumberToObject(o, BM_PH[p], round(o_.dis_cap[p]));
+	o = cJSON_AddObjectToObject(js, "bms_limits");             /* 0.35-c: CCL / DCL of each BMS (A), null = not sent */
+	for (int b = 0; b < NBANK; b++) {
+		cJSON *l = cJSON_AddObjectToObject(o, BM_BANKS[b].name);
+		if (in_last.lim_ok[b]) {
+			cJSON_AddNumberToObject(l, "ccl_a", in_last.ccl[b]);
+			cJSON_AddNumberToObject(l, "dcl_a", in_last.dcl[b]);
+		} else {
+			cJSON_AddNullToObject(l, "ccl_a");
+			cJSON_AddNullToObject(l, "dcl_a");
+		}
+	}
 	o = cJSON_AddObjectToObject(js, "ladesperre");
 	cJSON_AddNumberToObject(o, "active", o_.ls.active);
 	cJSON_AddNumberToObject(o, "dc_expected_w", round(o_.ls.dc));
@@ -622,9 +637,12 @@ static void calc(void)
 		in.bms_ok[b] = get(s, "/Connected", &conn) == 0 && conn == 1.0 && get(s, "/Soc", &in.soc[b]) == 0;
 		in.power_ok[b] = get(s, "/Dc/0/Power", &in.power[b]) == 0;
 		in.volt_ok[b] = get(s, "/Dc/0/Voltage", &in.volt[b]) == 0;
+		in.lim_ok[b] = get(s, "/Info/MaxChargeCurrent", &in.ccl[b]) == 0 && in.ccl[b] >= 0 &&
+					   get(s, "/Info/MaxDischargeCurrent", &in.dcl[b]) == 0 && in.dcl[b] >= 0;
 	}
 
 	bm_step(&cfg, &in, &st, &o_);
+	in_last = in;
 	run_full_forecast(&in);
 
 	if (o_.lead_event > 0)

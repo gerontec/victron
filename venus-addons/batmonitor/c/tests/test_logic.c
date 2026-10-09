@@ -30,6 +30,8 @@ struct plant {
 	int fc_age_h;
 	double aussen;
 	double volt[NBANK];            /* BMS voltage, 0 = none; given: the Multis saturate at 70 A x U / 0.93 (real) */
+	int lim[NBANK];                /* 1 = the BMS sends CCL / DCL */
+	double ccl[NBANK], dcl[NBANK]; /* A */
 };
 
 static double r_override_w_max;     /* > 0: W_MAX for the next simulate() (parameter test) */
@@ -104,6 +106,9 @@ static void simulate(struct run *r, const struct plant *pl, time_t t0, int n)
 			in->power_ok[b] = 1;
 			in->volt_ok[b] = pl->volt[b] > 0;
 			in->volt[b] = pl->volt[b];
+			in->lim_ok[b] = pl->lim[b];
+			in->ccl[b] = pl->ccl[b];
+			in->dcl[b] = pl->dcl[b];
 			in->power[b] = 0;
 			for (int i = 0; i < BM_BANKS[b].nph; i++)
 				in->power[b] += r->ac[BM_BANKS[b].ph[i]];
@@ -284,6 +289,40 @@ static void test_real_charge_ceiling(void)
 	struct plant pl2 = BASE(.pv = 16000, .house = 800, .soc = {50, 50});
 	simulate(&r, &pl2, local_time(2026, 3, 10, 12, 0), 40);
 	CHECK(sum_sp(&r) == 3 * 4200, "without a BMS voltage CHARGER_CAP_PHASE per phase, no spill, sp sum %d", sum_sp(&r));
+}
+
+static void test_bms_current_limits(void)
+{
+	struct run r;
+	/* 0.35-c: the MUST BMS tapers its CCL near full (15 A at 99 %): L1 at most 15 A x 55 V / 0.93 = 887 W, the
+	   Pytes phases keep their charger ceiling */
+	struct plant pl = BASE(.pv = 16000, .house = 800, .soc = {90, 90}, .volt = {55, 55}, .lim = {1, 1},
+						   .ccl = {15, 586}, .dcl = {200, 586});
+	simulate(&r, &pl, local_time(2026, 3, 10, 12, 0), 40);
+	print_state("day, MUST CCL 15 A", &r);
+	CHECK(r.out.sp[0] >= 880 && r.out.sp[0] <= 888 && strstr(r.out.why[0], "|CCL"), "L1 at the CCL ~887 W, got %d (%s)",
+		  r.out.sp[0], r.out.why[0]);
+	CHECK(r.out.sp[1] >= 4000 && r.out.sp[2] >= 4000, "L2/L3 at their charger ceiling, got %d %d", r.out.sp[1], r.out.sp[2]);
+	CHECK(!strstr(r.out.why[1], "|CCL"), "no CCL tag on L2 (%s)", r.out.why[1]);
+
+	pl.ccl[0] = 0;                                             /* CCL 0: Stack1 takes nothing */
+	simulate(&r, &pl, local_time(2026, 3, 10, 12, 0), 40);
+	CHECK(r.out.sp[0] == 0, "CCL 0: L1 does not charge, got %d", r.out.sp[0]);
+
+	pl.ccl[0] = 100;
+	pl.ccl[1] = 30;                                            /* a bank CCL is split over its phases */
+	simulate(&r, &pl, local_time(2026, 3, 10, 12, 0), 40);
+	CHECK(r.out.sp[1] >= 880 && r.out.sp[1] <= 888 && r.out.sp[2] >= 880 && r.out.sp[2] <= 888,
+		  "Stack2 CCL 30 A over L2 + L3: ~887 W each, got %d %d", r.out.sp[1], r.out.sp[2]);
+
+	/* discharge: MUST DCL 10 A at 52 V -> L1 at most 10 x 52 x 0.93 = 484 W, the rest of the 2 kW from L2/L3 */
+	struct plant pd = BASE(.house = 2000, .season = BM_SUMMER, .season_age_h = 1, .volt = {52, 52}, .lim = {1, 1},
+						   .ccl = {100, 586}, .dcl = {10, 586});
+	simulate(&r, &pd, local_time(2026, 7, 15, 23, 0), 60);
+	print_state("night, MUST DCL 10 A", &r);
+	CHECK(r.out.sp[0] <= -480 && r.out.sp[0] >= -484 && strstr(r.out.why[0], "|DCL"), "L1 at the DCL ~-484 W, got %d (%s)",
+		  r.out.sp[0], r.out.why[0]);
+	CHECK(abs(sum_sp(&r) + 2000) <= 30, "house covered by L2/L3, sp sum %d", sum_sp(&r));
 }
 
 static void test_winter_charge_on_z2(void)
@@ -668,6 +707,7 @@ int main(void)
 	test_summer_wp_4kw_from_battery();
 	test_w_max_and_phase_cap();
 	test_bank_split();
+	test_bms_current_limits();
 	test_winter_night_floor();
 	test_wp_running_no_night_floor();
 	test_day_surplus_to_zero();
