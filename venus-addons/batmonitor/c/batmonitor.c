@@ -76,7 +76,7 @@
 #include <unistd.h>
 #include "bm_logic.h"
 
-#define VERSION "0.35-c"
+#define VERSION "0.36-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
@@ -511,6 +511,12 @@ static void write_state(const int *sp, char why[][WHY_LEN], double surplus)
 	o = cJSON_AddObjectToObject(js, "charge_cap_w");
 	for (int p = 0; p < NPH; p++)
 		cJSON_AddNumberToObject(o, BM_PH[p], round(o_.chg_cap[p]));
+	o = cJSON_AddObjectToObject(js, "ac_out_w");               /* 0.36-c: AC-out1 load per phase, null = not read */
+	for (int p = 0; p < NPH; p++)
+		if (in_last.ac_out_ok[p])
+			cJSON_AddNumberToObject(o, BM_PH[p], round(in_last.ac_out[p]));
+		else
+			cJSON_AddNullToObject(o, BM_PH[p]);
 	o = cJSON_AddObjectToObject(js, "discharge_cap_w");
 	for (int p = 0; p < NPH; p++)
 		cJSON_AddNumberToObject(o, BM_PH[p], round(o_.dis_cap[p]));
@@ -630,6 +636,8 @@ static void calc(void)
 		char path[32];
 		snprintf(path, sizeof(path), "/Ac/ActiveIn/%s/P", BM_PH[p]);
 		in.ac_ok[p] = vb && get(vb, path, &in.ac_in[p]) == 0;
+		snprintf(path, sizeof(path), "/Ac/Out/%s/P", BM_PH[p]);
+		in.ac_out_ok[p] = vb && get(vb, path, &in.ac_out[p]) == 0;
 	}
 	for (int b = 0; b < NBANK; b++) {
 		const char *s = BM_BANKS[b].service;
