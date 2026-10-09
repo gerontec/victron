@@ -461,6 +461,134 @@ static void test_pi_shadow_not_armed(void)
 	CHECK(!rule_has(&r, "PI("), "PI not armed: soyo rules, got %s", r.out.why[0]);
 }
 
+/* full_at forecast (0.28-c) */
+static struct bm_fc_in fc_base(time_t t, double soc1, double soc2, double p1, double p2)
+{
+	struct bm_fc_in fi;
+	memset(&fi, 0, sizeof(fi));
+	fi.t = t;
+	fi.lead = -1;
+	fi.soc_ok[0] = fi.soc_ok[1] = fi.has_avg[0] = fi.has_avg[1] = 1;
+	fi.soc[0] = soc1;
+	fi.soc[1] = soc2;
+	fi.avg[0] = p1;
+	fi.avg[1] = p2;
+	return fi;
+}
+
+static void fc_slots(struct bm_fc_in *fi, int y, int mo, int d, double kt, double corr)
+{
+	fi->corr = corr;
+	fi->n_slots = 0;
+	for (int h = 8; h <= 17; h += 3) {
+		fi->slot_t[fi->n_slots] = local_time(y, mo, d, h, 0);
+		fi->slot_kt[fi->n_slots++] = kt;
+	}
+}
+
+static void print_fc(const char *name, const struct bm_fc_out *o)
+{
+	char a[2][8];
+	for (int b = 0; b < 2; b++) {
+		struct tm l;
+		time_t t = o->full_at[b];
+		strcpy(a[b], "-");
+		if (t) {
+			localtime_r(&t, &l);
+			strftime(a[b], sizeof(a[b]), "%H:%M", &l);
+		}
+	}
+	printf("  %-44s full %s %s  soc_sunset %5.1f %5.1f  anchor %.2f kt %.2f pv %5.0f W rest %.1f kWh\n", name, a[0], a[1],
+		   o->soc_sunset[0], o->soc_sunset[1], o->anchor, o->kt_now, o->pv_now_w, o->rest_kwh);
+}
+
+static void test_fc_sunset_limits(void)
+{
+	struct bm_cfg cfg;
+	struct bm_fc_out o;
+	bm_cfg_default(&cfg);
+	/* 9 Oct 16:00, 2 kW per stack, SoC 40: the linear ETA said ~19:00; the sun sets before that */
+	time_t t = local_time(2026, 10, 9, 16, 0);
+	struct bm_fc_in fi = fc_base(t, 40, 40, 2000, 2000);
+	fc_slots(&fi, 2026, 10, 9, 0.65, 0.69);
+	bm_full_forecast(&cfg, &fi, &o);
+	print_fc("Oct 16:00, SoC 40, 2 kW each", &o);
+	CHECK(!o.full_at[0] && !o.full_at[1], "not full before sunset");
+	CHECK(o.soc_sunset[0] > 40 && o.soc_sunset[0] < 60, "Stack1 gains a bit until sunset, %.1f", o.soc_sunset[0]);
+	struct bm_fc_in night = fc_base(local_time(2026, 10, 9, 22, 0), 40, 40, 500, 500);
+	bm_full_forecast(&cfg, &night, &o);
+	CHECK(o.soc_sunset[0] < 0 && !o.full_at[0], "no weather forecast at night (linear ETA in batmonitor.c)");
+}
+
+static void test_fc_clouds_later(void)
+{
+	struct bm_cfg cfg;
+	struct bm_fc_out sun, cloud;
+	bm_cfg_default(&cfg);
+	time_t t = local_time(2026, 10, 9, 10, 30);
+	struct bm_fc_in fi = fc_base(t, 40, 40, 3500, 1500);
+	fc_slots(&fi, 2026, 10, 9, 0.70, 0.69);
+	bm_full_forecast(&cfg, &fi, &sun);
+	print_fc("Oct 10:30, kt 0.70", &sun);
+	fc_slots(&fi, 2026, 10, 9, 0.30, 0.69);
+	bm_full_forecast(&cfg, &fi, &cloud);
+	print_fc("Oct 10:30, kt 0.30", &cloud);
+	CHECK(sun.full_at[0] > t && sun.full_at[0] < local_time(2026, 10, 9, 15, 0), "sunny: Stack1 full early afternoon");
+	CHECK(!cloud.full_at[1] || cloud.full_at[1] > sun.full_at[1], "clouds: Stack2 later or not at all");
+	CHECK(cloud.soc_sunset[1] <= sun.soc_sunset[1], "clouds: lower SoC at sunset");
+	CHECK(sun.weather == 1, "OWM slots used");
+}
+
+static void test_fc_anchor(void)
+{
+	struct bm_cfg cfg;
+	struct bm_fc_out o, a;
+	bm_cfg_default(&cfg);
+	time_t t = local_time(2026, 10, 9, 11, 0);
+	struct bm_fc_in fi = fc_base(t, 40, 40, 3000, 1500);
+	fc_slots(&fi, 2026, 10, 9, 0.70, 0.69);
+	bm_full_forecast(&cfg, &fi, &o);
+	fi.have_pv = 1;
+	fi.pv_sofar = 0.3 * o.pv_now_w * 0.5;        /* Sofar is ~half of the model; measured far below the forecast */
+	bm_full_forecast(&cfg, &fi, &a);
+	print_fc("Oct 11:00, measured PV well below forecast", &a);
+	CHECK(a.anchor < 0.8, "anchor follows the measurement, %.2f", a.anchor);
+	CHECK(a.rest_kwh < o.rest_kwh, "less PV expected, %.1f < %.1f kWh", a.rest_kwh, o.rest_kwh);
+	struct bm_fc_in m = fc_base(t, 40, 40, 3000, 1500);       /* no slots: monthly kt */
+	bm_full_forecast(&cfg, &m, &o);
+	CHECK(o.weather == 0 && o.soc_sunset[0] >= 0, "without forecast.py the monthly kt still gives a forecast");
+}
+
+static void test_fc_full_stack_moves_power(void)
+{
+	struct bm_cfg cfg;
+	struct bm_fc_out o;
+	bm_cfg_default(&cfg);
+	time_t t = local_time(2026, 6, 20, 11, 0);
+	struct bm_fc_in fi = fc_base(t, 99, 60, 3800, 3800);
+	fc_slots(&fi, 2026, 6, 20, 0.90, 1.0);
+	bm_full_forecast(&cfg, &fi, &o);
+	print_fc("June 11:00, Stack1 99 %", &o);
+	CHECK(o.full_at[0] && o.full_at[0] - t <= 900, "Stack1 full within minutes");
+	CHECK(o.full_at[1] && o.full_at[1] < local_time(2026, 6, 20, 16, 0), "Stack2 gets Stack1's share, full before 16:00");
+}
+
+static void test_fc_charger_limit(void)
+{
+	struct bm_cfg cfg;
+	struct bm_fc_out o;
+	bm_cfg_default(&cfg);
+	/* June noon, 19 kW PV: 3 x 70 A x 56 V = 11.76 kW at most, Stack2 (2 units) from 20 % needs >= 80 % x 15.36 kWh
+	   / 7.84 kW = 1.57 h, Stack1 (1 unit) 3.13 h */
+	time_t t = local_time(2026, 6, 20, 11, 0);
+	struct bm_fc_in fi = fc_base(t, 20, 20, 3900, 7800);
+	fc_slots(&fi, 2026, 6, 20, 0.95, 1.0);
+	bm_full_forecast(&cfg, &fi, &o);
+	print_fc("June 11:00, SoC 20, chargers at 70 A", &o);
+	CHECK(o.full_at[1] - t >= (time_t)(0.8 * 15360 / 7840 * 3600) - 300, "Stack2 not faster than 2 x 70 A x 56 V");
+	CHECK(o.full_at[0] - t >= (time_t)(0.8 * 15360 / 3920 * 3600) - 300, "Stack1 not faster than 70 A x 56 V");
+}
+
 int main(void)
 {
 	setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
@@ -489,6 +617,11 @@ int main(void)
 	test_param_override();
 	test_forecast_overrides_winter();
 	test_pi_shadow_not_armed();
+	test_fc_sunset_limits();
+	test_fc_clouds_later();
+	test_fc_anchor();
+	test_fc_full_stack_moves_power();
+	test_fc_charger_limit();
 	printf("%d checks, %d failed\n", checks, fails);
 	return fails ? 1 : 0;
 }

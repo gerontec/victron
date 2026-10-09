@@ -7,6 +7,7 @@
 #include <math.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* soyo, 1:1 from sofar_waveshare.yaml, power values doubled (POWER_SCALE) */
@@ -51,6 +52,13 @@
 #define PI_DEADBAND 75.0        /* |e| below this counts as 0 (PCC resolution 10 W, 4 s samples) */
 #define PI_KP 0.2               /* on the change of e */
 #define PI_KI 0.06              /* 1/s: KI * 5 s = 0.3 of the error per cycle (plant gain ~1, one cycle delay) */
+/* full_at forecast (0.28-c) */
+#define FC_STEP 300             /* s */
+#define FC_ANCHOR_TAU 5400.0    /* s: the measured/model ratio of now fades into the weather forecast */
+#define FC_ANCHOR_MIN_W 500.0   /* modelled Sofar PV below this: no anchor (dawn, dusk) */
+#define FC_SLOT_REACH 5400      /* s: an OWM slot stands for its time +- 1.5 h */
+#define FC_CHARGE_EFF 0.92      /* additional PV (AC) -> stack DC */
+#define FC_CHARGER_DC_PHASE (70.0 * 56.0)   /* W: MultiPlus-II 48/5000 charger 70 A at 56 V, the DC limit per unit (user) */
 
 const char *BM_PH[NPH] = {"L1", "L2", "L3"};
 /* Stack1 MUST feeds the middle unit = HQ2606P4NCH = Devices/0 = L1 (user photo 2026-10-08) */
@@ -142,7 +150,7 @@ void bm_sun_pos(time_t t, double *elev, double *az)
 	*az = fmod(az_s * 180.0 / M_PI + 180.0 + 360.0, 360.0);
 }
 
-static double calc_arrays(const struct arr *a, int n, time_t t, int month)
+static double calc_arrays_kt(const struct arr *a, int n, time_t t, double kt)
 {
 	double elev, az;
 	bm_sun_pos(t, &elev, &az);
@@ -150,7 +158,6 @@ static double calc_arrays(const struct arr *a, int n, time_t t, int month)
 		return 0.0;
 	double am = fmin(1.0 / sin(d2r(elev)), 37.0);
 	double tr = pow(0.7, pow(am, 0.678));
-	double kt = (month >= 1 && month <= 12) ? KT_MONTH[month] : 0.60;
 	double shade = (elev >= ((az < HOR_AZ_SPLIT) ? HOR_EAST : HOR_SOUTH)) ? 1.0 : HOR_DIFFUSE;
 	double e = d2r(elev), sum = 0;
 	for (int i = 0; i < n; i++) {
@@ -158,6 +165,11 @@ static double calc_arrays(const struct arr *a, int n, time_t t, int month)
 		sum += a[i].power * tr * kt * fmax(0.0, sin(e) * cos(b) + cos(e) * sin(b) * cos(da));
 	}
 	return sum * shade;
+}
+
+static double calc_arrays(const struct arr *a, int n, time_t t, int month)
+{
+	return calc_arrays_kt(a, n, t, (month >= 1 && month <= 12) ? KT_MONTH[month] : 0.60);
 }
 
 double bm_dc_now(time_t t, int month)
@@ -617,4 +629,122 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 	out->surplus = surplus;
 	out->wp_eff = wp_eff;
 	memcpy(st->setpoints, sp, sizeof(st->setpoints));
+}
+
+/* ---- full_at forecast (0.28-c) ------------------------------------------------------------------ */
+
+/* weather kt at t: the OWM slot within FC_SLOT_REACH, else the monthly kt (weather = 0) */
+static double fc_kt(const struct bm_fc_in *in, time_t t, int *weather)
+{
+	int best = -1;
+	long dbest = FC_SLOT_REACH + 1;
+	for (int i = 0; i < in->n_slots; i++) {
+		long d = labs((long)(t - in->slot_t[i]));
+		if (d < dbest) {
+			dbest = d;
+			best = i;
+		}
+	}
+	if (best >= 0 && in->corr > 0) {
+		*weather = 1;
+		return in->slot_kt[best] * in->corr;
+	}
+	struct tm loc;
+	localtime_r(&t, &loc);
+	*weather = 0;
+	return KT_MONTH[loc.tm_mon + 1];
+}
+
+/* modelled PV of both inverters (W) at t, the anchor fading from now on */
+static double fc_pv(const struct bm_fc_in *in, time_t t, double anchor, int *weather)
+{
+	double clear = calc_arrays_kt(ARRAYS, 2, t, 1.0) + calc_arrays_kt(ARRAYS_EAST, 2, t, 1.0);
+	double f = 1.0 + (anchor - 1.0) * exp(-(double)(t - in->t) / FC_ANCHOR_TAU);
+	return clear * fc_kt(in, t, weather) * f;
+}
+
+/* Steps from now to sunset in FC_STEP: the stacks start with their measured charge power, the change of the expected
+   PV against now (x FC_CHARGE_EFF; house load and the Sofar battery's share taken as they are now) is given like
+   alloc_charge: more power in CHARGE_PRIORITY order (lead stack last) up to the charger capacity, never above
+   FC_CHARGER_DC_PHASE per unit (3 x 70 A x 56 V = 11.76 kW in all); less power taken in the reverse order. A full stack's power moves to the other one.
+   Only while the sun is up. */
+void bm_full_forecast(const struct bm_cfg *cfg, const struct bm_fc_in *in, struct bm_fc_out *out)
+{
+	memset(out, 0, sizeof(*out));
+	for (int b = 0; b < NBANK; b++)
+		out->soc_sunset[b] = -1;
+	out->anchor = 1.0;
+	int w0;
+	double clear_sofar = calc_arrays_kt(ARRAYS, 2, in->t, 1.0) * fc_kt(in, in->t, &w0);
+	out->weather = w0;
+	out->kt_now = fc_kt(in, in->t, &w0);
+	if (clear_sofar <= 0)
+		return;                                     /* night: no forecast */
+	if (in->have_pv && clear_sofar >= FC_ANCHOR_MIN_W)
+		out->anchor = fmax(0.05, fmin(3.0, in->pv_sofar / clear_sofar));
+	double pv0 = fc_pv(in, in->t, out->anchor, &w0), p0 = 0;
+	out->pv_now_w = pv0;
+	double soc[NBANK], pb[NBANK] = {0};
+	int active[NBANK], any = 0;
+	for (int b = 0; b < NBANK; b++) {
+		active[b] = in->soc_ok[b] && in->has_avg[b];
+		soc[b] = in->soc[b];
+		if (!active[b])
+			continue;
+		any = 1;
+		p0 += in->avg[b];
+		pb[b] = fmin(fmax(0.0, in->avg[b]), FC_CHARGER_DC_PHASE * BM_BANKS[b].nph);
+		if (soc[b] >= 100) {
+			out->full_at[b] = in->t;
+			pb[b] = 0;
+		}
+	}
+	if (!any)
+		return;
+	int order[NBANK], k = 0;
+	for (int i = 0; i < NBANK; i++)
+		if (CHARGE_PRIORITY[i] != in->lead)
+			order[k++] = CHARGE_PRIORITY[i];
+	if (in->lead >= 0)
+		order[k++] = in->lead;
+	for (time_t t = in->t + FC_STEP; t < in->t + 86400; t += FC_STEP) {
+		int w;
+		double pv = fc_pv(in, t - FC_STEP / 2, out->anchor, &w), sum = 0;
+		out->rest_kwh += pv * FC_STEP / 3600000.0;
+		for (int b = 0; b < NBANK; b++)
+			sum += pb[b];
+		double diff = fmax(0.0, p0 + FC_CHARGE_EFF * (pv - pv0)) - sum;
+		for (int i = 0; i < k && diff > 0; i++) {              /* more: priority order up to the charger */
+			int b = order[i];
+			if (!active[b] || soc[b] >= 100)
+				continue;
+			double cap = fmin(cfg->charger_cap_phase * FC_CHARGE_EFF, FC_CHARGER_DC_PHASE) * BM_BANKS[b].nph;
+			double more = fmin(diff, fmax(0.0, cap - pb[b]));
+			pb[b] += more;
+			diff -= more;
+		}
+		for (int i = k - 1; i >= 0 && diff < 0; i--) {         /* less: the last in priority gives first */
+			int b = order[i];
+			double less = fmin(-diff, pb[b]);
+			pb[b] -= less;
+			diff += less;
+		}
+		for (int b = 0; b < NBANK; b++) {
+			if (!active[b] || soc[b] >= 100)
+				continue;
+			soc[b] += pb[b] * FC_STEP / 3600.0 / BM_BANKS[b].capacity_wh * 100.0;
+			if (soc[b] >= 100) {
+				soc[b] = 100;
+				pb[b] = 0;                          /* its power goes to the other stack next step */
+				out->full_at[b] = t;
+			}
+		}
+		double elev, az;
+		bm_sun_pos(t, &elev, &az);
+		if (elev <= 0)
+			break;                                  /* sunset */
+	}
+	for (int b = 0; b < NBANK; b++)
+		if (active[b])
+			out->soc_sunset[b] = soc[b];
 }

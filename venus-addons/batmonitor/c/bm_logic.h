@@ -108,4 +108,30 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 void bm_sun_pos(time_t t, double *elev, double *az);
 double bm_dc_now(time_t t, int month);
 
+/* full_at forecast per stack (0.28-c): PV from the clear-sky model x OWM slot kt x correction (forecast.py), anchored
+   to the measured Sofar PV, stepped to sunset; the charge power follows the PV change from the measured stack power */
+#define BM_FC_SLOTS 24
+struct bm_fc_in {
+	time_t t;
+	int soc_ok[NBANK];
+	double soc[NBANK];
+	int has_avg[NBANK];
+	double avg[NBANK];                  /* 5 min mean BMS /Dc/0/Power, + = charge */
+	int have_pv;
+	double pv_sofar;                    /* W, measured Sofar PV1 + PV2 */
+	int n_slots;
+	time_t slot_t[BM_FC_SLOTS];         /* OWM 3 h slot times (forecast.py kt_slots) */
+	double slot_kt[BM_FC_SLOTS];
+	double corr;                        /* forecast.py correction, <= 0 = none */
+	int lead;                           /* bm_state.lead: charged last */
+};
+struct bm_fc_out {
+	time_t full_at[NBANK];              /* 0 = not full before sunset (or no forecast) */
+	double soc_sunset[NBANK];           /* SoC at sunset, < 0 = no forecast */
+	double anchor;                      /* measured / modelled Sofar PV now */
+	double kt_now, pv_now_w, rest_kwh;  /* kt used now, modelled PV now (both inverters), PV until sunset */
+	int weather;                        /* 1 = OWM slots used, 0 = monthly kt */
+};
+void bm_full_forecast(const struct bm_cfg *cfg, const struct bm_fc_in *in, struct bm_fc_out *out);
+
 #endif

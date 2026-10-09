@@ -29,6 +29,10 @@
  *   - night trickle (0.27, user 2026-10-08): the night regulation aims at PCC + Sofar Bat1 = +SOFAR_TRICKLE (30 W),
  *     so the Sofar battery charges a few W steadily instead of swinging between charge and discharge around 0;
  *     a full Sofar battery lets the 30 W go to the grid.
+ *   - full_at with the weather (0.28-c, user 2026-10-09): instead of the 5 min mean charge power held until 100 %
+ *     (which ran past sunset), bm_full_forecast steps to sunset with the PV from the clear-sky model x the OWM slot kt
+ *     x the correction of forecast.py (weather_data on heissa), anchored to the measured Sofar PV; a stack not full
+ *     by sunset gets full_at null and soc_sunset. At night (force charge from the grid) the linear ETA as before.
  * PI prototype (not armed): BATMONITOR_PI=1 lets a velocity-form PI on y = PCC + Sofar Bat1 replace the soyo
  * discharge/charge amounts (same gates, same phase split). Without it the PI runs in shadow: every cycle one line
  * in PI_SHADOW_FILE with what soyo set and what the PI would set, to compare both before arming it.
@@ -52,7 +56,7 @@
 #include <unistd.h>
 #include "bm_logic.h"
 
-#define VERSION "0.27-c"
+#define VERSION "0.28-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
@@ -88,6 +92,10 @@ static struct {
 	int season;
 	double season_ts;
 	double fc_target, fc_ts;
+	double fc_corr;
+	int fc_n;
+	time_t fc_slot_t[BM_FC_SLOTS];
+	double fc_slot_kt[BM_FC_SLOTS];
 } mq;
 
 static double setpoint_time;
@@ -303,6 +311,16 @@ static void on_message(struct mosquitto *m, void *ud, const struct mosquitto_mes
 		pthread_mutex_lock(&mq_lock);
 		mq.fc_target = jnum(d, "target_soc", -1, NULL);
 		mq.fc_ts = jnum(d, "ts", 0, NULL);
+		mq.fc_corr = jnum(d, "correction", 0, NULL);
+		mq.fc_n = 0;
+		const cJSON *sl, *slots = cJSON_GetObjectItemCaseSensitive(d, "kt_slots");
+		cJSON_ArrayForEach(sl, slots) {
+			const cJSON *st0 = cJSON_GetArrayItem(sl, 0), *kt = cJSON_GetArrayItem(sl, 1);
+			if (mq.fc_n < BM_FC_SLOTS && cJSON_IsNumber(st0) && cJSON_IsNumber(kt)) {
+				mq.fc_slot_t[mq.fc_n] = (time_t)st0->valuedouble;
+				mq.fc_slot_kt[mq.fc_n++] = kt->valuedouble;
+			}
+		}
 		pthread_mutex_unlock(&mq_lock);
 		LOG("forecast: %s", buf);
 	} else if (strcmp(msg->topic, SEASON_TOPIC) == 0) {
@@ -351,7 +369,10 @@ static void sample_power(void)
 	}
 }
 
-/* per stack: average charge power over ETA_WINDOW and the time 100 % SoC is reached at that power (0 = none) */
+static struct bm_fc_out fc_out;                    /* bm_full_forecast of the current cycle (calc) */
+
+/* average charge power over ETA_WINDOW per stack, then the weather forecast (fc_out, by day) or, at night, the time
+   100 % SoC is reached at that power (0 = none) */
 static void full_forecast(int b, int *has_avg, double *avg, long *full_at)
 {
 	double s = 0;
@@ -360,8 +381,40 @@ static void full_forecast(int b, int *has_avg, double *avg, long *full_at)
 	for (int i = 0; i < hist_n[b]; i++)
 		s += hist[b][i].p;
 	*avg = *has_avg ? s / hist_n[b] : 0;
+	if (fc_out.soc_sunset[b] >= 0) {
+		*full_at = (long)fc_out.full_at[b];
+		return;
+	}
 	if (*has_avg && st.soc_ok[b] && *avg >= ETA_MIN_W && st.soc[b] < 100)
 		*full_at = (long)(time(NULL) + (100 - st.soc[b]) / 100 * BM_BANKS[b].capacity_wh / *avg * 3600);
+}
+
+static void run_full_forecast(const struct bm_in *in)
+{
+	struct bm_fc_in fi;
+	memset(&fi, 0, sizeof(fi));
+	fi.t = in->t;
+	fi.have_pv = in->have_pv && in->now - in->inv_time < 180.0;
+	fi.pv_sofar = in->pv;
+	fi.lead = st.lead;
+	for (int b = 0; b < NBANK; b++) {
+		double s = 0;
+		fi.soc_ok[b] = st.soc_ok[b];
+		fi.soc[b] = st.soc[b];
+		fi.has_avg[b] = hist_n[b] > 0;
+		for (int i = 0; i < hist_n[b]; i++)
+			s += hist[b][i].p;
+		fi.avg[b] = fi.has_avg[b] ? s / hist_n[b] : 0;
+	}
+	pthread_mutex_lock(&mq_lock);
+	if (mq.fc_ts > 0 && in->t - (time_t)mq.fc_ts < 3 * 3600) {   /* as FC_MAX_AGE */
+		fi.corr = mq.fc_corr;
+		fi.n_slots = mq.fc_n;
+		memcpy(fi.slot_t, mq.fc_slot_t, sizeof(fi.slot_t));
+		memcpy(fi.slot_kt, mq.fc_slot_kt, sizeof(fi.slot_kt));
+	}
+	pthread_mutex_unlock(&mq_lock);
+	bm_full_forecast(&cfg, &fi, &fc_out);
 }
 
 static void write_state(const int *sp, char why[][WHY_LEN], double surplus)
@@ -406,7 +459,17 @@ static void write_state(const int *sp, char why[][WHY_LEN], double surplus)
 			cJSON_AddNumberToObject(f, "full_at", (double)full);
 		else
 			cJSON_AddNullToObject(f, "full_at");
+		if (fc_out.soc_sunset[b] >= 0)
+			cJSON_AddNumberToObject(f, "soc_sunset", round(fc_out.soc_sunset[b] * 10) / 10);
+		else
+			cJSON_AddNullToObject(f, "soc_sunset");
 	}
+	cJSON_AddStringToObject(o, "method", fc_out.soc_sunset[0] >= 0 || fc_out.soc_sunset[1] >= 0
+							? (fc_out.weather ? "weather" : "months") : "linear");
+	cJSON_AddNumberToObject(o, "anchor", round(fc_out.anchor * 100) / 100);
+	cJSON_AddNumberToObject(o, "kt_now", round(fc_out.kt_now * 1000) / 1000);
+	cJSON_AddNumberToObject(o, "pv_model_w", round(fc_out.pv_now_w));
+	cJSON_AddNumberToObject(o, "pv_rest_kwh", round(fc_out.rest_kwh * 10) / 10);
 	o = cJSON_AddObjectToObject(js, "ladesperre");
 	cJSON_AddNumberToObject(o, "active", o_.ls.active);
 	cJSON_AddNumberToObject(o, "dc_expected_w", round(o_.ls.dc));
@@ -504,6 +567,7 @@ static void calc(void)
 	}
 
 	bm_step(&cfg, &in, &st, &o_);
+	run_full_forecast(&in);
 
 	if (o_.lead_event > 0)
 		LOG("SoC balance: %s ahead by %.1f %%", BM_BANKS[st.lead].name, o_.lead_diff);

@@ -20,7 +20,9 @@ rules apply again.
 The forecast day is today before 12:00 local (the coming morning), else tomorrow.
 
 Output: retained MQTT batmonitor/forecast on the local broker:
-  {"for_date", "target_soc", "expected_kwh", "kt", "correction", "day_load_kwh", "free_kwh", "ts"}
+  {"for_date", "target_soc", "expected_kwh", "kt", "correction", "day_load_kwh", "free_kwh", "kt_slots", "ts"}
+kt_slots (0.28-c): [[unix_ts, kt], ...] of the daytime OWM 3 h slots today and tomorrow (same regression per slot),
+batmonitor uses them with the correction for the per-stack full_at forecast (clear-sky x kt x correction).
 
 usage: forecast.py            compute + publish
        forecast.py --print    calibration table and result, do not publish
@@ -105,12 +107,25 @@ def weather_kt(cur, day):
 	r = cur.fetchone()
 	if not r or not r[0] or r[1] is None:
 		return None
-	n, cloud, rain, pop, temp, hum, vis, wind = [float(x) if x is not None else 0.0 for x in r]
+	return kt_formula(day, *r[1:])
+
+
+def kt_formula(day, cloud, rain, pop, temp, hum, vis, wind):
+	cloud, rain, pop, temp, hum, vis, wind = [float(x) if x is not None else 0.0 for x in (cloud, rain, pop, temp, hum,
+																							vis, wind)]
 	doy = day.timetuple().tm_yday
 	kt = (0.88148703 - 0.0027887033 * cloud - 0.0027742720 * rain - 0.0655744400 * pop + 0.0028976317 * temp
 		  - 0.0058142134 * hum + 0.0000338368 * (vis or 10000) + 0.0007884399 * wind
 		  + 0.0434150265 * math.sin(2 * math.pi * doy / 365) + 0.0400069807 * math.cos(2 * math.pi * doy / 365))
 	return max(0.03, min(1.05, kt))
+
+
+def weather_slots(cur, day0, days=2):
+	"""[[unix_ts, kt], ...] of the daytime 3 h slots from day0 on (weather_data timestamps are local time)"""
+	cur.execute("SELECT timestamp, cloudiness, rain_3h, pop, temperature, humidity, visibility, wind_speed FROM weather_data"
+				" WHERE latitude=%s AND longitude=%s AND part_of_day='d' AND timestamp >= %s AND timestamp < %s"
+				" ORDER BY timestamp", (wx.LAT, wx.LON, day0, day0 + dt.timedelta(days=days)))
+	return [[int(t.replace(tzinfo=TZ).timestamp()), round(kt_formula(t.date(), *r), 3)] for t, *r in cur.fetchall()]
 
 
 # ---- measurements ---------------------------------------------------------------------------------------------
@@ -169,6 +184,7 @@ def main():
 			rows.append((day, clear, kt, m))
 		clear_t, window_t = clear_day(for_date)
 		kt_t = weather_kt(wcur, for_date)
+		slots = weather_slots(wcur, now.date())
 	finally:
 		con.close()
 		wcon.close()
@@ -182,7 +198,7 @@ def main():
 	target = max(TARGET_MIN, 100.0 - free / CAPACITY_KWH * 100.0)
 	msg = {"for_date": str(for_date), "target_soc": round(target, 1), "expected_kwh": round(expected, 1),
 		   "kt": None if kt_t is None else round(kt_t, 3), "correction": round(corr, 3), "day_load_kwh": round(day_load, 1),
-		   "free_kwh": round(free, 1), "ts": int(time.time())}
+		   "free_kwh": round(free, 1), "kt_slots": slots, "ts": int(time.time())}
 	if "--print" in sys.argv:
 		print("day         clear_kWh   kt    model_kWh  measured_kWh  day_load_kWh")
 		for day, c, k, m in rows:
@@ -190,6 +206,7 @@ def main():
 				  "-" if k is None else "%.1f" % (c * k), "-" if m is None else "%.1f" % m[0], "-" if m is None else "%.1f" % m[1]))
 		print("for %s: clear %.1f kWh x kt %s x correction %.2f = %.1f kWh, day load %.1f kWh -> free %.1f kWh -> target SoC %.0f %%"
 			  % (for_date, clear_t, kt_t, corr, expected, day_load, free, target))
+		print("kt slots:", ", ".join("%s %.2f" % (dt.datetime.fromtimestamp(t, TZ).strftime("%d. %H:%M"), k) for t, k in slots))
 		return 0
 	import paho.mqtt.publish as publish
 	publish.single(MQTT_TOPIC, json.dumps(msg), qos=1, retain=True, hostname=MQTT_HOST)
