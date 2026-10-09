@@ -195,3 +195,4 @@ The MK3 microcontroller is powered from VE.Bus. Without a connected, awake Multi
 - [ehedman/victron-venus-container](https://github.com/ehedman/victron-venus-container) — official Venus rootfs in nspawn/docker/chroot
 - [RafaelKa/victron-venus-os-in-docker](https://github.com/RafaelKa/victron-venus-os-in-docker) — official rootfs in Docker, aarch64
 - [M-o-a-T/venusian](https://github.com/M-o-a-T/venusian) — Venus on Debian without container
+- [victron-venus/inverter-control](https://github.com/victron-venus/inverter-control) — external ESS control daemon on Venus OS (writes `/Hub4/L1/AcPowerSetpoint` via D-Bus): grid-zero, split-phase compensation, solar forecast, tariffs; one battery, no per-stack split like batmonitor
