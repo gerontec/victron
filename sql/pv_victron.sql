@@ -94,3 +94,12 @@ ALTER TABLE pv_victron
   ADD COLUMN ebox_p1_cycles SMALLINT UNSIGNED NULL COMMENT 'Stack2 Pytes pack 1 cycle count (BMS CYCLE Times)',
   ADD COLUMN ebox_p2_cycles SMALLINT UNSIGNED NULL COMMENT 'Stack2 Pytes pack 2 cycle count (BMS CYCLE Times)',
   ADD COLUMN ebox_p3_cycles SMALLINT UNSIGNED NULL COMMENT 'Stack2 Pytes pack 3 cycle count (BMS CYCLE Times)';
+
+-- 2026-10-09: AC-out1 apparent power and current per phase (critical loads on AC-out1; VE.Bus S = V x I, coarse at small loads)
+ALTER TABLE pv_victron
+  ADD COLUMN ac_out_l1_s INT NULL COMMENT 'AC-out1 L1 apparent power (VA)',
+  ADD COLUMN ac_out_l2_s INT NULL COMMENT 'AC-out1 L2 apparent power (VA)',
+  ADD COLUMN ac_out_l3_s INT NULL COMMENT 'AC-out1 L3 apparent power (VA)',
+  ADD COLUMN ac_out_l1_i DECIMAL(6,2) NULL COMMENT 'AC-out1 L1 current (A)',
+  ADD COLUMN ac_out_l2_i DECIMAL(6,2) NULL COMMENT 'AC-out1 L2 current (A)',
+  ADD COLUMN ac_out_l3_i DECIMAL(6,2) NULL COMMENT 'AC-out1 L3 current (A)';

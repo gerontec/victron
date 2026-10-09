@@ -84,6 +84,8 @@ for ph in (1, 2, 3):
 	COLUMNS[f'ac_in_l{ph}_w'] = ('vebus', f'/Ac/ActiveIn/L{ph}/P')
 	COLUMNS[f'ac_out_l{ph}_v'] = ('vebus', f'/Ac/Out/L{ph}/V')
 	COLUMNS[f'ac_out_l{ph}_w'] = ('vebus', f'/Ac/Out/L{ph}/P')
+	COLUMNS[f'ac_out_l{ph}_s'] = ('vebus', f'/Ac/Out/L{ph}/S')     # apparent power = V x I (coarse below ~1 A)
+	COLUMNS[f'ac_out_l{ph}_i'] = ('vebus', f'/Ac/Out/L{ph}/I')
 	COLUMNS[f'grid_l{ph}_w'] = ('system', f'/Ac/Grid/L{ph}/Power')
 	COLUMNS[f'consumption_l{ph}_w'] = ('system', f'/Ac/Consumption/L{ph}/Power')
 
