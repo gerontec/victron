@@ -17,7 +17,8 @@
  *     (measured: WP 4.1 kW at night -> Sofar load +3.3 kW). The heat pump shall take the cheap Z1 grid power, the
  *     batteries serve the expensive Z2 house power: z2 = pcc + WP (SDM72D em0/power, once a minute) replaces pcc in
  *     the discharge rule and the PI's discharge side; no night floor while the WP runs; WP_CAP only as fallback when
- *     em0/power is stale. Charging stays on the Z1 PCC (on Z2 the Sofar would refill the charging from its Bat1).
+ *     em0/power is stale. Charging stayed on the Z1 PCC until 0.30-c (on Z2 the Sofar refills the charging from its
+ *     Bat1).
  *     Winter only (Oct-Apr, as WP_CAP): in summer mode (SUMMER_FROM..SUMMER_TO) the heat pump may and must be served
  *     100 % from the batteries, the discharge regulates on the Z1 PCC as before (user 2026-10-08).
  *   - no fixed night floor (0.25, user 2026-10-08: obsolete with the 4 s PCC over MQTT): at night the discharge
@@ -37,6 +38,11 @@
  *     CHARGE_EFF (0.93: L1 saturated at 4000-4080 W AC with setpoint 4200 W at 53.7 V), for the soyo setpoints, the
  *     spill (was up to CHARGE_MAX_PHASE 4900 W, more than the charger takes), the PI limit and the full_at forecast.
  *     Without a BMS voltage CHARGER_CAP_PHASE (4200 W), no spill above it.
+ *   - charging on Z2 (0.30-c, user 2026-10-09: Z2 power costs 30 ct): in winter the charging regulates on
+ *     z2 = PCC + heat pump like the discharge, so the PV goes into the stacks and the heat pump takes the cheap Z1 grid
+ *     (transition: its part above 1900 W; summer unchanged). Accepted side effect: while the Sofar can (Bat1 up to
+ *     2.5 kW, its own PCC regulation at Z1) it covers the heat pump from Bat1 -> PV into the stacks, Bat1 into the WP
+ *     (~15 % extra conversion loss on that part). Only a Sofar CT on Z2 or a Bat1 discharge limit avoids that.
  * PI prototype (not armed): BATMONITOR_PI=1 lets a velocity-form PI on y = PCC + Sofar Bat1 replace the soyo
  * discharge/charge amounts (same gates, same phase split). Without it the PI runs in shadow: every cycle one line
  * in PI_SHADOW_FILE with what soyo set and what the PI would set, to compare both before arming it.
@@ -60,7 +66,7 @@
 #include <unistd.h>
 #include "bm_logic.h"
 
-#define VERSION "0.29-c"
+#define VERSION "0.30-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"

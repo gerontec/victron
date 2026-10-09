@@ -475,7 +475,11 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 	   subtracted (0.20, found by tests/test_logic.c): else the 936 W night floor, partly going into the Sofar
 	   battery, counted as PV surplus and the Multis switched to charging at night / one stack charged the other */
 	double bat1_eff = bat1 < 0 ? bat1 : bat1 * BAT1_CHARGE_FACTOR;
-	double surplus = (have_pcc ? pcc : 0.0) + bat1_eff + own_charge - own_discharge;
+	/* charging on the Z2 point too (0.30-c, user 2026-10-09: Z2 power costs 30 ct): in winter the PV goes into the
+	   stacks and the heat pump takes the cheap Z1 grid (in the transition its part above 1900 W, as the discharge).
+	   While the Sofar can, it covers the heat pump from Bat1 (own PCC regulation at Z1): Bat1 -> WP, PV -> stacks */
+	double chg_ref = have_pcc ? z2 : 0.0;
+	double surplus = chg_ref + bat1_eff + own_charge - own_discharge;
 	int block = ladesperre(cfg, in, st, out, stale, multis);
 	/* surplus includes the own charging: once charging, it holds down to SOYO_HOLD_TH instead of 200 W */
 	int charge_mode = surplus > PCC_SURPLUS_TH || (st->soyo_chg_prev && surplus > SOYO_HOLD_TH);
@@ -584,7 +588,7 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 		for (int p = 0; p < NPH; p++)
 			if (charge[p])
 				cap_sum += out->chg_cap[p];
-		alloc_charge(cfg, st->lead, fmin((int)(own_charge + KP * ((have_pcc ? pcc : 0.0) + bat1_eff - cfg->soyo_target)),
+		alloc_charge(cfg, st->lead, fmin((int)(own_charge + KP * (chg_ref + bat1_eff - cfg->soyo_target)),
 									cap_sum), charge, n_chg, out->chg_cap, sp, why);
 	}
 	st->soyo_chg_prev = n_chg > 0;
@@ -603,8 +607,8 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 				applied += st->setpoints[p];
 		double b1 = bat1 > 0 ? bat1 * BAT1_CHARGE_FACTOR
 					: (applied > 0 || (night && (season != BM_WINTER || !wp_fresh || in->wp < WP_ON_TH))) ? bat1 : 0.0;
-		/* discharge side on the Z2 point (0.19), charge side on the Z1 PCC, as soyo */
-		double y = (have_pcc ? (applied > 0 ? pcc : z2) : 0.0) + b1, e = y - PI_TARGET;
+		/* both sides on the Z2 point (discharge 0.19, charge 0.30-c), as soyo */
+		double y = (have_pcc ? z2 : 0.0) + b1, e = y - PI_TARGET;
 		if (fabs(e) < PI_DEADBAND)
 			e = 0;
 		double dt = st->pi_t_prev > 0 ? fmin(fmax(now - st->pi_t_prev, 1.0), 30.0) : CYCLE_SECONDS;
@@ -614,10 +618,9 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 		for (int p = 0; p < NPH; p++)
 			if (pi_chg[p])
 				u_max += out->chg_cap[p];
-		/* crossing from discharge (Z2 side) into charging: never more than the real Z1 export, else the Sofar Bat1
-		   would feed the charging while the heat pump runs */
+		/* crossing from discharge into charging: never more than the surplus at the Z2 point */
 		if (applied <= 0 && u > 0)
-			u = fmax(0.0, fmin(u, (have_pcc ? pcc : 0.0) + b1 - PI_TARGET));
+			u = fmax(0.0, fmin(u, (have_pcc ? z2 : 0.0) + b1 - PI_TARGET));
 		u = fmax(u_min, fmin(u_max, u));
 		st->pi_e_prev = e;
 		st->pi_t_prev = now;

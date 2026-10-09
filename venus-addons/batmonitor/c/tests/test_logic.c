@@ -286,6 +286,29 @@ static void test_real_charge_ceiling(void)
 	CHECK(sum_sp(&r) == 3 * 4200, "without a BMS voltage CHARGER_CAP_PHASE per phase, no spill, sp sum %d", sum_sp(&r));
 }
 
+static void test_winter_charge_on_z2(void)
+{
+	struct run r;
+	/* 0.30-c: December noon, PV 9 kW, house 0.8 kW, WP 4 kW, Sofar full: the stacks take 8.2 kW, the WP comes from
+	   the cheap Z1 grid (pcc -4000); in summer the WP eats the PV first (stacks 4.2 kW, pcc 0) */
+	struct plant pl = BASE(.pv = 9000, .house = 800, .wp = 4000, .r290_hz = 60);
+	simulate(&r, &pl, local_time(2026, 12, 21, 12, 0), 60);
+	print_state("Dec noon, PV 9 kW, WP 4 kW, winter", &r);
+	CHECK(abs(sum_sp(&r) - 8200) <= 80, "stacks take PV - house, sp sum %d", sum_sp(&r));
+	CHECK(fabs(r.pcc + 4000) <= 80, "WP from the Z1 grid, pcc %.0f", r.pcc);
+	CHECK(pcc_swing(&r, 20) < 100, "no oscillation, swing %.0f", pcc_swing(&r, 20));
+	struct plant ps = BASE(.pv = 9000, .house = 800, .wp = 4000, .r290_hz = 60, .season = BM_SUMMER, .season_age_h = 1);
+	simulate(&r, &ps, local_time(2026, 12, 21, 12, 0), 60);
+	CHECK(abs(sum_sp(&r) - 4200) <= 80 && fabs(r.pcc) <= 80, "summer: charging on Z1, sp sum %d pcc %.0f", sum_sp(&r), r.pcc);
+	/* Sofar with room: it covers the WP from Bat1 (2.5 kW), the rest comes from the grid */
+	struct plant pb = BASE(.pv = 9000, .house = 800, .wp = 4000, .r290_hz = 60, .sofar_dis = 1, .sofar_chg = 1);
+	simulate(&r, &pb, local_time(2026, 12, 21, 12, 0), 80);
+	print_state("Dec noon, Sofar Bat1 can discharge", &r);
+	CHECK(abs(sum_sp(&r) - 8200) <= 120, "stacks take PV - house, sp sum %d", sum_sp(&r));
+	CHECK(fabs(r.bat1 + 2500) <= 80 && fabs(r.pcc + 1500) <= 120, "Bat1 2.5 kW + grid 1.5 kW into the WP, bat1 %.0f pcc %.0f",
+		  r.bat1, r.pcc);
+}
+
 static void test_day_sofar_covers_house(void)
 {
 	struct run r;
@@ -629,6 +652,7 @@ int main(void)
 	test_wp_running_no_night_floor();
 	test_day_surplus_to_zero();
 	test_real_charge_ceiling();
+	test_winter_charge_on_z2();
 	test_day_sofar_covers_house();
 	test_day_sofar_saturated();
 	test_force_charge();
