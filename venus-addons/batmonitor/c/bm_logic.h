@@ -99,6 +99,7 @@ struct bm_state {
 	int ls_yday, peak_today, ls_latched, badweather_today;
 	int fc_active;                               /* forecast: stacks above the target SoC -> serve everything */
 	int bat1_first;                              /* Sofar Bat1 above BAT1_SOC_MIN: it discharges first (0.38-c) */
+	double do4_last;                             /* monotonic s of the last DO4 pulse, 0 = none (0.46-c) */
 	double pi_e_prev, pi_t_prev;
 	int setpoints[NPH];                          /* sent last cycle (the PI's u_applied) */
 };
@@ -116,6 +117,7 @@ struct bm_out {
 	struct bm_ls ls;
 	struct bm_pi pi;
 	int lead_event;                              /* 1 = a bank took the lead, -1 = back within SOC_BALANCE_OFF */
+	int do4_pulse;                               /* 1 = send the DO4 pulse "curtail WR2" now (D5, 0.46-c) */
 	double lead_diff;
 	double chg_cap[NPH];                         /* W AC: charge ceiling per phase used this cycle */
 	double dis_cap[NPH];                         /* W AC: discharge ceiling per phase used this cycle */
@@ -205,6 +207,17 @@ struct bm_d3_in {
 	int prop_hold;                               /* BM_SRC_RULE[src].prop_hold */
 };
 int bm_d3(const struct bm_d3_in *b, int prop_prev, int *prop_next);   /* 1 = PROPORTIONAL, 0 = IDLE */
+
+/* D5 (0.46-c): DO4 pulse "curtail WR2" (MQTT pv_relay/DO4) when the PCC export passes PCC_PEAK_TH 20 kW, at most one
+   pulse per DO4_LOCKOUT. State: the time of the last pulse, reduced to the bit lockout_over */
+struct bm_d5_in {
+	int pcc_over;                                /* PCC younger than DO4_PCC_MAX_AGE and > PCC_PEAK_TH */
+	int lockout_over;                            /* no pulse yet, or the last one DO4_LOCKOUT ago */
+};
+int bm_d5(const struct bm_d5_in *b);                                  /* 1 = pulse now */
+#define DO4_LOCKOUT 300.0                    /* s between two pulses: WR2 needs its restart after a pulse */
+#define DO4_PCC_MAX_AGE 15.0                 /* s: only a fresh PCC triggers (sofar_fast.py: every 4 s) */
+#define DO4_PULSE_S 3.0                      /* s: DO4=1, then DO4=0 (as fox2db / the ESP: r4 pulse 3) */
 
 void bm_init(struct bm_state *st);
 /* charge ceiling of one phase (W AC): charger_a x BMS voltage of its bank / charge_eff, at most CHARGE_MAX_PHASE;

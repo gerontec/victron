@@ -76,7 +76,7 @@
 #include <unistd.h>
 #include "bm_logic.h"
 
-#define VERSION "0.45-c"
+#define VERSION "0.46-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
@@ -85,6 +85,7 @@
 #define FORECAST_TOPIC "batmonitor/forecast"   /* forecast.py on .218, hourly: {"target_soc", ..., "ts"} */
 #define PEAK_MODEL_TOPIC "batmonitor/peak_model"   /* out, retained, every PEAK_MODEL_SECONDS: for r290_boost.py */
 #define PEAK_MODEL_SECONDS 60.0
+#define DO4_TOPIC "pv_relay/DO4"      /* out, not retained: "1" for DO4_PULSE_S, then "0" (relay: curtail WR2, 0.46-c) */
 #define STATE_FILE_DEFAULT "/data/batmonitor/state.json"
 #define TZ_BERLIN "CET-1CEST,M3.5.0,M10.5.0/3"   /* Europe/Berlin without a zoneinfo file */
 #define SETPOINT_MAX_AGE 90.0
@@ -129,6 +130,7 @@ static int hist_n[NBANK];
 
 static DBusConnection *bus;
 static struct mosquitto *mosq_g;                    /* for the peak model publish */
+static double do4_off_at;                           /* monotonic s to send DO4=0, 0 = no pulse running */
 
 static double mono(void)
 {
@@ -596,6 +598,13 @@ static void pi_shadow_log(double pcc, double bat1, double pv, const int *sp, cha
 		rename(PI_SHADOW_FILE, PI_SHADOW_FILE ".1");
 }
 
+/* DO4 pulse edge (D5): QoS 1, not retained, so a reconnecting relay never sees an old "1" */
+static void do4_publish(const char *v)
+{
+	if (!mosq_g || mosquitto_publish(mosq_g, NULL, DO4_TOPIC, 1, v, 1, false) != MOSQ_ERR_SUCCESS)
+		LOGE("DO4=%s publish failed", v);
+}
+
 /* the charge block's clear-sky peak model, retained, once a minute (same fields as the ESP's sofar/state model) */
 static void publish_peak_model(double now)
 {
@@ -666,6 +675,13 @@ static void calc(void)
 	in_last = in;
 	run_full_forecast(&in);
 
+	if (o_.do4_pulse) {
+		LOG("DO4 pulse (curtail WR2): PCC %.0f W > 20 kW%s", in.pcc, LIVE ? "" : " (dry run, not sent)");
+		if (LIVE) {
+			do4_publish("1");
+			do4_off_at = mono() + DO4_PULSE_S;
+		}
+	}
 	if (o_.lead_event > 0)
 		LOG("SoC balance: %s ahead by %.1f %%", BM_BANKS[st.lead].name, o_.lead_diff);
 	else if (o_.lead_event < 0)
@@ -737,6 +753,10 @@ static void send_setpoints(void)
 
 static void stop_control(void)
 {
+	if (do4_off_at > 0) {                           /* never leave the relay on */
+		do4_publish("0");
+		do4_off_at = 0;
+	}
 	const char *vb = vebus();
 	if (vb)
 		for (int p = 0; p < NPH; p++) {
@@ -830,8 +850,14 @@ int main(void)
 
 	double next = mono() + CYCLE_SECONDS;   /* first cycle once the retained MQTT data is in */
 	while (!stop_flag) {
+		if (do4_off_at > 0 && mono() >= do4_off_at) {   /* end of the DO4 pulse, between two cycles */
+			do4_publish("0");
+			do4_off_at = 0;
+		}
 		double wait = next - mono();
-		if (wait > 0) {
+		if (wait > 0) {                               /* only the cycle deadline starts calc(); a DO4 pulse end */
+			if (do4_off_at > 0)                         /* only wakes the loop earlier */
+				wait = fmin(wait, fmax(0.001, do4_off_at - mono()));
 			struct timespec ts = {(time_t)wait, (long)((wait - (time_t)wait) * 1e9)};
 			nanosleep(&ts, NULL);         /* a signal ends the sleep early */
 			continue;

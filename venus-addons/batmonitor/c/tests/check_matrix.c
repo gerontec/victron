@@ -228,6 +228,19 @@ static void check_lead(void)
 	printf("\nlead: %ld consistent combinations, invariants checked\n", combos);
 }
 
+/* ---- D5: DO4 pulse (0.46-c) ----------------------------------------------------------------------------------- */
+static void check_d5(void)
+{
+	for (int v = 0; v < 4; v++) {
+		struct bm_d5_in b = {BIT(v, 0), BIT(v, 1)};
+		int r = bm_d5(&b);
+		INV(!r || b.pcc_over, "DO4 only with a fresh PCC above 20 kW");
+		INV(!r || b.lockout_over, "DO4 at most once per DO4_LOCKOUT");
+		INV(r || !b.pcc_over || !b.lockout_over, "DO4 always when both hold");
+	}
+	printf("\nD5 DO4 pulse: 4 combinations\n");
+}
+
 /* ---- D3 -------------------------------------------------------------------------------------------------------- */
 static void check_d3(void)
 {
@@ -353,6 +366,7 @@ int main(void)
 {
 	check_threshold_order();
 	check_dis_table();
+	check_d5();
 	check_d1();
 	check_d2();
 	check_lead();

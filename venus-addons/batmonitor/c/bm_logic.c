@@ -513,6 +513,12 @@ int bm_d3(const struct bm_d3_in *b, int prop_prev, int *prop_next)
 	return prop;
 }
 
+/* D5. A fresh PCC above PCC_PEAK_TH and no pulse within DO4_LOCKOUT -> pulse */
+int bm_d5(const struct bm_d5_in *b)
+{
+	return b->pcc_over && b->lockout_over;
+}
+
 /* ---- the rule chain (0.41-c): one function per stage, run in this order by bm_step ---------------------------------
    inputs     derived facts: data age, heat pump running, season, night, own AC-in
    forecast   FC_ACTIVE / FC_BAD from batmonitor/forecast
@@ -523,6 +529,7 @@ int bm_d3(const struct bm_d3_in *b, int prop_prev, int *prop_next)
               DISCHARGE_PROTECTION > CHARGING > discharge
    S4 amount  discharge W (PROPORTIONAL / IDLE + tags), charge W
    S5 split   alloc_discharge / alloc_charge over the phases, BMS limit tags
+   D5         DO4 pulse "curtail WR2" (pv_relay/DO4) when the PCC export passes 20 kW, at most every 5 min
    PI         shadow prototype (not armed), reads the same stages
    A stage reads the results of the stages before it and changes none of them. 0.43-c: the decisions (which rule)
    are bm_d1 / bm_d2 / bm_dlead / bm_d3 above; the stages compute their bits and the amounts.
@@ -932,6 +939,11 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 		struct bm_d3_in d = {0, 0, 0, 0};
 		bm_d3(&d, st->soyo_prop_prev, &st->soyo_prop_prev);
 	}
+	struct bm_d5_in d5 = {in->have_pcc && in->now - in->inv_time < DO4_PCC_MAX_AGE && in->pcc > PCC_PEAK_TH,
+						  st->do4_last <= 0 || in->now - st->do4_last >= DO4_LOCKOUT};
+	out->do4_pulse = bm_d5(&d5);
+	if (out->do4_pulse)
+		st->do4_last = in->now;
 	chain_pi(cfg, in, st, out, &c);
 	out->surplus = c.surplus;
 	out->wp_eff = c.wp_eff;

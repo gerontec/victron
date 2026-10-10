@@ -45,6 +45,7 @@ struct run {
 	double ac[NPH], pcc, bat1;
 	double pcc_hist[1000];
 	int n;
+	int do4_pulses;                /* D5 pulses over the run (0.46-c) */
 };
 
 static time_t local_time(int y, int mo, int d, int h, int mi)
@@ -117,6 +118,7 @@ static void simulate(struct run *r, const struct plant *pl, time_t t0, int n)
 				in->power[b] += r->ac[BM_BANKS[b].ph[i]];
 		}
 		bm_step(&r->cfg, in, &r->st, &r->out);
+		r->do4_pulses += r->out.do4_pulse;
 		for (int p = 0; p < NPH; p++) {
 			r->ac[p] = r->out.sp[p];     /* the Multis follow within one cycle */
 			for (int b = 0; b < NBANK; b++)
@@ -592,6 +594,24 @@ static void test_forecast_keeps_source(void)
 	CHECK(fabs(sum_sp(&r) + r.bat1 + 3300) <= 60, "stacks + Sofar = house + WP, sp sum %d", sum_sp(&r));
 }
 
+/* 0.46-c: PCC export above 20 kW -> one DO4 pulse "curtail WR2", then DO4_LOCKOUT 5 min */
+static void test_do4_pulse(void)
+{
+	struct run r;
+	struct plant pl = BASE(.pv = 32000, .house = 500, .soc = {100, 100});   /* stacks full: export ~31 kW */
+	simulate(&r, &pl, local_time(2026, 6, 21, 12, 0), 120);              /* 10 min */
+	print_state("21 June 12:00, PV 32 kW, stacks full", &r);
+	CHECK(r.pcc > 20000 && r.do4_pulses == 2, "PCC %.0f W: one pulse at once, one after 5 min, got %d", r.pcc,
+		  r.do4_pulses);
+	pl.pv = 19000;
+	simulate(&r, &pl, local_time(2026, 6, 21, 12, 0), 120);
+	CHECK(r.do4_pulses == 0, "export below 20 kW: no pulse, got %d", r.do4_pulses);
+	pl.pv = 32000;
+	pl.stale_inv = 1;
+	simulate(&r, &pl, local_time(2026, 6, 21, 12, 0), 20);
+	CHECK(r.do4_pulses == 0, "stale PCC: no pulse, got %d", r.do4_pulses);
+}
+
 static void test_bat1_first(void)
 {
 	struct run r;
@@ -823,6 +843,7 @@ int main(void)
 	test_forecast_overrides_winter();
 	test_forecast_bad_caps_wp();
 	test_forecast_keeps_source();
+	test_do4_pulse();
 	test_bat1_first();
 	test_pi_shadow_not_armed();
 	test_fc_sunset_limits();
