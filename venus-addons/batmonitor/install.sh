@@ -1,14 +1,16 @@
 #!/bin/sh
 # Install batmonitor into a Venus /data (survives firmware updates) and start it from /data/rc.local.
 # Usage inside Venus: sh install.sh            From the host: sudo sh install.sh /data
-# The C port is built with the gcc of the Venus image (inside Venus only); without a binary run falls back to Python.
+# The C version is built with the gcc of the Venus image (inside Venus only); without a binary service/run starts
+# the Python port (batmonitor.py + bm_logic.py + bm_parse.py, byte-identical logic: make -C c py-compare).
 set -e
 DATA="${1:-/data}"
 HERE=$(dirname "$(readlink -f "$0")")
 D="$DATA/batmonitor"
 mkdir -p "$D/service/log" "$D/c"
-cp "$HERE/batmonitor.py" "$D/"
-cp -r "$HERE/c/batmonitor.c" "$HERE/c/Makefile" "$HERE/c/include" "$D/c/"
+cp "$HERE/batmonitor.py" "$HERE/bm_logic.py" "$HERE/bm_parse.py" "$D/"
+cp -r "$HERE/c/batmonitor.c" "$HERE/c/bm_logic.c" "$HERE/c/bm_logic.h" "$HERE/c/bm_parse.c" "$HERE/c/bm_parse.h" \
+	"$HERE/c/Makefile" "$HERE/c/include" "$HERE/c/tests" "$D/c/"
 cp "$HERE/service/run" "$D/service/run"
 cp "$HERE/service/log/run" "$D/service/log/run"
 chmod 755 "$D/batmonitor.py" "$D/service/run" "$D/service/log/run"

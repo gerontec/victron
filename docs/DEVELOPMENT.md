@@ -33,6 +33,7 @@ Run in `venus-addons/batmonitor/c`:
 | `make test` | unit tests: plant simulation, setpoints and rule texts per scenario | seconds |
 | `make check` | enumerates every input / state combination of the decision layer (invariants, fixed point after one step, reachability), prints the discharge matrix, plus amount properties over 200000 random cycles | ~1 min |
 | `make fuzz-compare [REV=HEAD]` | differential test of the setpoints and rule texts against a git revision (its own `bm_logic.c`, `bm_logic.h`, `tests/fuzz_dump.c`); prints the count of differing cycles per seed | ~10 s |
+| `make py-compare` | the Python port (`bm_logic.py`) against the C logic: same inputs, byte-identical setpoints, rule texts, PI and full_at forecast (5 x 48000 cycles), plus `tests/test_parse.py` | ~1 min |
 | `make cbmc` | CBMC proofs of the predicate constraints and the amount formula, plus one harness that must give a counterexample | seconds |
 | `make cbmc-full` | adds the floating-point / split proofs (`h_alloc_discharge`, `h_charge`, `h_discharge`) | minutes, ~5 GB RAM |
 | `make cbmc-remote CBMC_HOST=... CBMC_REMOTE_BIN=...` | runs `cbmc-full` on a faster build host | |
@@ -49,4 +50,6 @@ system (e.g. the phases of one bank share one cap) and are stated next to each h
 4. Change the behaviour in one place; add a unit test for exactly that case; quantify the difference with
    `make fuzz-compare` and explain every cycle that differs by more than rounding.
 5. Extend `make check` invariants / CBMC harnesses for the new rule; `make cbmc-full`.
-6. Bump the version, build and test on the target, deploy with a backup of the old binary, check the live state.
+6. Port the change to the Python files (`bm_logic.py`, `bm_parse.py`, `batmonitor.py`): same names, same stages;
+   `make py-compare` must stay identical.
+7. Bump the version, build and test on the target, deploy with a backup of the old binary, check the live state.

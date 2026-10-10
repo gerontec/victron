@@ -37,6 +37,20 @@ fuzz-compare: tests/fuzz_dump.c bm_logic.c bm_logic.h
 		if [ $$n -eq 0 ]; then echo "seed $$s identical"; else echo "seed $$s: $$n of $$(wc -l < $(FZ)/new.$$s) cycles differ"; fail=1; fi; \
 	done; [ $$fail -eq 0 ] || { echo "outputs in $(FZ)/old.<seed> / new.<seed>"; exit 1; }
 
+# the Python port (../bm_logic.py) against this C logic: fuzz_dump prints every cycle's inputs ("io"), fuzz_replay.py
+# runs bm_logic.py on them; setpoints, rule texts, PI and the full_at forecast must be byte-identical (5 x 48000
+# cycles + 36000 forecasts, ~1 min). Then the payload tests of bm_parse.py.
+py-compare: tests/fuzz_dump.c bm_logic.c bm_logic.h ../bm_logic.py ../tests/fuzz_replay.py
+	mkdir -p $(FZ)
+	$(CC) -O2 -I. -o $(FZ)/fz_io tests/fuzz_dump.c bm_logic.c -lm
+	@fail=0; for s in 1 2 3 4 5; do $(FZ)/fz_io $$s io > $(FZ)/io.$$s; grep -v -E '^(IN|FCIN) ' $(FZ)/io.$$s > $(FZ)/c.$$s; \
+		python3 ../tests/fuzz_replay.py < $(FZ)/io.$$s > $(FZ)/py.$$s || fail=1; \
+		n=$$(diff $(FZ)/c.$$s $(FZ)/py.$$s | grep -c '^>'); \
+		if [ $$n -eq 0 ]; then echo "seed $$s: C and Python identical ($$(wc -l < $(FZ)/c.$$s) lines)"; \
+		else echo "seed $$s: $$n lines differ"; fail=1; fi; \
+	done; [ $$fail -eq 0 ] || { echo "outputs in $(FZ)/c.<seed> / py.<seed>"; exit 1; }
+	python3 ../tests/test_parse.py
+
 # exhaustive check of the decision layer (bm_d1 / bm_d2 / bm_dlead / bm_d3) + amount properties of bm_step
 check: tests/check_matrix
 	./tests/check_matrix
