@@ -83,6 +83,10 @@ def main():
             i.lim_ok[b] = int(next(it))
             i.ccl[b] = float(next(it))
             i.dcl[b] = float(next(it))
+        i.grid_ok = int(next(it))
+        for p in range(L.NPH):
+            i.ac_out_ok[p] = int(next(it))
+            i.ac_out[p] = float(next(it))
         i.fc_corr = float(next(it))
         n_slots = int(next(it))
         i.fc_slots = [(int(next(it)), float(next(it))) for _ in range(n_slots)]

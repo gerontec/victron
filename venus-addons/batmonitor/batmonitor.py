@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 batmonitor.py - battery protection and charge / discharge control for a three-phase MultiPlus system whose phases sit
-on separate battery banks (Stack1 MUST on L1, Stack2 Pytes on L2 + L3). Python port of c/batmonitor.c 0.50-c.
+on separate battery banks (Stack1 MUST on L1, Stack2 Pytes on L2 + L3). Python port of c/batmonitor.c 0.51-c.
 
 This file is the shell: it reads the inputs (D-Bus of Venus, MQTT on .218), calls bm_logic.bm_step once per cycle
 and writes the outputs (ESS setpoints per phase, state file, log, PI shadow CSV, DO4 pulse, peak model). The rules
@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bm_logic as L  # noqa: E402
 import bm_parse  # noqa: E402
 
-VERSION = "0.50-py"
+VERSION = "0.51-py"
 INVERTER_TOPIC = "inverter/power_grid_exchange/json"
 R290_TOPIC = "r290/heatpump/all"
 AUSSEN_TOPIC = "aussen/temp"
@@ -402,6 +402,7 @@ class Batmonitor:
                 i.fc_corr = m["fc_corr"]
                 i.fc_slots = list(m["fc_slots"])
         vb = self.vebus()
+        i.grid_ok = int(self.get(vb, "/Ac/ActiveIn/Connected") == 1.0)
         for p in range(L.NPH):
             v = self.get(vb, "/Ac/ActiveIn/%s/P" % L.BM_PH[p])
             i.ac_ok[p], i.ac_in[p] = int(v is not None), v or 0.0
@@ -426,8 +427,13 @@ class Batmonitor:
         self.run_full_forecast(i)
 
         if o.do4_pulse:
-            log("DO4 pulse (curtail WR2): PCC %.0f W > 20 kW for %.0f s%s" % (
-                i.pcc, i.now - self.st.do4_over_since, "" if self.live else " (dry run, not sent)"))
+            if o.do4_acout:
+                log("DO4 pulse (curtail WR2): grid offline, PV feeds %.0f W into one AC-out > %.0f W for %.0f s%s" % (
+                    o.acout_feed_w, self.cfg.acout_feed_max_w, self.cfg.acout_feed_s,
+                    "" if self.live else " (dry run, not sent)"))
+            else:
+                log("DO4 pulse (curtail WR2): PCC %.0f W > 20 kW for %.0f s%s" % (
+                    i.pcc, i.now - self.st.do4_over_since, "" if self.live else " (dry run, not sent)"))
             if self.live:
                 self.do4_publish("1")
                 self.do4_off_at = mono() + L.DO4_PULSE_S

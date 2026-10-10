@@ -35,6 +35,8 @@ struct plant {
 	double ccl[NBANK], dcl[NBANK]; /* A */
 	double pv_sofar;               /* measured Sofar PV (the forecast anchor), 0 = pv */
 	double fc_kt;                  /* OWM kt of every 3 h slot (correction 1.0), 0 = no slots */
+	double acout_feed[NPH];        /* W PV feeding back into each AC-out (FoxESS on AC-out1), 0 = none */
+	int grid_off;                  /* 1 = grid offline (island, transfer relay open) */
 };
 
 static double r_override_w_max;     /* > 0: W_MAX for the next simulate() (parameter test) */
@@ -103,6 +105,7 @@ static void simulate(struct run *r, const struct plant *pl, time_t t0, int n)
 			}
 		}
 		in->inv_time = pl->stale_inv ? 1.0 : now;
+		in->grid_ok = !pl->grid_off;
 		in->r290_hz = pl->r290_hz;
 		in->r290_time = now;
 		in->aussen = pl->aussen;
@@ -116,6 +119,8 @@ static void simulate(struct run *r, const struct plant *pl, time_t t0, int n)
 		for (int p = 0; p < NPH; p++) {
 			in->ac_ok[p] = 1;
 			in->ac_in[p] = r->ac[p];
+			in->ac_out_ok[p] = 1;
+			in->ac_out[p] = 50 - pl->acout_feed[p];         /* 50 W loads, - = feed */
 		}
 		for (int b = 0; b < NBANK; b++) {
 			in->bms_ok[b] = 1;
@@ -654,6 +659,25 @@ static void test_do4_pulse(void)
 	CHECK(r.do4_pulses == 0, "stale PCC: no pulse, got %d", r.do4_pulses);
 }
 
+/* 0.51-c: grid offline and PV on AC-out1 (FoxESS) above 5 kW on one MultiPlus for 10 s -> DO4 at once (factor 1.0
+   rule); with the grid there the feed passes to the grid (bypass), no pulse */
+static void test_do4_acout(void)
+{
+	struct run r;
+	struct plant pl = BASE(.house = 500, .soc = {60, 60}, .acout_feed = {0, 5600, 0});
+	simulate(&r, &pl, local_time(2026, 6, 21, 12, 0), 60);
+	CHECK(r.do4_pulses == 0, "grid there: 5.6 kW feed passes to the grid, no pulse, got %d", r.do4_pulses);
+	pl.grid_off = 1;
+	simulate(&r, &pl, local_time(2026, 6, 21, 12, 0), 2);         /* cycles at 0 and 5 s: not yet */
+	CHECK(r.do4_pulses == 0, "5.6 kW feed for 5 s: no pulse yet, got %d", r.do4_pulses);
+	simulate(&r, &pl, local_time(2026, 6, 21, 12, 0), 3);         /* ... and 10 s */
+	CHECK(r.do4_pulses == 1 && r.out.acout_feed_w > 5000, "5.6 kW feed into L2 for 10 s: pulse, got %d (feed %.0f W)",
+		  r.do4_pulses, r.out.acout_feed_w);
+	pl.acout_feed[1] = 4900;
+	simulate(&r, &pl, local_time(2026, 6, 21, 12, 0), 60);
+	CHECK(r.do4_pulses == 0, "4.85 kW feed: within the 5000 VA, no pulse, got %d", r.do4_pulses);
+}
+
 static void test_bat1_first(void)
 {
 	struct run r;
@@ -886,6 +910,7 @@ int main(void)
 	test_forecast_bad_caps_wp();
 	test_forecast_keeps_source();
 	test_do4_pulse();
+	test_do4_acout();
 	test_bat1_first();
 	test_pi_shadow_not_armed();
 	test_fc_sunset_limits();

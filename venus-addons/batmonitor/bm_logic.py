@@ -1,5 +1,5 @@
 """
-bm_logic.py - the batmonitor control logic in Python, a 1:1 port of c/bm_logic.c (0.50-c).
+bm_logic.py - the batmonitor control logic in Python, a 1:1 port of c/bm_logic.c (0.51-c).
 
 One cycle = bm_step(cfg, inp, st) -> Out. Pure: no D-Bus, MQTT, clock or files; batmonitor.py collects the inputs and
 writes the outputs. The names, stages and tables are the ones of the C file, so both can be read side by side:
@@ -184,6 +184,8 @@ BM_PARAMS = [
     Param("HOUSE_EST", "house_est", 1000, 0, 5000, "W", "summer peak window: house load assumed when turning the PV forecast into export"),
     Param("DO4_GRACE_S", "do4_grace_s", 120, 0, 600, "s", "DO4 (FoxESS shedding) only after the PCC stays above 20 kW this long: R290 boost and air conditioning first"),
     Param("DO4_HARD_W", "do4_hard_w", 23000, 20000, 40000, "W", "DO4 at once above this PCC export"),
+    Param("ACOUT_FEED_MAX_W", "acout_feed_max_w", 5000, 0, 10000, "W", "grid offline: DO4 when PV feeds more than this into one MultiPlus AC-out (factor 1.0 rule, 5000 VA; 0 = off)"),
+    Param("ACOUT_FEED_S", "acout_feed_s", 10, 0, 120, "s", "... for this long"),
     Param("CHARGER_DC_W", "charger_dc_w", 3600, 500, 5000, "W", "full_at forecast: DC at the BMS per MultiPlus at its limit"),
 ]
 
@@ -236,6 +238,7 @@ class In:
     fc_slots: list = field(default_factory=list)                 # [(unix t, kt)] OWM 3 h slots (kt_slots)
     ac_ok: list = field(default_factory=lambda: [0] * NPH)
     ac_in: list = field(default_factory=lambda: [0.0] * NPH)     # vebus /Ac/ActiveIn/Lx/P, + = the Multi takes
+    grid_ok: int = 0                            # vebus /Ac/ActiveIn/Connected == 1: grid there (0.51-c)
     ac_out_ok: list = field(default_factory=lambda: [0] * NPH)
     ac_out: list = field(default_factory=lambda: [0.0] * NPH)
     bms_ok: list = field(default_factory=lambda: [0] * NBANK)    # Connected == 1 and /Soc valid
@@ -265,6 +268,7 @@ class State:
     bat1_first: int = 0
     do4_last: float = 0.0
     do4_over_since: float = 0.0                 # monotonic s since the PCC is above PCC_PEAK_TH, 0 = not (0.50-c)
+    acout_over_since: float = 0.0               # monotonic s since an AC-out feeds above ACOUT_FEED_MAX_W (0.51-c)
     pi_e_prev: float = 0.0
     pi_t_prev: float = 0.0
     setpoints: list = field(default_factory=lambda: [0] * NPH)
@@ -313,6 +317,8 @@ class Out:
     pi: Pi = field(default_factory=Pi)
     lead_event: int = 0
     do4_pulse: int = 0
+    do4_acout: int = 0                          # ... because of the AC-out feed (0.51-c), else the PCC
+    acout_feed_w: float = 0.0                   # largest PV feed into one AC-out this cycle (W, >= 0)
     lead_diff: float = 0.0
     chg_cap: list = field(default_factory=lambda: [0.0] * NPH)
     dis_cap: list = field(default_factory=lambda: [0.0] * NPH)
@@ -657,10 +663,11 @@ def bm_d4(b, peak_today):
     return int(cap and not cap_charge), int(cap), peak_today
 
 
-def bm_d5(pcc_over, grace_over, pcc_hard, lockout_over):
-    """D5 (grace 0.50-c). A fresh PCC above PCC_PEAK_TH for DO4_GRACE_S (R290 boost and air conditioning first), or
-    above DO4_HARD_W, and no pulse within DO4_LOCKOUT -> DO4 pulse"""
-    return int(bool(pcc_over and (grace_over or pcc_hard) and lockout_over))
+def bm_d5(pcc_over, grace_over, pcc_hard, lockout_over, acout_over):
+    """D5. A fresh PCC above PCC_PEAK_TH for DO4_GRACE_S (R290 boost and air conditioning first, 0.50-c) or above
+    DO4_HARD_W, or - grid offline - PV feeding more than ACOUT_FEED_MAX_W into one MultiPlus AC-out for ACOUT_FEED_S
+    (factor 1.0 rule, the FoxESS on AC-out1, no grace, 0.51-c), and no pulse within DO4_LOCKOUT -> DO4 pulse"""
+    return int(bool(((pcc_over and (grace_over or pcc_hard)) or acout_over) and lockout_over))
 
 
 # ---- the rule chain: one function per stage, run in this order by bm_step ------------------------------------
@@ -1045,9 +1052,22 @@ def bm_step(cfg, inp, st):
         st.do4_over_since = 0.0
     elif st.do4_over_since <= 0:
         st.do4_over_since = inp.now
+    feed = 0.0                               # AC-out: + = loads, - = PV feeding back
+    for p in range(NPH):
+        if inp.ac_out_ok[p] and -inp.ac_out[p] > feed:
+            feed = -inp.ac_out[p]
+    out.acout_feed_w = feed
+    # off-grid only (user 2026-10-10): with the grid there everything passes the transfer relay (bypass)
+    acout_now = bool(not inp.grid_ok and cfg.acout_feed_max_w > 0 and feed > cfg.acout_feed_max_w)
+    if not acout_now:
+        st.acout_over_since = 0.0
+    elif st.acout_over_since <= 0:
+        st.acout_over_since = inp.now
+    acout_over = acout_now and inp.now - st.acout_over_since >= cfg.acout_feed_s
     out.do4_pulse = bm_d5(pcc_over, pcc_over and inp.now - st.do4_over_since >= cfg.do4_grace_s,
                           pcc_over and inp.pcc > cfg.do4_hard_w,
-                          st.do4_last <= 0 or inp.now - st.do4_last >= DO4_LOCKOUT)
+                          st.do4_last <= 0 or inp.now - st.do4_last >= DO4_LOCKOUT, acout_over)
+    out.do4_acout = int(bool(out.do4_pulse and acout_over))
     if out.do4_pulse:
         st.do4_last = inp.now
     chain_pi(cfg, inp, st, out, c)

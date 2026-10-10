@@ -103,6 +103,8 @@ const struct bm_param BM_PARAMS[] = {
 	{"HOUSE_EST",             P(house_est),                 1000,    0,       5000,    "W", "summer peak window: house load assumed when turning the PV forecast into export"},
 	{"DO4_GRACE_S",           P(do4_grace_s),               120,     0,       600,     "s", "DO4 (FoxESS shedding) only after the PCC stays above 20 kW this long: R290 boost and air conditioning first"},
 	{"DO4_HARD_W",            P(do4_hard_w),                23000,   20000,   40000,   "W", "DO4 at once above this PCC export"},
+	{"ACOUT_FEED_MAX_W",      P(acout_feed_max_w),          5000,    0,       10000,   "W", "grid offline: DO4 when PV feeds more than this into one MultiPlus AC-out (factor 1.0 rule, 5000 VA; 0 = off)"},
+	{"ACOUT_FEED_S",          P(acout_feed_s),              10,      0,       120,     "s", "... for this long"},
 	{"CHARGER_DC_W",          P(charger_dc_w),              3600,    500,     5000,    "W", "full_at forecast: DC at the BMS per MultiPlus at its limit (measured 2026-10-09: ~3.6 kW, 65-67 A, flat over 53.6-54.6 V)"},
 };
 const int BM_NPARAMS = sizeof(BM_PARAMS) / sizeof(BM_PARAMS[0]);
@@ -573,10 +575,11 @@ int bm_d4(const struct bm_d4_in *b, const struct bm_d4_state *s, struct bm_d4_st
 	return *cap_active && !cap_charge;
 }
 
-/* D5. A fresh PCC above PCC_PEAK_TH for DO4_GRACE_S, or above DO4_HARD_W, and no pulse within DO4_LOCKOUT -> pulse */
+/* D5. A fresh PCC above PCC_PEAK_TH for DO4_GRACE_S or above DO4_HARD_W, or an AC-out feed above ACOUT_FEED_MAX_W for
+   ACOUT_FEED_S (protects the MultiPlus, no grace), and no pulse within DO4_LOCKOUT -> pulse */
 int bm_d5(const struct bm_d5_in *b)
 {
-	return b->pcc_over && (b->grace_over || b->pcc_hard) && b->lockout_over;
+	return ((b->pcc_over && (b->grace_over || b->pcc_hard)) || b->acout_over) && b->lockout_over;
 }
 
 /* ---- the rule chain (0.41-c): one function per stage, run in this order by bm_step ---------------------------------
@@ -1015,10 +1018,23 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 		st->do4_over_since = 0;
 	else if (st->do4_over_since <= 0)
 		st->do4_over_since = in->now;
+	double feed = 0;                                    /* AC-out: + = loads, - = PV feeding back */
+	for (int p = 0; p < NPH; p++)
+		if (in->ac_out_ok[p] && -in->ac_out[p] > feed)
+			feed = -in->ac_out[p];
+	out->acout_feed_w = feed;
+	/* off-grid only (user 2026-10-10): with the grid there everything passes the 50 A transfer relay (bypass) */
+	int acout_now = !in->grid_ok && cfg->acout_feed_max_w > 0 && feed > cfg->acout_feed_max_w;
+	if (!acout_now)
+		st->acout_over_since = 0;
+	else if (st->acout_over_since <= 0)
+		st->acout_over_since = in->now;
 	struct bm_d5_in d5 = {pcc_over, pcc_over && in->now - st->do4_over_since >= cfg->do4_grace_s,
 						  pcc_over && in->pcc > cfg->do4_hard_w,
-						  st->do4_last <= 0 || in->now - st->do4_last >= DO4_LOCKOUT};
+						  st->do4_last <= 0 || in->now - st->do4_last >= DO4_LOCKOUT,
+						  acout_now && in->now - st->acout_over_since >= cfg->acout_feed_s};
 	out->do4_pulse = bm_d5(&d5);
+	out->do4_acout = out->do4_pulse && d5.acout_over;
 	if (out->do4_pulse)
 		st->do4_last = in->now;
 	chain_pi(cfg, in, st, out, &c);

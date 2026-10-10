@@ -47,6 +47,7 @@ struct bm_cfg {
 	double fc_bad_target, wp_bat_share_bad;   /* bad forecast (target_soc >= this): stacks cover at most this % of the WP (0.37-c) */
 	double export_cap, house_est;   /* summer peak window (0.49-c): charge only the export above this W; house load guess */
 	double do4_grace_s, do4_hard_w; /* DO4 only after PCC > 20 kW for this long, at once above this (0.50-c) */
+	double acout_feed_max_w, acout_feed_s;   /* DO4 when PV feeds more than this into one AC-out for this long (0.51-c) */
 };
 
 /* parameter table: name (env BATMONITOR_<name>), default, allowed range, unit, meaning */
@@ -84,6 +85,8 @@ struct bm_in {
 	double fc_slot_kt[24];
 	int ac_ok[NPH];
 	double ac_in[NPH];                                      /* vebus /Ac/ActiveIn/Lx/P, + = the Multi takes */
+	int grid_ok;                                            /* vebus /Ac/ActiveIn/Connected == 1: grid there, transfer
+	                                                           relay closed (0.51-c: AC-out overfeed only matters off-grid) */
 	int ac_out_ok[NPH];
 	double ac_out[NPH];                                     /* vebus /Ac/Out/Lx/P: load on AC-out1 (0.36-c: read only,
 	                                                           not used by the logic until critical loads hang there) */
@@ -111,6 +114,7 @@ struct bm_state {
 	int bat1_first;                              /* Sofar Bat1 above BAT1_SOC_MIN: it discharges first (0.38-c) */
 	double do4_last;                             /* monotonic s of the last DO4 pulse, 0 = none (0.46-c) */
 	double do4_over_since;                       /* monotonic s since the PCC is above PCC_PEAK_TH, 0 = not (0.50-c) */
+	double acout_over_since;                     /* monotonic s since an AC-out feeds above ACOUT_FEED_MAX_W (0.51-c) */
 	double pi_e_prev, pi_t_prev;
 	int setpoints[NPH];                          /* sent last cycle (the PI's u_applied) */
 };
@@ -129,6 +133,8 @@ struct bm_out {
 	struct bm_pi pi;
 	int lead_event;                              /* 1 = a bank took the lead, -1 = back within SOC_BALANCE_OFF */
 	int do4_pulse;                               /* 1 = send the DO4 pulse "curtail WR2" now (D5, 0.46-c) */
+	int do4_acout;                               /* ... because of the AC-out feed (0.51-c), else the PCC */
+	double acout_feed_w;                         /* largest PV feed into one AC-out this cycle (W, >= 0) */
 	double lead_diff;
 	double chg_cap[NPH];                         /* W AC: charge ceiling per phase used this cycle */
 	double dis_cap[NPH];                         /* W AC: discharge ceiling per phase used this cycle */
@@ -257,6 +263,10 @@ struct bm_d5_in {
 	int grace_over;                              /* ... continuously for DO4_GRACE_S */
 	int pcc_hard;                                /* ... and > DO4_HARD_W */
 	int lockout_over;                            /* no pulse yet, or the last one DO4_LOCKOUT ago */
+	int acout_over;                              /* 0.51-c: grid offline and PV feeds more than ACOUT_FEED_MAX_W into
+	                                                one MultiPlus AC-out for ACOUT_FEED_S (factor 1.0 rule, 5000 VA per
+	                                                unit): the FoxESS on AC-out1 above 15 kW; at once, no grace. With the
+	                                                grid there the feed passes the transfer relay to the grid (bypass) */
 };
 int bm_d5(const struct bm_d5_in *b);                                  /* 1 = pulse now */
 #define DO4_LOCKOUT 300.0                    /* s between two pulses: WR2 needs its restart after a pulse */

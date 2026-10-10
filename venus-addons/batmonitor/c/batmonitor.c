@@ -77,7 +77,7 @@
 #include "bm_logic.h"
 #include "bm_parse.h"
 
-#define VERSION "0.50-c"
+#define VERSION "0.51-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
@@ -670,6 +670,8 @@ static void calc(void)
 	}
 	pthread_mutex_unlock(&mq_lock);
 	const char *vb = vebus();
+	double conn_in;
+	in.grid_ok = vb && get(vb, "/Ac/ActiveIn/Connected", &conn_in) == 0 && conn_in == 1.0;
 	for (int p = 0; p < NPH; p++) {
 		char path[32];
 		snprintf(path, sizeof(path), "/Ac/ActiveIn/%s/P", BM_PH[p]);
@@ -692,8 +694,12 @@ static void calc(void)
 	run_full_forecast(&in);
 
 	if (o_.do4_pulse) {
-		LOG("DO4 pulse (curtail WR2): PCC %.0f W > 20 kW for %.0f s%s", in.pcc, in.now - st.do4_over_since,
-			LIVE ? "" : " (dry run, not sent)");
+		if (o_.do4_acout)
+			LOG("DO4 pulse (curtail WR2): grid offline, PV feeds %.0f W into one AC-out > %.0f W for %.0f s%s", o_.acout_feed_w,
+				cfg.acout_feed_max_w, cfg.acout_feed_s, LIVE ? "" : " (dry run, not sent)");
+		else
+			LOG("DO4 pulse (curtail WR2): PCC %.0f W > 20 kW for %.0f s%s", in.pcc, in.now - st.do4_over_since,
+				LIVE ? "" : " (dry run, not sent)");
 		if (LIVE) {
 			do4_publish("1");
 			do4_off_at = mono() + DO4_PULSE_S;

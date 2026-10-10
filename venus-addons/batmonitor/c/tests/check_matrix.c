@@ -275,17 +275,18 @@ static void check_d4(void)
 /* ---- D5: DO4 pulse (0.46-c) ----------------------------------------------------------------------------------- */
 static void check_d5(void)
 {
-	for (int v = 0; v < 16; v++) {
-		struct bm_d5_in b = {BIT(v, 0), BIT(v, 1), BIT(v, 2), BIT(v, 3)};
+	for (int v = 0; v < 32; v++) {
+		struct bm_d5_in b = {BIT(v, 0), BIT(v, 1), BIT(v, 2), BIT(v, 3), BIT(v, 4)};
 		if ((b.grace_over || b.pcc_hard) && !b.pcc_over)  /* both are refinements of pcc_over */
 			continue;
 		int r = bm_d5(&b);
-		INV(!r || b.pcc_over, "DO4 only with a fresh PCC above 20 kW");
-		INV(!r || b.grace_over || b.pcc_hard, "DO4 only after the grace time or above the hard limit");
 		INV(!r || b.lockout_over, "DO4 at most once per DO4_LOCKOUT");
-		INV(r || !b.lockout_over || !(b.grace_over || b.pcc_hard), "DO4 always when due");
+		INV(!r || (b.pcc_over && (b.grace_over || b.pcc_hard)) || b.acout_over,
+			"DO4 only for a PCC export above 20 kW after the grace / above the hard limit, or an AC-out overfeed");
+		INV(r || !b.lockout_over || !(b.acout_over || (b.pcc_over && (b.grace_over || b.pcc_hard))), "DO4 always when due");
+		INV(!b.acout_over || !b.lockout_over || r, "an AC-out overfeed needs no PCC export and no grace");
 	}
-	printf("\nD5 DO4 pulse: 4 bits, grace / hard limit\n");
+	printf("\nD5 DO4 pulse: 5 bits (PCC grace / hard limit, AC-out overfeed)\n");
 }
 
 /* ---- D3 -------------------------------------------------------------------------------------------------------- */

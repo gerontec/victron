@@ -3,7 +3,7 @@
 // render: dot -Tpdf control_flow.dot -o control_flow.pdf   (or -Tpng)
 digraph control {
 	graph [rankdir=TB, fontname="Helvetica", fontsize=11, nodesep=0.5, ranksep=0.4, newrank=true,
-		   label="batmonitor 0.50-c: one cycle every 5 s   |   blue = decision (bits + state, make check)   |   green = matrix / amount   |   details: charge_flow.pdf, discharge_flow.pdf",
+		   label="batmonitor 0.51-c: one cycle every 5 s   |   blue = decision (bits + state, make check)   |   green = matrix / amount   |   details: charge_flow.pdf, discharge_flow.pdf",
 		   labelloc=t];
 	node [shape=box, style="rounded,filled", fillcolor="#f4f4f4", fontname="Helvetica", fontsize=10];
 	edge [fontname="Helvetica", fontsize=9];
@@ -33,7 +33,7 @@ digraph control {
 		src -> d3 -> damount -> dsplit;
 	}
 
-	d5 [label=<<b>D5</b> PCC &gt; 20 kW for 2 min (at once &gt; 23 kW) -&gt; DO4 pulse<br/>pv_relay/DO4 (FoxESS shedding)<br/>first: R290 boost + air conditioning at &ge; 18 kW>, fillcolor="#ffd09a"];
+	d5 [label=<<b>D5</b> PCC &gt; 20 kW for 2 min (at once &gt; 23 kW) -&gt; DO4 pulse<br/>pv_relay/DO4 (FoxESS shedding)<br/>first: R290 boost + air conditioning at &ge; 18 kW<br/>grid offline: AC-out feed &gt; 5 kW / unit for 10 s -&gt; at once>, fillcolor="#ffd09a"];
 	out [label=<<b>setpoints</b> per phase -&gt; Multis (+ charge / - discharge)<br/>rule text: mode WP: SRC: split [CCL / DCL / WPCAP]>, fillcolor="#ffffff"];
 
 	in -> d1 -> d2;

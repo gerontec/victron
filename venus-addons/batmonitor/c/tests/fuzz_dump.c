@@ -47,6 +47,14 @@ int main(int argc, char **argv)
 				in.fc_slot_kt[i] = 0.15 + 0.2 * ((run + i) % 5);
 			}
 			for (int p = 0; p < NPH; p++) { in.ac_ok[p] = ri(15) != 0; in.ac_in[p] = st.setpoints[p] + r(-200, 200); }
+			in.grid_ok = 1;
+			if (run % 5 == 1 && k >= 60 && k < 100) {       /* 0.51-c: PV feed into AC-out, grid off part of the time */
+				in.grid_ok = (k / 10) % 2;                  /* (deterministic, no rand) */
+				for (int p = 0; p < NPH; p++) {
+					in.ac_out_ok[p] = 1;
+					in.ac_out[p] = p == 1 ? -(4000 + 100 * (k % 25)) : 30;
+				}
+			}
 			for (int b = 0; b < NBANK; b++) {
 				soc[b] += r(-3, 3); if (soc[b] < 0) soc[b] = 0; if (soc[b] > 100) soc[b] = 100;
 				in.bms_ok[b] = ri(25) != 0; in.soc[b] = ri(8) ? soc[b] : r(0, 10);
@@ -65,6 +73,9 @@ int main(int argc, char **argv)
 				for (int b = 0; b < NBANK; b++)
 					printf(" %d %.17g %d %.17g %d %.17g %d %.17g %.17g", in.bms_ok[b], in.soc[b], in.power_ok[b],
 						   in.power[b], in.volt_ok[b], in.volt[b], in.lim_ok[b], in.ccl[b], in.dcl[b]);
+				printf(" %d", in.grid_ok);
+				for (int p = 0; p < NPH; p++)
+					printf(" %d %.17g", in.ac_out_ok[p], in.ac_out[p]);
 				printf(" %.17g %d", in.fc_corr, in.fc_n);
 				for (int i = 0; i < in.fc_n; i++)
 					printf(" %lld %.17g", (long long)in.fc_slot_t[i], in.fc_slot_kt[i]);
