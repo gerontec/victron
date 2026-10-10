@@ -75,8 +75,9 @@
 #include <time.h>
 #include <unistd.h>
 #include "bm_logic.h"
+#include "bm_wire.h"
 
-#define VERSION "0.46-c"
+#define VERSION "0.47-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
@@ -85,6 +86,8 @@
 #define FORECAST_TOPIC "batmonitor/forecast"   /* forecast.py on .218, hourly: {"target_soc", ..., "ts"} */
 #define PEAK_MODEL_TOPIC "batmonitor/peak_model"   /* out, retained, every PEAK_MODEL_SECONDS: for r290_boost.py */
 #define PEAK_MODEL_SECONDS 60.0
+#define SHADOW_IN_TOPIC "batmonitor/shadow_in"     /* out, every cycle: bm_in + venus_sp for the ESP32 shadow (0.47-c) */
+#define SHADOW_CFG_TOPIC "batmonitor/shadow_cfg"   /* out, retained, every PEAK_MODEL_SECONDS: the parameters */
 #define DO4_TOPIC "pv_relay/DO4"      /* out, not retained: "1" for DO4_PULSE_S, then "0" (relay: curtail WR2, 0.46-c) */
 #define STATE_FILE_DEFAULT "/data/batmonitor/state.json"
 #define TZ_BERLIN "CET-1CEST,M3.5.0,M10.5.0/3"   /* Europe/Berlin without a zoneinfo file */
@@ -605,6 +608,28 @@ static void do4_publish(const char *v)
 		LOGE("DO4=%s publish failed", v);
 }
 
+/* ESP32 shadow (0.47-c): the inputs of this cycle and our setpoints, so the shadow runs bm_step on the same data and
+   compares; the parameters retained once a minute */
+static void publish_shadow(const struct bm_in *in, double now)
+{
+	static double last_cfg;
+	char buf[2560];
+	if (!mosq_g)
+		return;
+	int n = bm_wire_in_encode(in, buf, sizeof(buf) - 96);
+	if (n < 0) {
+		LOGE("shadow: bm_in does not fit");
+		return;
+	}
+	n += snprintf(buf + n, sizeof(buf) - n, ";venus_sp=%d,%d,%d;venus_v=%s", o_.sp[0], o_.sp[1], o_.sp[2], VERSION);
+	mosquitto_publish(mosq_g, NULL, SHADOW_IN_TOPIC, n, buf, 0, false);
+	if (last_cfg > 0 && now - last_cfg < PEAK_MODEL_SECONDS)
+		return;
+	n = bm_wire_cfg_encode(&cfg, buf, sizeof(buf));
+	if (n > 0 && mosquitto_publish(mosq_g, NULL, SHADOW_CFG_TOPIC, n, buf, 1, true) == MOSQ_ERR_SUCCESS)
+		last_cfg = now;
+}
+
 /* the charge block's clear-sky peak model, retained, once a minute (same fields as the ESP's sofar/state model) */
 static void publish_peak_model(double now)
 {
@@ -672,6 +697,7 @@ static void calc(void)
 	}
 
 	bm_step(&cfg, &in, &st, &o_);
+	publish_shadow(&in, in.now);
 	in_last = in;
 	run_full_forecast(&in);
 

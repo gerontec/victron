@@ -4,15 +4,15 @@ CFLAGS ?= -O2 -Wall -Wextra
 CPPFLAGS += -Iinclude -I/usr/include/dbus-1.0 -I/usr/lib/dbus-1.0/include
 LDLIBS += -l:libdbus-1.so.3 -l:libmosquitto.so.1 -l:libcjson.so.1 -lpthread -lm
 
-batmonitor: batmonitor.c bm_logic.c bm_logic.h
-	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ batmonitor.c bm_logic.c $(LDLIBS)
+batmonitor: batmonitor.c bm_logic.c bm_logic.h bm_wire.c bm_wire.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ batmonitor.c bm_logic.c bm_wire.c $(LDLIBS)
 
 # logic tests with a plant model: no D-Bus/MQTT needed, runs on any host (dell, notebook, Venus)
 test: tests/test_logic
 	./tests/test_logic
 
-tests/test_logic: tests/test_logic.c bm_logic.c bm_logic.h
-	$(CC) $(CFLAGS) -I. -o $@ tests/test_logic.c bm_logic.c -lm
+tests/test_logic: tests/test_logic.c bm_logic.c bm_logic.h bm_wire.c bm_wire.h
+	$(CC) $(CFLAGS) -I. -o $@ tests/test_logic.c bm_logic.c bm_wire.c -lm
 
 clean:
 	rm -f batmonitor tests/test_logic tests/check_matrix

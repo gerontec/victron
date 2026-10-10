@@ -8,6 +8,10 @@
 
 #include <time.h>
 
+#ifdef __cplusplus
+extern "C" {                         /* the ESP32 shadow (ESPHome, C++) calls the C logic */
+#endif
+
 #define NPH 3
 #define NBANK 2
 #define CYCLE_SECONDS 5
@@ -259,5 +263,9 @@ struct bm_fc_out {
 	int weather;                        /* 1 = OWM slots used, 0 = monthly kt */
 };
 void bm_full_forecast(const struct bm_cfg *cfg, const struct bm_fc_in *in, struct bm_fc_out *out);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

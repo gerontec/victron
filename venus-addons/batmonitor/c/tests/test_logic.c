@@ -10,6 +10,7 @@
  */
 #define _GNU_SOURCE
 #include "bm_logic.h"
+#include "bm_wire.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -612,6 +613,45 @@ static void test_do4_pulse(void)
 	CHECK(r.do4_pulses == 0, "stale PCC: no pulse, got %d", r.do4_pulses);
 }
 
+/* 0.47-c: bm_wire carries bm_in and the parameters bit exact; a decoded copy runs bm_step to the same result */
+static void test_wire_roundtrip(void)
+{
+	struct run r;
+	struct plant pl = BASE(.pv = 9000, .house = 700, .wp = 1500, .r290_hz = 40, .soc = {63.7, 41.2}, .volt = {53.1, 52.4},
+						   .fc_target = 80, .bat1_soc = 37);
+	simulate(&r, &pl, local_time(2026, 6, 21, 10, 0), 30);
+	char a[2048], b[2048], c[1024], d[1024];
+	struct bm_in in2;
+	memset(&in2, 0, sizeof(in2));
+	int na = bm_wire_in_encode(&r.in, a, sizeof(a));
+	int got = bm_wire_in_decode(a, &in2);
+	bm_wire_in_encode(&in2, b, sizeof(b));
+	CHECK(na > 0 && got == 35 && !strcmp(a, b), "bm_in round trip bit exact (%d bytes, %d keys)", na, got);
+	CHECK(bm_wire_in_encode(&r.in, a, 64) == -1, "too small a buffer reports -1");
+
+	struct bm_cfg cfg2;
+	bm_cfg_default(&cfg2);
+	r.cfg.w_max = 7777;
+	r.cfg.soc_min = 12.5;
+	r.cfg.ladesperre = 0;
+	bm_wire_cfg_encode(&r.cfg, c, sizeof(c));
+	bm_wire_cfg_decode(c, &cfg2);
+	bm_wire_cfg_encode(&cfg2, d, sizeof(d));
+	CHECK(!strcmp(c, d) && cfg2.w_max == 7777 && !cfg2.ladesperre, "parameters round trip by name");
+	CHECK(bm_wire_in_decode("bogus=1;pcc=123.5;x", &in2) == 1 && in2.pcc == 123.5, "unknown keys skipped");
+
+	/* the shadow: same state, decoded inputs -> the same setpoints */
+	struct bm_state s1 = r.st, s2 = r.st;
+	struct bm_out o1, o2;
+	bm_wire_in_encode(&r.in, a, sizeof(a));             /* a was cut by the 64 byte test above */
+	memset(&in2, 0, sizeof(in2));
+	bm_wire_in_decode(a, &in2);
+	bm_step(&r.cfg, &r.in, &s1, &o1);
+	bm_step(&r.cfg, &in2, &s2, &o2);
+	CHECK(!memcmp(o1.sp, o2.sp, sizeof(o1.sp)) && !strcmp(o1.why[0], o2.why[0]), "decoded inputs, same setpoints %d/%d",
+		  o1.sp[0], o2.sp[0]);
+}
+
 static void test_bat1_first(void)
 {
 	struct run r;
@@ -844,6 +884,7 @@ int main(void)
 	test_forecast_bad_caps_wp();
 	test_forecast_keeps_source();
 	test_do4_pulse();
+	test_wire_roundtrip();
 	test_bat1_first();
 	test_pi_shadow_not_armed();
 	test_fc_sunset_limits();
