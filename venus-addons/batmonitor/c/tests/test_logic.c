@@ -168,7 +168,7 @@ static void test_winter_wp_from_grid(void)
 	print_state("winter night, WP 4 kW, Sofar empty", &r);
 	CHECK(abs(sum_sp(&r) + 500) <= 60, "Multis should cover the house 500 W only, sp sum %d", sum_sp(&r));
 	CHECK(fabs(r.pcc + 4000) <= 80, "the heat pump should come from the grid, pcc %.0f", r.pcc);
-	CHECK(rule_has(&r, "|Z2"), "rule should carry |Z2");
+	CHECK(rule_has(&r, "WP:Z2"), "rule should carry |Z2");
 	CHECK(pcc_swing(&r, 20) < 100, "no oscillation, swing %.0f", pcc_swing(&r, 20));
 }
 
@@ -190,7 +190,7 @@ static void test_summer_wp_from_battery(void)
 	print_state("summer night, WP 1.2 kW, Sofar empty", &r);
 	CHECK(abs(sum_sp(&r) + 1700) <= 60, "Multis should cover house + WP 1700 W, sp sum %d", sum_sp(&r));
 	CHECK(fabs(r.pcc) <= 80, "no grid import in summer, pcc %.0f", r.pcc);
-	CHECK(!rule_has(&r, "|Z2"), "no |Z2 in summer");
+	CHECK(!rule_has(&r, "WP:Z2"), "no |Z2 in summer");
 }
 
 static void test_summer_wp_4kw_from_battery(void)
@@ -216,7 +216,7 @@ static void test_w_max_and_phase_cap(void)
 	pl = BASE(.house = 6000, .soc = {60, 50}, .season = BM_SUMMER, .season_age_h = 1);
 	simulate(&r, &pl, local_time(2026, 7, 15, 23, 0), 60);       /* Stack1 leads, but L1 alone cannot give 6 kW */
 	print_state("Stack1 leads, house 6 kW", &r);
-	CHECK(r.out.sp[0] == -3800 && rule_has(&r, "BALANCE_SPILL"), "L1 at 3800 W, the rest spills to L2/L3, got %d %d %d",
+	CHECK(r.out.sp[0] == -3800 && rule_has(&r, " SPILL"), "L1 at 3800 W, the rest spills to L2/L3, got %d %d %d",
 		  r.out.sp[0], r.out.sp[1], r.out.sp[2]);
 	CHECK(fabs(r.pcc) <= 80, "house covered, pcc %.0f", r.pcc);
 }
@@ -303,10 +303,10 @@ static void test_bms_current_limits(void)
 						   .ccl = {15, 586}, .dcl = {200, 586});
 	simulate(&r, &pl, local_time(2026, 3, 10, 12, 0), 40);
 	print_state("day, MUST CCL 15 A", &r);
-	CHECK(r.out.sp[0] >= 880 && r.out.sp[0] <= 888 && strstr(r.out.why[0], "|CCL"), "L1 at the CCL ~887 W, got %d (%s)",
+	CHECK(r.out.sp[0] >= 880 && r.out.sp[0] <= 888 && strstr(r.out.why[0], " CCL"), "L1 at the CCL ~887 W, got %d (%s)",
 		  r.out.sp[0], r.out.why[0]);
 	CHECK(r.out.sp[1] >= 4000 && r.out.sp[2] >= 4000, "L2/L3 at their charger ceiling, got %d %d", r.out.sp[1], r.out.sp[2]);
-	CHECK(!strstr(r.out.why[1], "|CCL"), "no CCL tag on L2 (%s)", r.out.why[1]);
+	CHECK(!strstr(r.out.why[1], " CCL"), "no CCL tag on L2 (%s)", r.out.why[1]);
 
 	pl.ccl[0] = 0;                                             /* CCL 0: Stack1 takes nothing */
 	simulate(&r, &pl, local_time(2026, 3, 10, 12, 0), 40);
@@ -323,7 +323,7 @@ static void test_bms_current_limits(void)
 						   .ccl = {100, 586}, .dcl = {10, 586});
 	simulate(&r, &pd, local_time(2026, 7, 15, 23, 0), 60);
 	print_state("night, MUST DCL 10 A", &r);
-	CHECK(r.out.sp[0] <= -480 && r.out.sp[0] >= -484 && strstr(r.out.why[0], "|DCL"), "L1 at the DCL ~-484 W, got %d (%s)",
+	CHECK(r.out.sp[0] <= -480 && r.out.sp[0] >= -484 && strstr(r.out.why[0], " DCL"), "L1 at the DCL ~-484 W, got %d (%s)",
 		  r.out.sp[0], r.out.why[0]);
 	CHECK(abs(sum_sp(&r) + 2000) <= 30, "house covered by L2/L3, sp sum %d", sum_sp(&r));
 }
@@ -380,7 +380,7 @@ static void test_force_charge(void)
 	CHECK(abs(r.out.sp[1] + r.out.sp[2] + 200) <= 30, "Stack2 covers only the house deficit 200 W, L2+L3 %d",
 		  r.out.sp[1] + r.out.sp[2]);
 	CHECK(fabs(r.pcc + 500) <= 40, "the force charge comes from the grid, pcc %.0f", r.pcc);
-	CHECK(strstr(r.out.why[0], "FORCE_CHARGE") != NULL, "rule FORCE_CHARGE, got %s", r.out.why[0]);
+	CHECK(strstr(r.out.why[0], "FORCE(") != NULL, "rule FORCE_CHARGE, got %s", r.out.why[0]);
 }
 
 static void test_discharge_protection(void)
@@ -390,7 +390,7 @@ static void test_discharge_protection(void)
 	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 10);
 	print_state("Stack2 at 4 %", &r);
 	CHECK(r.out.sp[1] == 0 && r.out.sp[2] == 0, "no discharge on L2/L3, got %d %d", r.out.sp[1], r.out.sp[2]);
-	CHECK(strstr(r.out.why[1], "DISCHARGE_PROTECTION") != NULL, "rule DISCHARGE_PROTECTION, got %s", r.out.why[1]);
+	CHECK(strstr(r.out.why[1], "PROT(") != NULL, "rule DISCHARGE_PROTECTION, got %s", r.out.why[1]);
 }
 
 static void test_stale(void)
@@ -408,7 +408,7 @@ static void test_wp_cap_fallback(void)
 	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 40);       /* SDM72D silent: old 1000 W cap */
 	print_state("winter, em0/power stale, R290 running", &r);
 	CHECK(sum_sp(&r) >= -1000 && sum_sp(&r) <= -990, "WP_CAP 1000 W, sp sum %d", sum_sp(&r));
-	CHECK(rule_has(&r, "WP_CAP"), "rule WP_CAP");
+	CHECK(rule_has(&r, "WPCAP"), "rule WP_CAP");
 }
 
 static void test_balance(void)
@@ -464,7 +464,7 @@ static void test_season_measured_overrides_months(void)
 	pl.season = BM_WINTER;
 	simulate(&r, &pl, local_time(2026, 5, 10, 23, 0), 60);       /* May, but measured: still winter */
 	print_state("May night, season.py says winter", &r);
-	CHECK(r.out.season == BM_WINTER && rule_has(&r, "|Z2"), "measured winter used, Z2 rule");
+	CHECK(r.out.season == BM_WINTER && rule_has(&r, "WP:Z2"), "measured winter used, Z2 rule");
 	CHECK(abs(sum_sp(&r) + 500) <= 60, "Multis cover only the house, sp sum %d", sum_sp(&r));
 }
 
@@ -488,7 +488,7 @@ static void test_transition_wp_1900(void)
 	CHECK(r.out.season == BM_TRANSITION, "transition used");
 	CHECK(fabs(r.pcc + 600) <= 40, "WP above 1900 W from the grid: pcc -600, got %.0f", r.pcc);
 	CHECK(abs(sum_sp(&r) + 1900) <= 30, "batteries give 1900 W to the heat pump, sp sum %d", sum_sp(&r));
-	CHECK(rule_has(&r, "|WP1900"), "rule |WP1900");
+	CHECK(rule_has(&r, "WP:T1900"), "rule |WP1900");
 
 	pl.wp = 1500;                                               /* below 1900 W: all from the batteries */
 	simulate(&r, &pl, local_time(2026, 10, 9, 14, 0), 60);
@@ -522,13 +522,13 @@ static void test_forecast_overrides_winter(void)
 						   .fc_target = 20, .soc = {50, 50});
 	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 60);       /* sunny day ahead: stacks may run down to 20 % */
 	print_state("winter, forecast target 20 %, SoC 50", &r);
-	CHECK(r.out.fc_active && rule_has(&r, "|FC"), "forecast rule active");
+	CHECK(r.out.fc_active && rule_has(&r, "WP:FC "), "forecast rule active");
 	CHECK(abs(sum_sp(&r) + 4500) <= 60, "house + heat pump from the batteries, sp sum %d", sum_sp(&r));
 
 	pl.soc[0] = pl.soc[1] = 18;                                  /* below the target: tariff rules again */
 	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 60);
 	print_state("winter, forecast target 20 %, SoC 18", &r);
-	CHECK(!r.out.fc_active && rule_has(&r, "|Z2"), "below target: Z2 again");
+	CHECK(!r.out.fc_active && rule_has(&r, "WP:Z2"), "below target: Z2 again");
 	CHECK(abs(sum_sp(&r) + 500) <= 60, "only the house, sp sum %d", sum_sp(&r));
 
 	pl.soc[0] = pl.soc[1] = 21;                                  /* inside the hysteresis: not back on from cold */
@@ -538,7 +538,7 @@ static void test_forecast_overrides_winter(void)
 	pl.soc[0] = pl.soc[1] = 50;
 	pl.fc_age_h = 4;                                             /* stale forecast */
 	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 30);
-	CHECK(!r.out.fc_active && rule_has(&r, "|Z2"), "stale forecast ignored");
+	CHECK(!r.out.fc_active && rule_has(&r, "WP:Z2"), "stale forecast ignored");
 }
 
 static void test_forecast_bad_caps_wp(void)
@@ -553,7 +553,7 @@ static void test_forecast_bad_caps_wp(void)
 	pl.fc_target = 100;                                          /* rain day ahead: free_kwh 0 */
 	simulate(&r, &pl, local_time(2026, 10, 10, 2, 0), 60);
 	print_state("transition, forecast target 100 %, WP 1.6 kW", &r);
-	CHECK(r.out.fc_bad && rule_has(&r, "|FCBAD"), "bad forecast flagged");
+	CHECK(r.out.fc_bad && rule_has(&r, "WP:FCBAD"), "bad forecast flagged");
 	CHECK(abs(sum_sp(&r) + 1300) <= 60, "house + half the WP, sp sum %d", sum_sp(&r));
 
 	pl.wp = 5000;                                                /* 50 % = 2500 W > 1900 W: the transition cap stays */
@@ -577,7 +577,7 @@ static void test_bat1_first(void)
 						   .sofar_dis = 1, .sofar_chg = 1, .bat1_soc = 36, .soc = {50, 50});
 	simulate(&r, &pl, local_time(2026, 10, 10, 2, 0), 60);       /* Sofar 36 %: it covers house + WP alone */
 	print_state("night, Sofar 36 %, WP 1.6 kW", &r);
-	CHECK(r.out.bat1_first && rule_has(&r, "|B1FIRST"), "Sofar first flagged");
+	CHECK(r.out.bat1_first && rule_has(&r, "SRC:B1 "), "Sofar first flagged");
 	CHECK(sum_sp(&r) >= -30, "stacks idle, sp sum %d", sum_sp(&r));
 	CHECK(fabs(r.bat1 + 2100) <= 60 && fabs(r.pcc) <= 60, "Bat1 2.1 kW, no import, bat1 %.0f pcc %.0f", r.bat1, r.pcc);
 

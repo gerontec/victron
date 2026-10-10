@@ -76,7 +76,7 @@
 #include <unistd.h>
 #include "bm_logic.h"
 
-#define VERSION "0.41-c"
+#define VERSION "0.42-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
@@ -553,9 +553,12 @@ static void write_state(const int *sp, char why[][WHY_LEN], double surplus)
 	o = cJSON_AddObjectToObject(js, "forecast_rule");
 	cJSON_AddNumberToObject(o, "active", o_.fc_active);
 	cJSON_AddNumberToObject(o, "bad", o_.fc_bad);
-	cJSON_AddNumberToObject(js, "bat1_first", o_.bat1_first);
 	cJSON_AddNumberToObject(o, "target_soc", o_.fc_target);
 	cJSON_AddNumberToObject(o, "min_soc", o_.fc_min_soc);
+	cJSON_AddNumberToObject(js, "bat1_first", o_.bat1_first);
+	o = cJSON_AddObjectToObject(js, "chain");                  /* 0.42-c: S2 / S3 reasons, as in the rule text */
+	cJSON_AddStringToObject(o, "wp", o_.wp_why);
+	cJSON_AddStringToObject(o, "src", o_.src_why);
 	o = cJSON_AddObjectToObject(js, "pi");
 	cJSON_AddNumberToObject(o, "armed", cfg.pi_armed);
 	cJSON_AddNumberToObject(o, "y_w", round(o_.pi.y));

@@ -42,7 +42,7 @@ int main(int argc, char **argv)
 				in.lim_ok[b] = ri(2); in.ccl[b] = r(0, 150); in.dcl[b] = r(0, 250);
 			}
 			bm_step(&cfg, &in, &st, &out);
-			printf("%d %d %d %d %d|%s|%s|%s|%.3f %.3f %.3f %.3f %d %d %d %d %d %d\n", run, k, out.sp[0], out.sp[1], out.sp[2],
+			printf("%d %d %d %d %d\t%s\t%s\t%s\t%.3f %.3f %.3f %.3f %d %d %d %d %d %d\n", run, k, out.sp[0], out.sp[1], out.sp[2],
 				   out.why[0], out.why[1], out.why[2], out.wp_eff, out.surplus, out.pi.u, out.pi.y, out.pi.sp[0], out.pi.sp[1],
 				   out.pi.sp[2], out.fc_active, out.fc_bad, out.bat1_first);
 		}

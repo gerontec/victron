@@ -343,7 +343,7 @@ static void alloc_discharge(int lead, int w, const int *dis, const double *dcap,
 		for (int p = 0; p < NPH; p++)
 			if (dis[p]) {
 				sp[p] = -(int)want[p];
-				snprintf(why[p], WHY_LEN, "%s", rule);
+				snprintf(why[p], WHY_LEN, "%s EQ", rule);
 			}
 		return;
 	}
@@ -367,7 +367,7 @@ static void alloc_discharge(int lead, int w, const int *dis, const double *dcap,
 		if (!dis[p])
 			continue;
 		sp[p] = give[p] ? -share : -extra;
-		snprintf(why[p], WHY_LEN, "%s%s", rule, give[p] ? "|BALANCE" : extra ? "|BALANCE_SPILL" : "|BALANCE_HOLD");
+		snprintf(why[p], WHY_LEN, "%s%s", rule, give[p] ? " BAL" : extra ? " SPILL" : " WAIT");
 	}
 }
 
@@ -401,7 +401,7 @@ static int charge_order(int lead, int *order)
    the stack behind first; what is left up to CHARGE_MAX_PHASE on all phases alike. cap[] (0.29-c): the real ceiling
    per phase (charger 70 A x BMS voltage); with a measured voltage nothing spills above it */
 static void alloc_charge(const struct bm_cfg *cfg, int lead, double rest, const int *chg, int n_chg, const double *cap,
-						 int *sp, char why[][WHY_LEN])
+						 int *sp)
 {
 	int order[NBANK], k = charge_order(lead, order);
 	for (int i = 0; i < k; i++) {
@@ -415,10 +415,8 @@ static void alloc_charge(const struct bm_cfg *cfg, int lead, double rest, const 
 		for (int j = 0; j < n; j++)
 			bank_cap += fmin(cfg->charger_cap_phase, cap[ph[j]]);
 		double share = fmin(rest, bank_cap);
-		for (int j = 0; j < n; j++) {
+		for (int j = 0; j < n; j++)
 			sp[ph[j]] = (int)(share / n);
-			strncat(why[ph[j]], "|CHARGE", WHY_LEN - 1 - strlen(why[ph[j]]));
-		}
 		rest -= share;
 	}
 	if (rest > 0)
@@ -438,7 +436,17 @@ static void alloc_charge(const struct bm_cfg *cfg, int lead, double rest, const 
    S4 amount  discharge W (PROPORTIONAL / IDLE + tags), charge W
    S5 split   alloc_discharge / alloc_charge over the phases, BMS limit tags
    PI         shadow prototype (not armed), reads the same stages
-   A stage reads the results of the stages before it and changes none of them. */
+   A stage reads the results of the stages before it and changes none of them.
+   Rule text per phase (0.42-c, one reason per stage, at most 48 characters for pv_victron.bm_lX_rule):
+     <S1/S4 mode> [WP:<S2>] [SRC:<S3>] [<S5 split>] [<limit>]
+     mode   BMS_MISSING  FORCE(soc)  STALE  LADESPERRE(peak h)  CHARGE  FULL  PROT(soc)  CHARGING(W)  PROP  IDLE
+     WP     OFF (< WP_ON_TH)  NA (em0/power stale)  FC (forecast: all)  FCBAD (bad forecast cap)  Z2 (winter: none)
+            T1900 (transition cap binds)  ALL
+     SRC    DAY  STK (night floor: stacks take over the Sofar)  B1 (Sofar first, B1FIRST)  B1W (winter, WP running)
+     split  EQ (same power per stack)  BAL (lead stack alone / charged last)  SPILL (lead at its cap, rest to the
+            others)  WAIT (the other stack while the lead discharges)
+     limit  WPCAP  CCL  DCL
+     PI(+u) when the PI prototype is armed */
 struct chain {
 	int stale, wp_running, wp_fresh, wp_on, night;
 	int season_wp;                     /* season for the heat pump rules: FC_ACTIVE serves it as in summer (0.24) */
@@ -545,7 +553,7 @@ static void chain_gates(const struct bm_cfg *cfg, const struct bm_in *in, struct
 /* S2: the heat pump power the stacks must NOT cover (Z2 point = Z1 PCC + that, 0.19): all of it in winter, the part
    above WP_BAT_MAX_TRANSITION in the transition (0.22), none in summer; with a bad forecast the stacks cover at most
    WP_BAT_SHARE_BAD % (0.37-c). The smallest cap wins */
-static void chain_scope(const struct bm_cfg *cfg, const struct bm_in *in, const struct bm_out *out, struct chain *c)
+static void chain_scope(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_out *out, struct chain *c)
 {
 	if (c->wp_fresh && in->wp > 0) {
 		double share = c->season_wp == BM_WINTER ? 0.0
@@ -558,6 +566,9 @@ static void chain_scope(const struct bm_cfg *cfg, const struct bm_in *in, const 
 		c->wp_eff = in->wp - share;
 	}
 	c->z2 = in->pcc + c->wp_eff;
+	snprintf(out->wp_why, sizeof(out->wp_why), "%s", !c->wp_fresh ? "NA" : !c->wp_on ? "OFF" : out->fc_active ? "FC"
+			 : c->wp_fc_capped ? "FCBAD" : c->season_wp == BM_WINTER ? "Z2"
+			 : c->season_wp == BM_TRANSITION && in->wp > cfg->wp_bat_max_transition ? "T1900" : "ALL");
 }
 
 /* S3: who delivers first at night. Sofar first (0.38-c, user 2026-10-10): while the heat pump runs and the Sofar Bat1
@@ -575,6 +586,7 @@ static void chain_source(const struct bm_cfg *cfg, const struct bm_in *in, struc
 	c->b1_first = st->bat1_first && c->wp_on;
 	out->bat1_first = c->b1_first;
 	c->night_floor = c->night && !c->b1_first && (c->season_wp != BM_WINTER || !c->wp_on);
+	snprintf(out->src_why, sizeof(out->src_why), "%s", !c->night ? "DAY" : c->b1_first ? "B1" : c->night_floor ? "STK" : "B1W");
 }
 
 /* S1: charge or discharge, then per phase the first matching state */
@@ -596,29 +608,31 @@ static void chain_mode(const struct bm_cfg *cfg, const struct bm_in *in, struct 
 	/* surplus includes the own charging: once charging, it holds down to SOYO_HOLD_TH instead of 200 W */
 	c->charge_mode = c->surplus > PCC_SURPLUS_TH || (st->soyo_chg_prev && c->surplus > SOYO_HOLD_TH);
 	for (int b = 0; b < NBANK; b++) {
-		const char *bn = BM_BANKS[b].name;
 		for (int i = 0; i < BM_BANKS[b].nph; i++) {
 			int p = BM_BANKS[b].ph[i];
 			sp[p] = 0;
 			if (!st->soc_ok[b])
-				snprintf(why[p], WHY_LEN, "%s:BMS_MISSING", bn);
+				snprintf(why[p], WHY_LEN, "BMS_MISSING");
 			else if (st->force[b]) {
 				sp[p] = (int)cfg->force_charge_w;
-				snprintf(why[p], WHY_LEN, "%s:FORCE_CHARGE(%.1f%%)", bn, st->soc[b]);
+				snprintf(why[p], WHY_LEN, "FORCE(%.1f%%)", st->soc[b]);
 			} else if (c->stale)
 				snprintf(why[p], WHY_LEN, "STALE");
 			else if (c->charge_mode && c->block)
-				snprintf(why[p], WHY_LEN, "%s:LADESPERRE(peak %dh)", bn, out->ls.peak_h);
+				snprintf(why[p], WHY_LEN, "LADESPERRE(%dh)", out->ls.peak_h);
 			else if (c->charge_mode) {
-				snprintf(why[p], WHY_LEN, "%s:PV_SURPLUS", bn);
+				if (st->soc[b] < 100.0)
+					snprintf(why[p], WHY_LEN, "CHARGE WP:%s SRC:%s", out->wp_why, out->src_why);
+				else
+					snprintf(why[p], WHY_LEN, "FULL");
 				if (st->soc[b] < 100.0) {
 					c->charge[p] = 1;
 					c->n_chg++;
 				}
 			} else if (st->prot[b])
-				snprintf(why[p], WHY_LEN, "%s:DISCHARGE_PROTECTION(%.1f%%)", bn, st->soc[b]);
+				snprintf(why[p], WHY_LEN, "PROT(%.1f%%)", st->soc[b]);
 			else if (in->power_ok[b] && in->power[b] > CHARGING_TH)
-				snprintf(why[p], WHY_LEN, "%s:CHARGING(%.0fW)", bn, in->power[b]);
+				snprintf(why[p], WHY_LEN, "CHARGING(%.0fW)", in->power[b]);
 			else {
 				c->discharge[p] = 1;
 				c->n_dis++;
@@ -647,28 +661,22 @@ static void chain_discharge(const struct bm_cfg *cfg, const struct bm_in *in, st
 		w = deficit > 0 ? (int)deficit : 0;   /* never turn a discharge into charging (Sofar TOU charge) */
 		if (w > (int)cfg->w_max)
 			w = (int)cfg->w_max;
-		strcpy(rule, "PROPORTIONAL");
+		strcpy(rule, "PROP");
 		st->soyo_prop_prev = 1;
 	} else {
 		st->soyo_prop_prev = 0;
 		w = c->night_floor ? 0 : B_DAY_IDLE;
 		strcpy(rule, "IDLE");
 	}
-	if (c->night)
-		strcat(rule, "|NIGHT");
-	if (c->wp_eff >= WP_ON_TH && !c->wp_fc_capped)
-		strcat(rule, c->season_wp == BM_TRANSITION ? "|WP1900" : "|Z2");
-	if (st->fc_active)
-		strcat(rule, "|FC");
-	if (c->night && c->b1_first)
-		strcat(rule, "|B1FIRST");
-	if (out->fc_bad && c->wp_on)
-		strcat(rule, "|FCBAD");
-	if (!c->wp_fresh && c->winter && c->wp_running && w > (int)cfg->wp_cap) {
+	snprintf(rule + strlen(rule), sizeof(rule) - strlen(rule), " WP:%s SRC:%s", out->wp_why, out->src_why);
+	int wp_cap = !c->wp_fresh && c->winter && c->wp_running && w > (int)cfg->wp_cap;
+	if (wp_cap)
 		w = (int)cfg->wp_cap;
-		strcat(rule, "|WP_CAP");
-	}
 	alloc_discharge(st->lead, w, c->discharge, out->dis_cap, rule, out->sp, out->why);
+	if (wp_cap)
+		for (int p = 0; p < NPH; p++)
+			if (c->discharge[p])
+				strncat(out->why[p], " WPCAP", WHY_LEN - 1 - strlen(out->why[p]));
 }
 
 /* S4 + S5 charge: own charge + KP x (Z2 surplus incl. the Sofar charge share), at most the phase ceilings */
@@ -679,7 +687,10 @@ static void chain_charge(const struct bm_cfg *cfg, const struct bm_state *st, st
 		if (c->charge[p])
 			cap_sum += out->chg_cap[p];
 	alloc_charge(cfg, st->lead, fmin((int)(c->own_charge + KP * (c->chg_ref + c->bat1_eff - cfg->soyo_target)), cap_sum),
-				 c->charge, c->n_chg, out->chg_cap, out->sp, out->why);
+				 c->charge, c->n_chg, out->chg_cap, out->sp);
+	for (int p = 0; p < NPH; p++)                       /* CHARGE_PRIORITY order; with a lead the other stack first */
+		if (c->charge[p])
+			strncat(out->why[p], st->lead >= 0 ? " BAL" : " EQ", WHY_LEN - 1 - strlen(out->why[p]));
 }
 
 /* PI prototype (shadow unless BATMONITOR_PI=1). y = PCC + Sofar Bat1: Bat1 charging counts with BAT1_CHARGE_FACTOR
@@ -735,7 +746,7 @@ static void chain_pi(const struct bm_cfg *cfg, const struct bm_in *in, struct bm
 		if (pi_ok[p])
 			snprintf(pwhy[p], WHY_LEN, "PI(%+.0f)", u);
 	if (u > 0)
-		alloc_charge(cfg, st->lead, u, pi_chg, n_pichg, out->chg_cap, psp, pwhy);
+		alloc_charge(cfg, st->lead, u, pi_chg, n_pichg, out->chg_cap, psp);
 	else if (u < 0) {
 		char rule[32];
 		snprintf(rule, sizeof(rule), "PI(%+.0f)", u);
@@ -777,7 +788,7 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 	for (int p = 0; p < NPH; p++)                       /* the BMS limit cut this phase's setpoint */
 		if ((out->sp[p] > 0 && out->ccl_bind[p] && out->sp[p] >= (int)out->chg_cap[p] - 1) ||
 			(out->sp[p] < 0 && out->dcl_bind[p] && -out->sp[p] >= (int)out->dis_cap[p] - 1))
-			strncat(out->why[p], out->sp[p] > 0 ? "|CCL" : "|DCL", WHY_LEN - 1 - strlen(out->why[p]));
+			strncat(out->why[p], out->sp[p] > 0 ? " CCL" : " DCL", WHY_LEN - 1 - strlen(out->why[p]));
 	st->soyo_chg_prev = c.n_chg > 0;
 	if (!c.n_dis)
 		st->soyo_prop_prev = 0;

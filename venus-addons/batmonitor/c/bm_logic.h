@@ -111,6 +111,7 @@ struct bm_out {
 	int fc_active;
 	int fc_bad;                                  /* forecast fresh and target_soc >= FC_BAD_TARGET: WP share capped */
 	int bat1_first;
+	char wp_why[8], src_why[8];                  /* S2 / S3 reason (0.42-c), see the rule text in bm_logic.c */
 	double fc_target, fc_min_soc;
 	struct bm_ls ls;
 	struct bm_pi pi;
