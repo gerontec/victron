@@ -131,6 +131,19 @@ enum bm_mode { BM_M_BMS_MISSING, BM_M_FORCE, BM_M_STALE, BM_M_LADESPERRE, BM_M_C
 			   BM_M_CHARGING, BM_M_DIS, BM_M_N };
 extern const char *BM_WP_NAME[BM_WP_N], *BM_SRC_NAME[BM_SRC_N], *BM_MODE_NAME[BM_M_N];
 
+/* Discharge matrix (0.45-c): what the two decision axes of D1 mean for the discharge amount, one table row each.
+   The amount code reads nothing else of D1. S3 source -> how the Sofar Bat1 counts, the target, the idle power, the
+   PROP hold; S2 heat pump kind -> the part of the heat pump the stacks cover. Enumerated by make check */
+enum bm_wp_kind { BM_WPK_NONE, BM_WPK_CAP, BM_WPK_ALL, BM_WPK_BAD, BM_WPK_N };
+struct bm_src_rule {
+	int b1_signed;              /* 1: a Bat1 discharge is house load the stacks take over; 0: only its charge counts */
+	int trickle;                /* target + SOFAR_TRICKLE: the Sofar battery charges a few W steadily */
+	int idle_w;                 /* discharge W while not PROPORTIONAL */
+	int prop_hold;              /* IDLE -> PROPORTIONAL already above SOYO_HOLD_TH, not only on import */
+};
+extern const struct bm_src_rule BM_SRC_RULE[BM_SRC_N];
+extern const char *BM_WPK_NAME[BM_WPK_N];
+
 /* D1: forecast rule, S3 source, S2 scope. State: fc_active, bat1_first */
 struct bm_d1_in {
 	int season;                 /* base season BM_SUMMER / BM_WINTER / BM_TRANSITION (measured, else months) */
@@ -151,6 +164,7 @@ struct bm_d1_out {
 	int fc_active, bat1_first;  /* next state */
 	int fc_ok, fc_bad, season_wp, winter, b1_first, night_floor, wp_fc_capped, wp_cap_armed;
 	int wp_reason, src_reason;
+	int wp_kind;                /* enum bm_wp_kind: S2 row of the discharge matrix */
 };
 void bm_d1(const struct bm_d1_in *b, int fc_active, int bat1_first, struct bm_d1_out *o);
 
@@ -188,7 +202,7 @@ struct bm_d3_in {
 	int any_dis;                                 /* a phase discharges (mode DIS) */
 	int house_import;                            /* Z2 house balance < PCC_IMPORT_TH */
 	int deficit_gt_hold;                         /* deficit > SOYO_HOLD_TH */
-	int night_floor;                             /* D1 */
+	int prop_hold;                               /* BM_SRC_RULE[src].prop_hold */
 };
 int bm_d3(const struct bm_d3_in *b, int prop_prev, int *prop_next);   /* 1 = PROPORTIONAL, 0 = IDLE */
 

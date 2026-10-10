@@ -7,7 +7,9 @@
  *   h_d2_bits         the SoC predicates satisfy the constraints check_matrix assumes, for every SoC and every
  *                     threshold set in valid order (h_d2_bits_any_order: without the order -> counterexample)
  *   h_d1_bits         the D1 predicates satisfy the constraints check_matrix assumes
- *   h_alloc_discharge each phase within its cap, total never above the request, other phases untouched
+ *   h_alloc_discharge each phase within its cap, total never above the request, other phases untouched, the lead
+ *                     bank first, without a lead both banks the same power (integer split, 0.45-c)
+ *   h_dis_amount      the one amount formula: 0..W_MAX, WP_CAP while armed, IDLE never above the row's idle power
  *   h_charge          a CHARGE phase gets 0..its ceiling, never a discharge (0.44-c finding); assumes L2 + L3
  *                     share one cap (chain_gates computes it per bank, unequal caps give a counterexample)
  *   h_discharge       discharge phases within their caps, total within W_MAX / WP_CAP, IDLE at night = 0
@@ -107,24 +109,53 @@ void h_d1_bits(void)
 
 void h_alloc_discharge(void)
 {
-	int sp[NPH] = {0}, dis[NPH], lead = nondet_int(), w = nondet_int();
-	double dcap[NPH];
+	int sp[NPH] = {0}, dis[NPH], dcap[NPH], lead = nondet_int(), w = nondet_int();
 	char why[NPH][WHY_LEN] = {{0}};
 	__CPROVER_assume(lead >= -1 && lead <= 1 && w >= 0 && w <= 12000);
 	for (int p = 0; p < NPH; p++) {
 		dis[p] = bit();
-		dcap[p] = in_range(0, 5000);
+		dcap[p] = nondet_int();
+		__CPROVER_assume(dcap[p] >= 0 && dcap[p] <= 5000);
 	}
-	__CPROVER_assume(dis[1] == dis[2] && dcap[1] == dcap[2]);   /* L2 + L3 = one bank, one DCL */
 	alloc_discharge(lead, w, dis, dcap, "PROP", sp, why);
-	int total = 0;
+	int total = 0, bank_w[NBANK] = {0}, bank_at_cap[NBANK] = {0}, bank_dis[NBANK] = {0}, other = 0, lead_full = 1;
 	for (int p = 0; p < NPH; p++) {
+		int b = bank_of(p);
 		assert(sp[p] <= 0);
 		assert(dis[p] || sp[p] == 0);
-		assert(-sp[p] <= dcap[p] + 1);
+		assert(-sp[p] <= dcap[p]);
 		total -= sp[p];
+		bank_w[b] -= sp[p];
+		bank_dis[b] |= dis[p];
+		bank_at_cap[b] |= dis[p] && -sp[p] >= dcap[p] - NPH;
+		if (lead >= 0 && dis[p] && b != lead)
+			other -= sp[p];
+		if (lead >= 0 && dis[p] && b == lead && -sp[p] < dcap[p] - NPH)
+			lead_full = 0;
 	}
-	assert(total <= w + NPH);
+	assert(total <= w);
+	/* lead first: the other bank gets more than rounding only when every lead phase is at its cap */
+	assert(other <= NPH || lead_full);
+	/* no lead: both banks the same power unless a cap binds (0.26) */
+	if (lead < 0 && bank_dis[0] && bank_dis[1] && !bank_at_cap[0] && !bank_at_cap[1]) {
+		assert(bank_w[0] - bank_w[1] <= NPH && bank_w[1] - bank_w[0] <= NPH);
+		assert(total >= w - 2 * NPH);                   /* and all of w, up to the division remainder */
+	}
+}
+
+/* S4 amount: the one formula */
+void h_dis_amount(void)
+{
+	int prop = bit(), armed = bit(), capped, deficit = nondet_int(), w_max = nondet_int(), wp_cap = nondet_int();
+	__CPROVER_assume(w_max >= 0 && w_max <= 12000 && wp_cap >= 0 && wp_cap <= 10000);
+	for (int s = 0; s < BM_SRC_N; s++) {
+		int w = dis_amount(prop, deficit, BM_SRC_RULE[s].idle_w, w_max, armed, wp_cap, &capped);
+		assert(w >= 0 && w <= w_max);
+		assert(!armed || w <= wp_cap);
+		assert(prop || w <= BM_SRC_RULE[s].idle_w);
+		assert(!prop || deficit <= 0 || w == deficit || w == w_max || (armed && w == wp_cap));
+		assert(!capped || (armed && w == wp_cap));   /* the WPCAP tag only when WP_CAP is what limits */
+	}
 }
 
 void h_charge(void)
@@ -176,14 +207,14 @@ void h_discharge(void)
 	c.z2 = in_range(-20000, 20000);
 	c.own_charge = in_range(0, 15000);
 	c.own_discharge = in_range(0, 15000);
-	c.night_floor = bit();
+	c.src = nondet_int();
+	__CPROVER_assume(c.src >= 0 && c.src < BM_SRC_N);
 	c.wp_cap_armed = bit();
 	for (int p = 0; p < NPH; p++) {
 		c.discharge[p] = bit();
 		c.n_dis += c.discharge[p];
 		out.dis_cap[p] = in_range(0, cfg.discharge_max_phase);
 	}
-	__CPROVER_assume(c.discharge[1] == c.discharge[2] && out.dis_cap[1] == out.dis_cap[2]);
 	__CPROVER_assume(c.n_dis > 0);
 	strcpy(out.wp_why, "ALL");
 	strcpy(out.src_why, "DAY");
@@ -192,10 +223,10 @@ void h_discharge(void)
 	for (int p = 0; p < NPH; p++) {
 		assert(out.sp[p] <= 0);
 		assert(c.discharge[p] || out.sp[p] == 0);
-		assert(-out.sp[p] <= out.dis_cap[p] + 1);
+		assert(-out.sp[p] <= out.dis_cap[p]);
 		total -= out.sp[p];
 	}
 	assert(total <= cfg.w_max + NPH);
 	assert(!c.wp_cap_armed || total <= cfg.wp_cap + NPH);
-	assert(st.soyo_prop_prev || !c.night_floor || total == 0);   /* IDLE with the night floor: 0 W */
+	assert(st.soyo_prop_prev || BM_SRC_RULE[c.src].idle_w || total == 0);   /* IDLE with the night floor: 0 W */
 }

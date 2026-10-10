@@ -40,6 +40,25 @@ static void check_threshold_order(void)
 	printf("threshold order of the defaults: checked\n");
 }
 
+/* ---- discharge matrix (0.45-c): the table rows themselves ------------------------------------------------------ */
+static void check_dis_table(void)
+{
+	printf("\ndischarge matrix, S3 source rows:\n  %-4s %9s %7s %6s %9s\n", "SRC", "b1_signed", "trickle", "idle_w",
+		   "prop_hold");
+	for (int s = 0; s < BM_SRC_N; s++) {
+		const struct bm_src_rule *r = &BM_SRC_RULE[s];
+		printf("  %-4s %9d %7d %6d %9d\n", BM_SRC_NAME[s], r->b1_signed, r->trickle, r->idle_w, r->prop_hold);
+		int stk = s == BM_SRC_STK;
+		INV(r->b1_signed == stk && r->trickle == stk && r->prop_hold == stk, "only the night floor takes Bat1 over");
+		INV((r->idle_w == 0) == stk, "idle power 0 exactly with the night floor (PCC near 0)");
+		INV(r->idle_w >= 0, "idle power never charges");
+	}
+	printf("  S2 heat pump kinds:");
+	for (int k = 0; k < BM_WPK_N; k++)
+		printf(" %s", BM_WPK_NAME[k]);
+	putchar('\n');
+}
+
 /* ---- D1: forecast, S3 source, S2 scope ------------------------------------------------------------------------ */
 static void check_d1(void)
 {
@@ -71,7 +90,13 @@ static void check_d1(void)
 				INV((o.src_reason == BM_SRC_DAY) == !b.night, "SRC DAY exactly by day");
 				INV((o.src_reason == BM_SRC_B1) == (b.night && o.b1_first), "SRC B1 exactly at night with B1FIRST");
 				INV((o.src_reason == BM_SRC_STK) == o.night_floor, "SRC STK exactly with the night floor");
-				INV(o.src_reason != BM_SRC_B1W || (o.season_wp == BM_WINTER && b.wp_on), "SRC B1W only winter + WP");
+				INV(o.src_reason != BM_SRC_B1W || (b.season == BM_WINTER && b.wp_on), "SRC B1W only winter + WP");
+				/* S3 independent of the forecast state (0.45-c) */
+				{
+					struct bm_d1_out x;
+					bm_d1(&b, !fa, bf, &x);
+					INV(x.src_reason == o.src_reason && x.night_floor == o.night_floor, "SRC independent of FC_ACTIVE");
+				}
 				INV(!o.wp_fc_capped || (o.fc_bad && b.wp_pos), "forecast cap only with FC_BAD and WP power");
 				INV(!o.wp_cap_armed || (!b.wp_fresh && o.winter && b.wp_running), "WP_CAP only as stale-data fallback");
 				INV((o.wp_reason == BM_WP_NA) == !b.wp_fresh, "WP:NA exactly with stale em0/power");
@@ -79,12 +104,18 @@ static void check_d1(void)
 				INV((o.wp_reason == BM_WP_FC) == (b.wp_on && o.fc_active), "WP:FC exactly WP on + FC_ACTIVE");
 				INV(o.wp_reason != BM_WP_FCBAD || o.wp_fc_capped, "WP:FCBAD only when the forecast cap binds");
 				INV(o.wp_reason != BM_WP_Z2 || o.season_wp == BM_WINTER, "WP:Z2 only in winter");
+				/* discharge matrix rows (0.45-c) */
+				INV((o.wp_kind == BM_WPK_BAD) == o.wp_fc_capped, "WP kind BAD exactly when the forecast cap binds");
+				INV(o.wp_reason != BM_WP_Z2 || o.wp_kind == BM_WPK_NONE, "WP:Z2 -> the stacks cover nothing");
+				INV(o.wp_reason != BM_WP_FC || o.wp_kind == BM_WPK_ALL, "WP:FC -> the stacks cover all");
+				INV(o.wp_reason != BM_WP_FCBAD || o.wp_kind == BM_WPK_BAD, "WP:FCBAD -> WP_BAT_SHARE_BAD");
+				INV(o.wp_reason != BM_WP_T1900 || o.wp_kind == BM_WPK_CAP, "WP:T1900 -> the transition cap");
+				INV(BM_SRC_RULE[o.src_reason].b1_signed == o.night_floor, "Bat1 signed exactly with the night floor");
 				/* B1FIRST in winter changes only the reason, not the regulation (night floor, 0.40-c note) */
-				if (o.season_wp == BM_WINTER) {
+				if (b.season == BM_WINTER) {
 					struct bm_d1_out x;
 					bm_d1(&b, fa, !bf, &x);
-					if (x.season_wp == BM_WINTER)
-						INV(x.night_floor == o.night_floor, "winter: night floor independent of bat1_first");
+					INV(x.night_floor == o.night_floor, "winter: night floor independent of bat1_first");
 				}
 				bm_d1(&b, o.fc_active, o.bat1_first, &o2);
 				INV(o2.fc_active == o.fc_active && o2.bat1_first == o.bat1_first, "D1 state fixed after one step");
@@ -321,6 +352,7 @@ static void check_amounts(void)
 int main(void)
 {
 	check_threshold_order();
+	check_dis_table();
 	check_d1();
 	check_d2();
 	check_lead();

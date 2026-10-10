@@ -38,7 +38,7 @@ tests/check_matrix: tests/check_matrix.c bm_logic.c bm_logic.h
 # discharge ~1 min)
 CBMC_BIN ?= cbmc
 CBMC = $(CBMC_BIN) tests/cbmc_harness.c -I. --unwind 32 --unwinding-assertions --external-sat-solver cadical
-CBMC_FAST = h_d2_bits h_d1_bits
+CBMC_FAST = h_d2_bits h_d1_bits h_dis_amount
 CBMC_SLOW = h_alloc_discharge h_charge h_discharge
 # one target per harness, so "make -j cbmc-full" runs them in parallel (the slow ones take minutes each)
 cbmc-h_%:

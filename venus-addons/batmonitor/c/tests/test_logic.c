@@ -570,6 +570,28 @@ static void test_forecast_bad_caps_wp(void)
 	CHECK(!r.out.fc_bad && abs(sum_sp(&r) + 3500) <= 60, "target 90 %%: house + whole WP, sp sum %d", sum_sp(&r));
 }
 
+/* 0.45-c: the forecast widens the heat pump scope only (S2); the source stays the measured season's (S3), so the Sofar
+   battery still delivers first and the stacks take over at its DOD, as without a forecast */
+static void test_forecast_keeps_source(void)
+{
+	struct run r;
+	struct plant pl = BASE(.house = 300, .wp = 3000, .r290_hz = 50, .season = BM_WINTER, .season_age_h = 1,
+						   .fc_target = 20, .soc = {50, 50}, .sofar_dis = 0, .sofar_chg = 1, .bat1_soc = 5);
+	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 60);
+	print_state("winter night, WP 3 kW, FC_ACTIVE, Sofar 5 %", &r);
+	CHECK(r.out.fc_active && rule_has(&r, "WP:FC "), "forecast active: the stacks cover the WP");
+	CHECK(rule_has(&r, "SRC:B1W"), "source stays winter + WP (no night floor from the forecast)");
+	CHECK(abs(sum_sp(&r) + 3300) <= 60, "Sofar at its DOD: house + whole WP from the stacks, sp sum %d", sum_sp(&r));
+	CHECK(fabs(r.pcc) <= 60, "PCC near 0, pcc %.0f", r.pcc);
+
+	pl.bat1_soc = -1;                                            /* SOC_Bat1 unknown, Bat1 can discharge: */
+	pl.sofar_dis = 1;                                            /* the Sofar delivers first */
+	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 60);
+	print_state("winter night, WP 3 kW, FC_ACTIVE, Bat1 SoC ?", &r);
+	CHECK(rule_has(&r, "SRC:B1W") && r.bat1 < -2000, "Sofar battery first, bat1 %.0f", r.bat1);
+	CHECK(fabs(sum_sp(&r) + r.bat1 + 3300) <= 60, "stacks + Sofar = house + WP, sp sum %d", sum_sp(&r));
+}
+
 static void test_bat1_first(void)
 {
 	struct run r;
@@ -800,6 +822,7 @@ int main(void)
 	test_param_override();
 	test_forecast_overrides_winter();
 	test_forecast_bad_caps_wp();
+	test_forecast_keeps_source();
 	test_bat1_first();
 	test_pi_shadow_not_armed();
 	test_fc_sunset_limits();

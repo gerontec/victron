@@ -12,7 +12,8 @@
 
 /* soyo, 1:1 from sofar_waveshare.yaml, power values doubled (POWER_SCALE) */
 #define POWER_SCALE 2
-#define KP 1.01
+#define KP_PM 1010             /* proportional gain in per mille: the discharge path is whole watts (0.45-c) */
+#define KP (KP_PM / 1000.0)
 #define B_DAY_IDLE (10 * POWER_SCALE)
 #define PCC_IMPORT_TH -100.0
 #define PCC_SURPLUS_TH 200.0
@@ -270,86 +271,82 @@ static int ladesperre(const struct bm_cfg *cfg, const struct bm_in *in, struct b
 	return block;
 }
 
-/* discharge w (W, > 0) over the phases in dis[], at most DISCHARGE_MAX_PHASE each, equal power per bank (0.26); SoC balancing: the stack more
-   than SOC_BALANCE_ON ahead delivers alone, what its phases cannot give goes to the other phases (0.22) */
-static void alloc_discharge(int lead, int w, const int *dis, const double *dcap, const char *rule, int *sp,
+static int bank_of(int p)
+{
+	for (int b = 0; b < NBANK; b++)
+		for (int i = 0; i < BM_BANKS[b].nph; i++)
+			if (BM_BANKS[b].ph[i] == p)
+				return b;
+	return -1;
+}
+
+/* S5 split (0.45-c, one routine, whole watts): w over the discharging phases in up to two levels. With a lead (SoC
+   ahead) the lead bank is level 0 and gets w first (BAL); the other bank is level 1 and gets only what the lead
+   cannot give (SPILL, else WAIT). Without a lead (0.26, user 2026-10-08) one level: every discharging bank the same
+   share, so the two 300 Ah stacks drain alike (Stack1 alone on L1 gives as much as Stack2 on L2+L3). Within a level
+   a bank's share is split over its phases; what a phase cannot give above its cap goes to the level's other phases
+   alike. Never above a cap, never charging, the total never above w */
+static void alloc_discharge(int lead, int w, const int *dis, const int *dcap, const char *rule, int *sp,
 							char why[][WHY_LEN])
 {
-	int give[NPH] = {0}, n_give = 0, n_dis = 0;
+	int lvl[NPH], n_lead = 0, rest = w;
+	for (int p = 0; p < NPH; p++) {
+		lvl[p] = dis[p] ? 0 : -1;
+		n_lead += dis[p] && bank_of(p) == lead;
+	}
 	for (int p = 0; p < NPH; p++)
-		n_dis += dis[p];
-	if (lead >= 0)
-		for (int i = 0; i < BM_BANKS[lead].nph; i++)
-			if (dis[BM_BANKS[lead].ph[i]]) {
-				give[BM_BANKS[lead].ph[i]] = 1;
-				n_give++;
+		if (n_lead && dis[p] && bank_of(p) != lead)
+			lvl[p] = 1;
+	for (int l = 0; l < 2; l++) {
+		int nb[NBANK] = {0}, n_banks = 0, want[NPH] = {0}, given = 0;
+		for (int p = 0; p < NPH; p++)
+			if (lvl[p] == l && !nb[bank_of(p)]++)
+				n_banks++;
+		if (!n_banks)
+			continue;
+		for (int p = 0; p < NPH; p++)
+			if (lvl[p] == l) {
+				want[p] = rest / n_banks / nb[bank_of(p)];
+				given += want[p];
 			}
-	if (!n_give) {
-		/* no lead (0.26, user 2026-10-08): every bank delivers the same power, so the two 300 Ah stacks drain alike:
-		   Stack1 alone on L1 gives as much as Stack2 on L2+L3 (L1 50 %, L2/L3 25 % each). What a phase cannot give
-		   above DISCHARGE_MAX_PHASE goes to the other discharging phases alike */
-		double want[NPH] = {0};
-		int n_banks = 0;
-		for (int b = 0; b < NBANK; b++)
-			for (int i = 0; i < BM_BANKS[b].nph; i++)
-				if (dis[BM_BANKS[b].ph[i]]) {
-					n_banks++;
-					break;
-				}
-		for (int b = 0; b < NBANK; b++) {
-			int nb = 0;
-			for (int i = 0; i < BM_BANKS[b].nph; i++)
-				nb += dis[BM_BANKS[b].ph[i]];
-			for (int i = 0; i < BM_BANKS[b].nph; i++)
-				if (dis[BM_BANKS[b].ph[i]])
-					want[BM_BANKS[b].ph[i]] = (double)w / n_banks / nb;
-		}
-		for (int k = 0; k < NPH; k++) {                    /* spill above dmax, at most NPH rounds */
-			double over = 0;
-			int n_free = 0;
+		for (int k = 0; k < NPH; k++) {                    /* water filling, at most NPH rounds */
+			int over = 0, n_free = 0;
 			for (int p = 0; p < NPH; p++)
-				if (dis[p]) {
+				if (lvl[p] == l) {
 					if (want[p] > dcap[p]) {
 						over += want[p] - dcap[p];
 						want[p] = dcap[p];
 					} else if (want[p] < dcap[p])
 						n_free++;
 				}
-			if (over <= 0 || !n_free)
+			if (!over || !n_free)
 				break;
 			for (int p = 0; p < NPH; p++)
-				if (dis[p] && want[p] < dcap[p])
+				if (lvl[p] == l && want[p] < dcap[p])
 					want[p] += over / n_free;
 		}
 		for (int p = 0; p < NPH; p++)
-			if (dis[p]) {
-				sp[p] = -(int)want[p];
-				snprintf(why[p], WHY_LEN, "%s EQ", rule);
+			if (lvl[p] == l) {
+				sp[p] = -(want[p] < dcap[p] ? want[p] : dcap[p]);
+				given += sp[p];
+				snprintf(why[p], WHY_LEN, "%s%s", rule, !n_lead ? " EQ" : !l ? " BAL" : sp[p] ? " SPILL" : " WAIT");
 			}
-		return;
+		rest = given;                                   /* what the caps cut goes on, not the division remainder */
 	}
-	double give_cap = 1e9, rest_cap = 1e9;              /* phases of one bank share one cap */
+}
+
+/* whole watts from a measurement or ceiling: NaN -> 0, clamped to +-1 MW */
+static int watt(double v)
+{
+	if (isnan(v))
+		return 0;
+	return v > 1e6 ? 1000000 : v < -1e6 ? -1000000 : (int)lround(v);
+}
+
+static void dis_caps(const struct bm_out *out, int *dcap)
+{
 	for (int p = 0; p < NPH; p++)
-		if (dis[p]) {
-			if (give[p])
-				give_cap = fmin(give_cap, dcap[p]);
-			else
-				rest_cap = fmin(rest_cap, dcap[p]);
-		}
-	int share = n_give ? (int)((double)w / n_give) : 0, spill = 0;
-	if (share > give_cap) {
-		spill = (share - (int)give_cap) * n_give;
-		share = (int)give_cap;
-	}
-	int n_rest = n_dis - n_give, extra = n_rest ? spill / n_rest : 0;
-	if (extra > rest_cap)
-		extra = (int)rest_cap;
-	for (int p = 0; p < NPH; p++) {
-		if (!dis[p])
-			continue;
-		sp[p] = give[p] ? -share : -extra;
-		snprintf(why[p], WHY_LEN, "%s%s", rule, give[p] ? " BAL" : extra ? " SPILL" : " WAIT");
-	}
+		dcap[p] = out->dis_cap[p] > 0 ? (int)out->dis_cap[p] : 0;
 }
 
 double bm_charge_cap(const struct bm_cfg *cfg, int volt_ok, double volt)
@@ -417,6 +414,16 @@ const char *BM_MODE_NAME[BM_M_N] = {"BMS_MISSING", "FORCE", "STALE", "LADESPERRE
    pump as in summer; on above target + FC_HYST, off below target. Bad forecast (0.37-c): target_soc >= FC_BAD_TARGET
    -> the stacks cover at most WP_BAT_SHARE_BAD % of the heat pump (S2). Sofar first (0.38-c): Bat1 above BAT1_SOC_MIN
    (on again from + BAT1_FIRST_HYST) and the heat pump running -> the Sofar delivers first at night (S3) */
+/* the discharge matrix rows (bm_logic.h): only the night floor (SRC STK) takes the Sofar battery over */
+const struct bm_src_rule BM_SRC_RULE[BM_SRC_N] = {
+	/*               b1_signed trickle idle_w      prop_hold */
+	[BM_SRC_DAY] = {0,        0,      B_DAY_IDLE, 0},
+	[BM_SRC_B1]  = {0,        0,      B_DAY_IDLE, 0},
+	[BM_SRC_STK] = {1,        1,      0,          1},
+	[BM_SRC_B1W] = {0,        0,      B_DAY_IDLE, 0},
+};
+const char *BM_WPK_NAME[BM_WPK_N] = {"NONE", "CAP", "ALL", "BAD"};
+
 void bm_d1(const struct bm_d1_in *b, int fc_active, int bat1_first, struct bm_d1_out *o)
 {
 	memset(o, 0, sizeof(*o));
@@ -437,13 +444,16 @@ void bm_d1(const struct bm_d1_in *b, int fc_active, int bat1_first, struct bm_d1
 		bat1_first = 1;
 	o->bat1_first = bat1_first;
 	o->b1_first = bat1_first && b->wp_on;
-	o->night_floor = b->night && !o->b1_first && (o->season_wp != BM_WINTER || !b->wp_on);
+	/* S3 reads the measured season, not season_wp (0.45-c): the forecast only widens the heat pump scope (S2) */
+	o->night_floor = b->night && !o->b1_first && (b->season != BM_WINTER || !b->wp_on);
 	o->wp_fc_capped = o->fc_bad && b->wp_pos && b->fc_share_lt_share;
 	o->wp_cap_armed = !b->wp_fresh && o->winter && b->wp_running;
 	o->wp_reason = !b->wp_fresh ? BM_WP_NA : !b->wp_on ? BM_WP_OFF : fc_active ? BM_WP_FC : o->wp_fc_capped ? BM_WP_FCBAD
 				   : o->season_wp == BM_WINTER ? BM_WP_Z2
 				   : o->season_wp == BM_TRANSITION && b->wp_gt_trans ? BM_WP_T1900 : BM_WP_ALL;
 	o->src_reason = !b->night ? BM_SRC_DAY : o->b1_first ? BM_SRC_B1 : o->night_floor ? BM_SRC_STK : BM_SRC_B1W;
+	o->wp_kind = o->wp_fc_capped ? BM_WPK_BAD : o->season_wp == BM_WINTER ? BM_WPK_NONE
+				 : o->season_wp == BM_TRANSITION ? BM_WPK_CAP : BM_WPK_ALL;
 }
 
 /* D2. Per bank: SoC protection and force charge with hysteresis (only while the BMS reports), then the mode, first
@@ -498,7 +508,7 @@ int bm_dlead(const struct bm_dl_in *b, int lead, int *event)
    SOYO_HOLD_TH; else IDLE. No discharging phase: reset */
 int bm_d3(const struct bm_d3_in *b, int prop_prev, int *prop_next)
 {
-	int prop = b->any_dis && (b->house_import || ((prop_prev || b->night_floor) && b->deficit_gt_hold));
+	int prop = b->any_dis && (b->house_import || ((prop_prev || b->prop_hold) && b->deficit_gt_hold));
 	*prop_next = prop;
 	return prop;
 }
@@ -535,6 +545,7 @@ struct chain {
 	int wp_fc_capped;                  /* S2: the bad-forecast cap binds */
 	double z2;                         /* PCC + wp_eff: the point the stacks regulate on */
 	int b1_first, night_floor;         /* S3 */
+	int src, wp_kind;                  /* the discharge matrix rows: enum bm_src_reason, enum bm_wp_kind */
 	int wp_cap_armed;                  /* WP_CAP fallback: em0/power stale, R290 running, not summer */
 	double bat1_eff, chg_ref, surplus;
 	int block, charge_mode;
@@ -605,6 +616,21 @@ static void d1_bits(const struct bm_cfg *cfg, const struct bm_in *in, const stru
 	b->b1_ge_release = in->soc_bat1 >= cfg->bat1_soc_min + BAT1_FIRST_HYST;
 }
 
+/* S2 row of the discharge matrix: the part of the heat pump W the stacks cover */
+static double wp_share(const struct bm_cfg *cfg, int wp_kind, double wp)
+{
+	switch (wp_kind) {
+	case BM_WPK_NONE:
+		return 0.0;
+	case BM_WPK_CAP:
+		return fmin(wp, cfg->wp_bat_max_transition);
+	case BM_WPK_BAD:
+		return wp * cfg->wp_bat_share_bad / 100.0;
+	default:
+		return wp;
+	}
+}
+
 static void chain_d1(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *st, struct bm_out *out,
 					 struct chain *c)
 {
@@ -624,17 +650,14 @@ static void chain_d1(const struct bm_cfg *cfg, const struct bm_in *in, struct bm
 	c->winter = o.winter;
 	c->b1_first = o.b1_first;
 	c->night_floor = o.night_floor;
+	c->src = o.src_reason;
+	c->wp_kind = o.wp_kind;
 	c->wp_fc_capped = o.wp_fc_capped;
 	c->wp_cap_armed = o.wp_cap_armed;
 	snprintf(out->wp_why, sizeof(out->wp_why), "%s", BM_WP_NAME[o.wp_reason]);
 	snprintf(out->src_why, sizeof(out->src_why), "%s", BM_SRC_NAME[o.src_reason]);
-	if (c->wp_fresh && in->wp > 0) {
-		double share = c->season_wp == BM_WINTER ? 0.0
-					   : c->season_wp == BM_TRANSITION ? fmin(in->wp, cfg->wp_bat_max_transition) : in->wp;
-		if (c->wp_fc_capped)
-			share = in->wp * cfg->wp_bat_share_bad / 100.0;
-		c->wp_eff = in->wp - share;
-	}
+	if (c->wp_fresh && in->wp > 0)
+		c->wp_eff = in->wp - wp_share(cfg, c->wp_kind, in->wp);
 	c->z2 = in->pcc + c->wp_eff;
 }
 
@@ -752,37 +775,39 @@ static void chain_lead(const struct bm_cfg *cfg, struct bm_state *st, struct bm_
 		out->lead_diff = fabs(diff);
 }
 
+/* S4 amount, the one formula: w = min(PROPORTIONAL ? max(deficit, 0) : idle_w, W_MAX, WP_CAP while armed).
+   Never below 0: a discharge never turns into charging (Sofar TOU charge) */
+static int dis_amount(int prop, int deficit, int idle_w, int w_max, int wp_cap_armed, int wp_cap, int *capped)
+{
+	int w = prop ? (deficit > 0 ? deficit : 0) : idle_w;
+	if (w > w_max)
+		w = w_max;
+	*capped = wp_cap_armed && w > wp_cap;
+	return *capped ? wp_cap : w;
+}
+
 /* S4 + S5 discharge: deficit = what the Multis already give (minus what of it goes into the Sofar battery) + the
    import still left (0.18); the own charging (force charge of the other stack) is no house load (0.20) */
 static void chain_discharge(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *st, struct bm_out *out,
 							const struct chain *c)
 {
-	int w;
+	const struct bm_src_rule *r = &BM_SRC_RULE[c->src];
 	char rule[64];
-	double house = c->z2 + c->own_charge;
-	/* night floor (0.25, user 2026-10-08: PCC near 0): the Sofar Bat1 counts signed. Its discharge is house load the
-	   stacks take over, its charge is our own overshoot. pcc + bat1 is the load behind the Sofar however the Sofar
-	   splits it, so both regulators do not fight; the Sofar battery idles, the PCC stays near 0 */
-	double b1_def = c->night_floor ? in->bat1 : (in->bat1 > 0 ? in->bat1 : 0.0);
-	/* 0.27 (user 2026-10-08): at night aim at pcc + bat1 = +SOFAR_TRICKLE, so the Sofar battery charges a few W
-	   steadily instead of swinging between charge and discharge around 0 */
-	double target = cfg->soyo_target + (c->night_floor ? cfg->sofar_trickle : 0.0);
-	double deficit = c->own_discharge - b1_def - KP * (house - target);
-	struct bm_d3_in d = {1, house < PCC_IMPORT_TH, deficit > SOYO_HOLD_TH, c->night_floor};
-	if (bm_d3(&d, st->soyo_prop_prev, &st->soyo_prop_prev)) {
-		w = deficit > 0 ? (int)deficit : 0;   /* never turn a discharge into charging (Sofar TOU charge) */
-		if (w > (int)cfg->w_max)
-			w = (int)cfg->w_max;
-		strcpy(rule, "PROP");
-	} else {
-		w = c->night_floor ? 0 : B_DAY_IDLE;
-		strcpy(rule, "IDLE");
-	}
-	snprintf(rule + strlen(rule), sizeof(rule) - strlen(rule), " WP:%s SRC:%s", out->wp_why, out->src_why);
-	int wp_cap = c->wp_cap_armed && w > (int)cfg->wp_cap;
-	if (wp_cap)
-		w = (int)cfg->wp_cap;
-	alloc_discharge(st->lead, w, c->discharge, out->dis_cap, rule, out->sp, out->why);
+	int house = watt(c->z2 + c->own_charge), bat1 = watt(in->bat1), dcap[NPH];
+	/* b1_signed, the night floor (0.25, user 2026-10-08: PCC near 0): the Sofar Bat1 counts signed. Its discharge is
+	   house load the stacks take over, its charge is our own overshoot. pcc + bat1 is the load behind the Sofar however
+	   the Sofar splits it, so both regulators do not fight; the Sofar battery idles, the PCC stays near 0 */
+	int b1_def = r->b1_signed ? bat1 : (bat1 > 0 ? bat1 : 0);
+	/* trickle (0.27, user 2026-10-08): at night aim at pcc + bat1 = +SOFAR_TRICKLE, so the Sofar battery charges a
+	   few W steadily instead of swinging between charge and discharge around 0 */
+	int target = watt(cfg->soyo_target + (r->trickle ? cfg->sofar_trickle : 0.0));
+	int deficit = watt(c->own_discharge) - b1_def - (int)((long)KP_PM * (house - target) / 1000);
+	struct bm_d3_in d = {1, house < PCC_IMPORT_TH, deficit > SOYO_HOLD_TH, r->prop_hold};
+	int prop = bm_d3(&d, st->soyo_prop_prev, &st->soyo_prop_prev), wp_cap;
+	int w = dis_amount(prop, deficit, r->idle_w, (int)cfg->w_max, c->wp_cap_armed, (int)cfg->wp_cap, &wp_cap);
+	snprintf(rule, sizeof(rule), "%s WP:%s SRC:%s", prop ? "PROP" : "IDLE", out->wp_why, out->src_why);
+	dis_caps(out, dcap);
+	alloc_discharge(st->lead, w, c->discharge, dcap, rule, out->sp, out->why);
 	if (wp_cap)
 		for (int p = 0; p < NPH; p++)
 			if (c->discharge[p])
@@ -863,7 +888,9 @@ static void chain_pi(const struct bm_cfg *cfg, const struct bm_in *in, struct bm
 	else if (u < 0) {
 		char rule[32];
 		snprintf(rule, sizeof(rule), "PI(%+.0f)", u);
-		alloc_discharge(st->lead, (int)-u, pi_dis, out->dis_cap, rule, psp, pwhy);
+		int dcap[NPH];
+		dis_caps(out, dcap);
+		alloc_discharge(st->lead, (int)-u, pi_dis, dcap, rule, psp, pwhy);
 	}
 	for (int p = 0; p < NPH; p++)
 		if (!pi_ok[p])
