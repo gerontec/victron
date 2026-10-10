@@ -770,14 +770,17 @@ static void chain_discharge(const struct bm_cfg *cfg, const struct bm_in *in, st
 				strncat(out->why[p], " WPCAP", WHY_LEN - 1 - strlen(out->why[p]));
 }
 
-/* S4 + S5 charge: own charge + KP x (Z2 surplus incl. the Sofar charge share), at most the phase ceilings */
+/* S4 + S5 charge: own charge + KP x (Z2 surplus incl. the Sofar charge share), at most the phase ceilings, never
+   below 0 (0.44-c, found by make check: when the PV collapses while charge mode holds, KP 1.01 overshot into a
+   discharge of up to 1 % of the own charge, e.g. PCC -4175 W, own charge 4200 W -> -16 W on a CHARGE phase) */
 static void chain_charge(const struct bm_cfg *cfg, const struct bm_state *st, struct bm_out *out, const struct chain *c)
 {
 	double cap_sum = 0;
 	for (int p = 0; p < NPH; p++)
 		if (c->charge[p])
 			cap_sum += out->chg_cap[p];
-	alloc_charge(cfg, st->lead, fmin((int)(c->own_charge + KP * (c->chg_ref + c->bat1_eff - cfg->soyo_target)), cap_sum),
+	double want = fmax(0.0, (int)(c->own_charge + KP * (c->chg_ref + c->bat1_eff - cfg->soyo_target)));
+	alloc_charge(cfg, st->lead, fmin(want, cap_sum),
 				 c->charge, c->n_chg, out->chg_cap, out->sp);
 	for (int p = 0; p < NPH; p++)                       /* CHARGE_PRIORITY order; with a lead the other stack first */
 		if (c->charge[p])
