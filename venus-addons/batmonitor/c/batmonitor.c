@@ -23,7 +23,7 @@
  *     100 % from the batteries, the discharge regulates on the Z1 PCC as before (user 2026-10-08).
  *   - no fixed night floor (0.25, user 2026-10-08: obsolete with the 4 s PCC over MQTT): at night the discharge
  *     regulates on PCC + signed Sofar Bat1 (the load behind the Sofar), so the Sofar battery idles and the PCC stays
- *     near 0; the 936 W floor had charged the Sofar battery with ~600 W at a 300 W house. B_NIGHT is unused.
+ *     near 0; the 936 W floor had charged the Sofar battery with ~600 W at a 300 W house (B_NIGHT removed in 0.40-c).
  *   - discharge split per bank (0.26, user 2026-10-08): without a SoC lead, Stack1 (L1 alone) gives as much as
  *     Stack2 (L2+L3): L1 50 %, L2/L3 25 % each, so both 300 Ah stacks drain alike; L1 above DISCHARGE_MAX_PHASE
  *     (4000 W) spills to L2/L3. The SoC balancing (lead stack delivers alone) is unchanged.
@@ -76,7 +76,7 @@
 #include <unistd.h>
 #include "bm_logic.h"
 
-#define VERSION "0.39-c"
+#define VERSION "0.40-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"

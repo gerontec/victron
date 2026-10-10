@@ -91,7 +91,6 @@ const struct bm_param BM_PARAMS[] = {
 	{"SOC_BALANCE_ON",        P(soc_balance_on),            3,       0.5,     50,      "%", "SoC difference that starts balancing"},
 	{"SOC_BALANCE_OFF",       P(soc_balance_off),           1,       0,       50,      "%", "balancing ends below"},
 	{"SOYO_TARGET",           P(soyo_target),               0,       -500,    500,     "W", "PCC target (+ = export)"},
-	{"B_NIGHT",               P(b_night),                   936,     0,       4000,    "W", "unused since 0.25-c (night follows PCC + Sofar Bat1), kept for env compatibility"},
 	{"FC_HYST",               P(fc_hyst),                   2,       0,       20,      "%", "forecast rule back on above target + this"},
 	{"SOFAR_TRICKLE",         P(sofar_trickle),             30,      0,       500,     "W", "night: stacks give this much more than the house needs, the Sofar battery charges gently instead of swinging"},
 	{"CHARGER_A",             P(charger_a),                 70,      0,       70,      "A", "MultiPlus-II 48/5000 charger current per unit (DC), ceiling = this x BMS voltage"},
@@ -292,10 +291,10 @@ static int ladesperre(const struct bm_cfg *cfg, const struct bm_in *in, struct b
 
 /* discharge w (W, > 0) over the phases in dis[], at most DISCHARGE_MAX_PHASE each, equal power per bank (0.26); SoC balancing: the stack more
    than SOC_BALANCE_ON ahead delivers alone, what its phases cannot give goes to the other phases (0.22) */
-static void alloc_discharge(const struct bm_cfg *cfg, int lead, int w, const int *dis, const double *dcap, const char *rule, int *sp,
+static void alloc_discharge(int lead, int w, const int *dis, const double *dcap, const char *rule, int *sp,
 							char why[][WHY_LEN])
 {
-	int give[NPH] = {0}, n_give = 0, lead_ph, n_dis = 0;
+	int give[NPH] = {0}, n_give = 0, n_dis = 0;
 	for (int p = 0; p < NPH; p++)
 		n_dis += dis[p];
 	if (lead >= 0)
@@ -304,9 +303,7 @@ static void alloc_discharge(const struct bm_cfg *cfg, int lead, int w, const int
 				give[BM_BANKS[lead].ph[i]] = 1;
 				n_give++;
 			}
-	lead_ph = n_give > 0;
-	(void)cfg;
-	if (!lead_ph) {
+	if (!n_give) {
 		/* no lead (0.26, user 2026-10-08): every bank delivers the same power, so the two 300 Ah stacks drain alike:
 		   Stack1 alone on L1 gives as much as Stack2 on L2+L3 (L1 50 %, L2/L3 25 % each). What a phase cannot give
 		   above DISCHARGE_MAX_PHASE goes to the other discharging phases alike */
@@ -370,8 +367,7 @@ static void alloc_discharge(const struct bm_cfg *cfg, int lead, int w, const int
 		if (!dis[p])
 			continue;
 		sp[p] = give[p] ? -share : -extra;
-		snprintf(why[p], WHY_LEN, "%s%s", rule, lead_ph && give[p] ? "|BALANCE" : lead_ph ? (extra ? "|BALANCE_SPILL"
-				 : "|BALANCE_HOLD") : "");
+		snprintf(why[p], WHY_LEN, "%s%s", rule, give[p] ? "|BALANCE" : extra ? "|BALANCE_SPILL" : "|BALANCE_HOLD");
 	}
 }
 
@@ -389,18 +385,25 @@ double bm_bms_cap_phase(const struct bm_cfg *cfg, int bank, int volt_ok, double 
 	return (charge ? w / cfg->charge_eff : w * cfg->charge_eff) / BM_BANKS[bank].nph;
 }
 
+/* banks in charge order: CHARGE_PRIORITY, the lead bank (SoC ahead) last; returns the count */
+static int charge_order(int lead, int *order)
+{
+	int k = 0;
+	for (int i = 0; i < NBANK; i++)
+		if (CHARGE_PRIORITY[i] != lead)
+			order[k++] = CHARGE_PRIORITY[i];
+	if (lead >= 0)
+		order[k++] = lead;
+	return k;
+}
+
 /* charge rest (W) over the phases in chg[]: the banks in CHARGE_PRIORITY order up to their real charger capacity,
    the stack behind first; what is left up to CHARGE_MAX_PHASE on all phases alike. cap[] (0.29-c): the real ceiling
    per phase (charger 70 A x BMS voltage); with a measured voltage nothing spills above it */
 static void alloc_charge(const struct bm_cfg *cfg, int lead, double rest, const int *chg, int n_chg, const double *cap,
 						 int *sp, char why[][WHY_LEN])
 {
-	int order[NBANK], k = 0;
-	for (int i = 0; i < NBANK; i++)
-		if (CHARGE_PRIORITY[i] != lead)
-			order[k++] = CHARGE_PRIORITY[i];
-	if (lead >= 0)
-		order[k++] = lead;
+	int order[NBANK], k = charge_order(lead, order);
 	for (int i = 0; i < k; i++) {
 		int b = order[i], ph[NPH], n = 0;
 		for (int j = 0; j < BM_BANKS[b].nph; j++)
@@ -473,7 +476,8 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 	/* Sofar first (0.38-c, user 2026-10-10): while the Sofar Bat1 is above BAT1_SOC_MIN it covers the night load
 	   (heat pump included) by its own PCC regulation; the stacks only take the import it leaves (its 2.5 kW limit)
 	   and take over completely once it is down at BAT1_SOC_MIN (the Sofar stops there by its DOD).
-	   Only while the heat pump runs (user: WP off -> the normal rule) */
+	   Only while the heat pump runs (user: WP off -> the normal rule). In winter it changes only the rule tag: there
+	   the stacks never cover the running heat pump and the night floor is off anyway */
 	if (!in->have_soc_bat1 || in->soc_bat1 <= cfg->bat1_soc_min)
 		st->bat1_first = 0;
 	else if (!st->bat1_first && in->soc_bat1 >= cfg->bat1_soc_min + BAT1_FIRST_HYST)
@@ -484,12 +488,15 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 	/* the heat pump power the batteries must NOT cover: all of it in winter, the part above 1900 W in the
 	   transition (0.22), none in summer */
 	double wp_eff = 0.0;
-	if (wp_fresh && in->wp > 0 && season == BM_WINTER)
-		wp_eff = in->wp;
-	else if (wp_fresh && in->wp > 0) {
-		double share = season == BM_TRANSITION ? fmin(in->wp, cfg->wp_bat_max_transition) : in->wp;
-		if (out->fc_bad)
-			share = fmin(share, in->wp * cfg->wp_bat_share_bad / 100.0);
+	int wp_fc_capped = 0;                      /* the bad-forecast cap binds (rule |FCBAD instead of |WP1900 / |Z2) */
+	if (wp_fresh && in->wp > 0) {
+		double share = season == BM_WINTER ? 0.0 : season == BM_TRANSITION ? fmin(in->wp, cfg->wp_bat_max_transition)
+					   : in->wp;
+		double fc_share = in->wp * cfg->wp_bat_share_bad / 100.0;
+		if (out->fc_bad && fc_share < share) {
+			share = fc_share;
+			wp_fc_capped = 1;
+		}
 		wp_eff = in->wp - share;
 	}
 	double z2 = pcc + wp_eff;
@@ -596,16 +603,18 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 		}
 	}
 	update_lead(cfg, st, out);
+	int night = have_pv && pv < NIGHT_PV_TH;
+	/* night floor: the stacks take the night load over from the Sofar (0.25). Not with the heat pump running in
+	   winter (the base load would flow into it) and not while the Sofar goes first (B1FIRST, 0.38-c) */
+	int night_floor = night && !b1_first && (season != BM_WINTER || !wp_fresh || in->wp < WP_ON_TH);
 	if (n_dis) {
-		int night = have_pv && pv < NIGHT_PV_TH, w;
+		int w;
 		char rule[64];
 		/* deficit = what the Multis already give (minus what of it goes into the Sofar battery) + the import still
 		   left (0.18; old: -KP * pcc, which dropped back to IDLE as soon as the own discharge covered the import) */
 		/* the own charging (force charge of the other stack) is no house load: it comes from the grid (0.20) */
 		double house = z2 + own_charge;
-		/* winter: the night base load would flow into the heat pump */
-		int night_floor = night && !b1_first && (season != BM_WINTER || !wp_fresh || in->wp < WP_ON_TH);
-		/* night (0.25, user 2026-10-08: PCC near 0): the Sofar Bat1 counts signed instead of the fixed B_NIGHT floor.
+		/* night (0.25, user 2026-10-08: PCC near 0): the Sofar Bat1 counts signed instead of the fixed 936 W floor.
 		   Its discharge is house load the stacks take over, its charge is our own overshoot (the 936 W floor charged
 		   the Sofar battery with ~600 W at a 300 W house). pcc + bat1 is the load behind the Sofar however the Sofar
 		   splits it, so both regulators do not fight; the Sofar battery idles, the PCC stays near 0 */
@@ -627,7 +636,7 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 		}
 		if (night)
 			strcat(rule, "|NIGHT");
-		if (wp_eff >= WP_ON_TH)
+		if (wp_eff >= WP_ON_TH && !wp_fc_capped)
 			strcat(rule, season == BM_TRANSITION ? "|WP1900" : "|Z2");
 		if (st->fc_active)
 			strcat(rule, "|FC");
@@ -639,7 +648,7 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 			w = (int)cfg->wp_cap;
 			strcat(rule, "|WP_CAP");
 		}
-		alloc_discharge(cfg, st->lead, w, discharge, out->dis_cap, rule, sp, why);
+		alloc_discharge(st->lead, w, discharge, out->dis_cap, rule, sp, why);
 	}
 	if (n_chg) {
 		double cap_sum = 0;
@@ -662,13 +671,12 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 	   the base load over from the Sofar, soyo: fixed 936 W); by day while they discharge it is ignored (the Sofar
 	   battery covers the house first, the Multis only real grid import, as soyo) */
 	{
-		int night = have_pv && pv < NIGHT_PV_TH;
 		double applied = 0;
 		for (int p = 0; p < NPH; p++)
 			if (pi_ok[p])
 				applied += st->setpoints[p];
 		double b1 = bat1 > 0 ? bat1 * BAT1_CHARGE_FACTOR
-					: (applied > 0 || (night && !b1_first && (season != BM_WINTER || !wp_fresh || in->wp < WP_ON_TH))) ? bat1 : 0.0;
+					: (applied > 0 || night_floor) ? bat1 : 0.0;
 		/* both sides on the Z2 point (discharge 0.19, charge 0.30-c), as soyo */
 		double y = (have_pcc ? z2 : 0.0) + b1, e = y - PI_TARGET;
 		if (fabs(e) < PI_DEADBAND)
@@ -698,7 +706,7 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 		else if (u < 0) {
 			char rule[32];
 			snprintf(rule, sizeof(rule), "PI(%+.0f)", u);
-			alloc_discharge(cfg, st->lead, (int)-u, pi_dis, out->dis_cap, rule, psp, pwhy);
+			alloc_discharge(st->lead, (int)-u, pi_dis, out->dis_cap, rule, psp, pwhy);
 		}
 		for (int p = 0; p < NPH; p++)
 			if (!pi_ok[p])
@@ -766,14 +774,14 @@ void bm_full_forecast(const struct bm_cfg *cfg, const struct bm_fc_in *in, struc
 		out->soc_sunset[b] = -1;
 	out->anchor = 1.0;
 	int w0;
-	double clear_sofar = calc_arrays_kt(ARRAYS, 2, in->t, 1.0) * fc_kt(in, in->t, &w0);
-	out->weather = w0;
 	out->kt_now = fc_kt(in, in->t, &w0);
+	out->weather = w0;
+	double clear_sofar = calc_arrays_kt(ARRAYS, 2, in->t, 1.0) * out->kt_now;
 	if (clear_sofar <= 0)
 		return;                                     /* night: no forecast */
 	if (in->have_pv && clear_sofar >= FC_ANCHOR_MIN_W)
 		out->anchor = fmax(0.05, fmin(3.0, in->pv_sofar / clear_sofar));
-	double pv0 = fc_pv(in, in->t, out->anchor, &w0), p0 = 0;
+	double pv0 = fc_pv(in, in->t, out->anchor, &w0);
 	out->pv_now_w = pv0;
 	double soc[NBANK], pb[NBANK] = {0}, cap[NBANK];
 	int active[NBANK], any = 0;
@@ -785,18 +793,16 @@ void bm_full_forecast(const struct bm_cfg *cfg, const struct bm_fc_in *in, struc
 		if (!active[b])
 			continue;
 		any = 1;
-		p0 += in->avg[b];
 		pb[b] = fmin(fmax(0.0, in->avg[b]), cap[b]);
 		if (soc[b] >= 100)
 			out->full_at[b] = in->t;
 	}
 	if (!any)
 		return;
-	double total0 = 0;
+	double p0 = 0;                                  /* what the stacks take now, at most their chargers */
 	for (int b = 0; b < NBANK; b++)
 		if (active[b] && soc[b] < 100)
-			total0 += pb[b];
-	p0 = total0;                                    /* what the stacks take now, at most their chargers */
+			p0 += pb[b];
 	int lead = in->lead;
 	for (time_t t = in->t + FC_STEP; t < in->t + 86400; t += FC_STEP) {
 		int w;
@@ -809,12 +815,7 @@ void bm_full_forecast(const struct bm_cfg *cfg, const struct bm_fc_in *in, struc
 			else if (lead >= 0 && (lead == 0 ? d : -d) < cfg->soc_balance_off)
 				lead = -1;          /* no longer ahead: a 5 min step can jump over the +-1 % window of update_lead */
 		}
-		int order[NBANK], k = 0;
-		for (int i = 0; i < NBANK; i++)
-			if (CHARGE_PRIORITY[i] != lead)
-				order[k++] = CHARGE_PRIORITY[i];
-		if (lead >= 0)
-			order[k++] = lead;
+		int order[NBANK], k = charge_order(lead, order);
 		double rest = fmax(0.0, p0 + FC_CHARGE_EFF * (pv - pv0));
 		for (int i = 0; i < k; i++) {                  /* alloc_charge: priority order up to the charger */
 			int b = order[i];

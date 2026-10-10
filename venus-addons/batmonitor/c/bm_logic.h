@@ -34,7 +34,7 @@ struct bm_cfg {
 	double wp_bat_max_transition, wp_cap;
 	double soc_min, soc_min_release, soc_force, soc_force_release, force_charge_w;
 	double soc_balance_on, soc_balance_off;
-	double soyo_target, b_night;
+	double soyo_target;
 	double fc_hyst;
 	double sofar_trickle;
 	double charger_a, charge_eff;   /* real charge ceiling per phase = charger_a x BMS voltage / charge_eff (0.29-c) */
