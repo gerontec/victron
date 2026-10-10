@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 batmonitor.py - battery protection and charge / discharge control for a three-phase MultiPlus system whose phases sit
-on separate battery banks (Stack1 MUST on L1, Stack2 Pytes on L2 + L3). Python port of c/batmonitor.c 0.49-c.
+on separate battery banks (Stack1 MUST on L1, Stack2 Pytes on L2 + L3). Python port of c/batmonitor.c 0.50-c.
 
 This file is the shell: it reads the inputs (D-Bus of Venus, MQTT on .218), calls bm_logic.bm_step once per cycle
 and writes the outputs (ESS setpoints per phase, state file, log, PI shadow CSV, DO4 pulse, peak model). The rules
@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bm_logic as L  # noqa: E402
 import bm_parse  # noqa: E402
 
-VERSION = "0.49-py"
+VERSION = "0.50-py"
 INVERTER_TOPIC = "inverter/power_grid_exchange/json"
 R290_TOPIC = "r290/heatpump/all"
 AUSSEN_TOPIC = "aussen/temp"
@@ -42,6 +42,7 @@ SEASON_TOPIC = "batmonitor/season"         # season.py on .218, hourly
 FORECAST_TOPIC = "batmonitor/forecast"     # forecast.py on .218, hourly
 PEAK_MODEL_TOPIC = "batmonitor/peak_model" # out, retained, every PEAK_MODEL_SECONDS: for r290_boost.py
 PEAK_MODEL_SECONDS = 60.0
+DO4_LAST_TOPIC = "batmonitor/do4_last"     # out, retained: {"ts", "pcc_w"} of the last DO4 pulse (r290_boost, hantech)
 DO4_TOPIC = "pv_relay/DO4"                 # out, not retained: "1" for DO4_PULSE_S, then "0" (FoxESS shedding)
 TZ_BERLIN = "CET-1CEST,M3.5.0,M10.5.0/3"   # Europe/Berlin without a zoneinfo file
 SETPOINT_MAX_AGE = 90.0
@@ -425,10 +426,12 @@ class Batmonitor:
         self.run_full_forecast(i)
 
         if o.do4_pulse:
-            log("DO4 pulse (curtail WR2): PCC %.0f W > 20 kW%s" % (i.pcc, "" if self.live else " (dry run, not sent)"))
+            log("DO4 pulse (curtail WR2): PCC %.0f W > 20 kW for %.0f s%s" % (
+                i.pcc, i.now - self.st.do4_over_since, "" if self.live else " (dry run, not sent)"))
             if self.live:
                 self.do4_publish("1")
                 self.do4_off_at = mono() + L.DO4_PULSE_S
+                self.publish(DO4_LAST_TOPIC, '{"ts":%d,"pcc_w":%.0f}' % (int(time.time()), i.pcc), 1, True)
         if o.lead_event > 0:
             log("SoC balance: %s ahead by %.1f %%" % (L.BM_BANKS[self.st.lead].name, o.lead_diff))
         elif o.lead_event < 0:

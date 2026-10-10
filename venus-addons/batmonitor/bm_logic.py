@@ -1,5 +1,5 @@
 """
-bm_logic.py - the batmonitor control logic in Python, a 1:1 port of c/bm_logic.c (0.49-c).
+bm_logic.py - the batmonitor control logic in Python, a 1:1 port of c/bm_logic.c (0.50-c).
 
 One cycle = bm_step(cfg, inp, st) -> Out. Pure: no D-Bus, MQTT, clock or files; batmonitor.py collects the inputs and
 writes the outputs. The names, stages and tables are the ones of the C file, so both can be read side by side:
@@ -182,6 +182,8 @@ BM_PARAMS = [
     Param("WP_BAT_SHARE_BAD", "wp_bat_share_bad", 50, 0, 100, "%", "bad forecast: the stacks cover at most this share of the heat pump"),
     Param("EXPORT_CAP", "export_cap", 18000, 0, 30000, "W", "summer peak window: while the forecast expects export above this, the stacks charge only the export above it (0 = off)"),
     Param("HOUSE_EST", "house_est", 1000, 0, 5000, "W", "summer peak window: house load assumed when turning the PV forecast into export"),
+    Param("DO4_GRACE_S", "do4_grace_s", 120, 0, 600, "s", "DO4 (FoxESS shedding) only after the PCC stays above 20 kW this long: R290 boost and air conditioning first"),
+    Param("DO4_HARD_W", "do4_hard_w", 23000, 20000, 40000, "W", "DO4 at once above this PCC export"),
     Param("CHARGER_DC_W", "charger_dc_w", 3600, 500, 5000, "W", "full_at forecast: DC at the BMS per MultiPlus at its limit"),
 ]
 
@@ -262,6 +264,7 @@ class State:
     fc_active: int = 0
     bat1_first: int = 0
     do4_last: float = 0.0
+    do4_over_since: float = 0.0                 # monotonic s since the PCC is above PCC_PEAK_TH, 0 = not (0.50-c)
     pi_e_prev: float = 0.0
     pi_t_prev: float = 0.0
     setpoints: list = field(default_factory=lambda: [0] * NPH)
@@ -654,9 +657,10 @@ def bm_d4(b, peak_today):
     return int(cap and not cap_charge), int(cap), peak_today
 
 
-def bm_d5(pcc_over, lockout_over):
-    """D5. A fresh PCC above PCC_PEAK_TH and no pulse within DO4_LOCKOUT -> DO4 pulse"""
-    return int(bool(pcc_over and lockout_over))
+def bm_d5(pcc_over, grace_over, pcc_hard, lockout_over):
+    """D5 (grace 0.50-c). A fresh PCC above PCC_PEAK_TH for DO4_GRACE_S (R290 boost and air conditioning first), or
+    above DO4_HARD_W, and no pulse within DO4_LOCKOUT -> DO4 pulse"""
+    return int(bool(pcc_over and (grace_over or pcc_hard) and lockout_over))
 
 
 # ---- the rule chain: one function per stage, run in this order by bm_step ------------------------------------
@@ -1037,7 +1041,13 @@ def bm_step(cfg, inp, st):
     if not c.n_dis:
         st.soyo_prop_prev = 0                # D3 with no discharging phase: reset
     pcc_over = bool(inp.have_pcc and inp.now - inp.inv_time < DO4_PCC_MAX_AGE and inp.pcc > PCC_PEAK_TH)
-    out.do4_pulse = bm_d5(pcc_over, st.do4_last <= 0 or inp.now - st.do4_last >= DO4_LOCKOUT)
+    if not pcc_over:
+        st.do4_over_since = 0.0
+    elif st.do4_over_since <= 0:
+        st.do4_over_since = inp.now
+    out.do4_pulse = bm_d5(pcc_over, pcc_over and inp.now - st.do4_over_since >= cfg.do4_grace_s,
+                          pcc_over and inp.pcc > cfg.do4_hard_w,
+                          st.do4_last <= 0 or inp.now - st.do4_last >= DO4_LOCKOUT)
     if out.do4_pulse:
         st.do4_last = inp.now
     chain_pi(cfg, inp, st, out, c)

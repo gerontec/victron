@@ -275,14 +275,17 @@ static void check_d4(void)
 /* ---- D5: DO4 pulse (0.46-c) ----------------------------------------------------------------------------------- */
 static void check_d5(void)
 {
-	for (int v = 0; v < 4; v++) {
-		struct bm_d5_in b = {BIT(v, 0), BIT(v, 1)};
+	for (int v = 0; v < 16; v++) {
+		struct bm_d5_in b = {BIT(v, 0), BIT(v, 1), BIT(v, 2), BIT(v, 3)};
+		if ((b.grace_over || b.pcc_hard) && !b.pcc_over)  /* both are refinements of pcc_over */
+			continue;
 		int r = bm_d5(&b);
 		INV(!r || b.pcc_over, "DO4 only with a fresh PCC above 20 kW");
+		INV(!r || b.grace_over || b.pcc_hard, "DO4 only after the grace time or above the hard limit");
 		INV(!r || b.lockout_over, "DO4 at most once per DO4_LOCKOUT");
-		INV(r || !b.pcc_over || !b.lockout_over, "DO4 always when both hold");
+		INV(r || !b.lockout_over || !(b.grace_over || b.pcc_hard), "DO4 always when due");
 	}
-	printf("\nD5 DO4 pulse: 4 combinations\n");
+	printf("\nD5 DO4 pulse: 4 bits, grace / hard limit\n");
 }
 
 /* ---- D3 -------------------------------------------------------------------------------------------------------- */

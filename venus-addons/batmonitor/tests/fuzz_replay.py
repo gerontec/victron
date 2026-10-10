@@ -45,7 +45,7 @@ def main():
     out_lines = []
     for line in sys.stdin:
         if line.startswith("FCIN "):           # fuzz_dump.c prints the forecast before the cycle's result line
-            out_lines.insert(len(out_lines) - 1, replay_forecast(cfg, line.split()[1:]))
+            out_lines.insert(len(out_lines) - 2, replay_forecast(cfg, line.split()[1:]))   # before result + D5
             continue
         if not line.startswith("IN "):
             continue
@@ -90,6 +90,7 @@ def main():
         out_lines.append("%d %d %d %d %d\t%s\t%s\t%s\t%.3f %.3f %.3f %.3f %d %d %d %d %d %d\n" % (
             run, k, o.sp[0], o.sp[1], o.sp[2], o.why[0], o.why[1], o.why[2], o.wp_eff, o.surplus, o.pi.u, o.pi.y,
             o.pi.sp[0], o.pi.sp[1], o.pi.sp[2], o.fc_active, o.fc_bad, o.bat1_first))
+        out_lines.append("D5 %d %d %d\n" % (run, k, o.do4_pulse))
     sys.stdout.writelines(out_lines)
 
 

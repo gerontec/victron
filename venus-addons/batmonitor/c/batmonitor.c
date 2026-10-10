@@ -77,7 +77,7 @@
 #include "bm_logic.h"
 #include "bm_parse.h"
 
-#define VERSION "0.49-c"
+#define VERSION "0.50-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
@@ -86,6 +86,8 @@
 #define FORECAST_TOPIC "batmonitor/forecast"   /* forecast.py on .218, hourly: {"target_soc", ..., "ts"} */
 #define PEAK_MODEL_TOPIC "batmonitor/peak_model"   /* out, retained, every PEAK_MODEL_SECONDS: for r290_boost.py */
 #define PEAK_MODEL_SECONDS 60.0
+#define DO4_LAST_TOPIC "batmonitor/do4_last"   /* out, retained: {"ts", "pcc_w"} of the last DO4 pulse, for r290_boost
+                                                 and hantech (they run once a minute and miss the 3 s pulse) */
 #define DO4_TOPIC "pv_relay/DO4"      /* out, not retained: "1" for DO4_PULSE_S, then "0" (relay: curtail WR2, 0.46-c) */
 #define STATE_FILE_DEFAULT "/data/batmonitor/state.json"
 #define TZ_BERLIN "CET-1CEST,M3.5.0,M10.5.0/3"   /* Europe/Berlin without a zoneinfo file */
@@ -690,10 +692,15 @@ static void calc(void)
 	run_full_forecast(&in);
 
 	if (o_.do4_pulse) {
-		LOG("DO4 pulse (curtail WR2): PCC %.0f W > 20 kW%s", in.pcc, LIVE ? "" : " (dry run, not sent)");
+		LOG("DO4 pulse (curtail WR2): PCC %.0f W > 20 kW for %.0f s%s", in.pcc, in.now - st.do4_over_since,
+			LIVE ? "" : " (dry run, not sent)");
 		if (LIVE) {
 			do4_publish("1");
 			do4_off_at = mono() + DO4_PULSE_S;
+			char js[96];
+			int n = snprintf(js, sizeof(js), "{\"ts\":%ld,\"pcc_w\":%.0f}", (long)time(NULL), in.pcc);
+			if (mosq_g)
+				mosquitto_publish(mosq_g, NULL, DO4_LAST_TOPIC, n, js, 1, true);
 		}
 	}
 	if (o_.lead_event > 0)

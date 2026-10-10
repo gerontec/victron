@@ -101,6 +101,8 @@ const struct bm_param BM_PARAMS[] = {
 	{"WP_BAT_SHARE_BAD",      P(wp_bat_share_bad),          50,      0,       100,     "%", "bad forecast: the stacks cover at most this share of the heat pump (summer/transition, winter stays 0)"},
 	{"EXPORT_CAP",            P(export_cap),                18000,   0,       30000,   "W", "summer peak window: while the forecast expects export above this, the stacks charge only the export above it (0 = off)"},
 	{"HOUSE_EST",             P(house_est),                 1000,    0,       5000,    "W", "summer peak window: house load assumed when turning the PV forecast into export"},
+	{"DO4_GRACE_S",           P(do4_grace_s),               120,     0,       600,     "s", "DO4 (FoxESS shedding) only after the PCC stays above 20 kW this long: R290 boost and air conditioning first"},
+	{"DO4_HARD_W",            P(do4_hard_w),                23000,   20000,   40000,   "W", "DO4 at once above this PCC export"},
 	{"CHARGER_DC_W",          P(charger_dc_w),              3600,    500,     5000,    "W", "full_at forecast: DC at the BMS per MultiPlus at its limit (measured 2026-10-09: ~3.6 kW, 65-67 A, flat over 53.6-54.6 V)"},
 };
 const int BM_NPARAMS = sizeof(BM_PARAMS) / sizeof(BM_PARAMS[0]);
@@ -571,10 +573,10 @@ int bm_d4(const struct bm_d4_in *b, const struct bm_d4_state *s, struct bm_d4_st
 	return *cap_active && !cap_charge;
 }
 
-/* D5. A fresh PCC above PCC_PEAK_TH and no pulse within DO4_LOCKOUT -> pulse */
+/* D5. A fresh PCC above PCC_PEAK_TH for DO4_GRACE_S, or above DO4_HARD_W, and no pulse within DO4_LOCKOUT -> pulse */
 int bm_d5(const struct bm_d5_in *b)
 {
-	return b->pcc_over && b->lockout_over;
+	return b->pcc_over && (b->grace_over || b->pcc_hard) && b->lockout_over;
 }
 
 /* ---- the rule chain (0.41-c): one function per stage, run in this order by bm_step ---------------------------------
@@ -1008,7 +1010,13 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 		struct bm_d3_in d = {0, 0, 0, 0};
 		bm_d3(&d, st->soyo_prop_prev, &st->soyo_prop_prev);
 	}
-	struct bm_d5_in d5 = {in->have_pcc && in->now - in->inv_time < DO4_PCC_MAX_AGE && in->pcc > PCC_PEAK_TH,
+	int pcc_over = in->have_pcc && in->now - in->inv_time < DO4_PCC_MAX_AGE && in->pcc > PCC_PEAK_TH;
+	if (!pcc_over)
+		st->do4_over_since = 0;
+	else if (st->do4_over_since <= 0)
+		st->do4_over_since = in->now;
+	struct bm_d5_in d5 = {pcc_over, pcc_over && in->now - st->do4_over_since >= cfg->do4_grace_s,
+						  pcc_over && in->pcc > cfg->do4_hard_w,
 						  st->do4_last <= 0 || in->now - st->do4_last >= DO4_LOCKOUT};
 	out->do4_pulse = bm_d5(&d5);
 	if (out->do4_pulse)

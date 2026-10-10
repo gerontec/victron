@@ -46,6 +46,7 @@ struct bm_cfg {
 	double bat1_soc_min;            /* night: the Sofar battery serves house + WP first while above this % (0.38-c) */
 	double fc_bad_target, wp_bat_share_bad;   /* bad forecast (target_soc >= this): stacks cover at most this % of the WP (0.37-c) */
 	double export_cap, house_est;   /* summer peak window (0.49-c): charge only the export above this W; house load guess */
+	double do4_grace_s, do4_hard_w; /* DO4 only after PCC > 20 kW for this long, at once above this (0.50-c) */
 };
 
 /* parameter table: name (env BATMONITOR_<name>), default, allowed range, unit, meaning */
@@ -109,6 +110,7 @@ struct bm_state {
 	int fc_active;                               /* forecast: stacks above the target SoC -> serve everything */
 	int bat1_first;                              /* Sofar Bat1 above BAT1_SOC_MIN: it discharges first (0.38-c) */
 	double do4_last;                             /* monotonic s of the last DO4 pulse, 0 = none (0.46-c) */
+	double do4_over_since;                       /* monotonic s since the PCC is above PCC_PEAK_TH, 0 = not (0.50-c) */
 	double pi_e_prev, pi_t_prev;
 	int setpoints[NPH];                          /* sent last cycle (the PI's u_applied) */
 };
@@ -246,10 +248,14 @@ struct bm_d4_state { int peak_today; };
 int bm_d4(const struct bm_d4_in *b, const struct bm_d4_state *s, struct bm_d4_state *next, int *cap_active);
 /* returns block (wait below the cap); *cap_active = the charge target is the cap */
 
-/* D5 (0.46-c): DO4 pulse "curtail WR2" (MQTT pv_relay/DO4) when the PCC export passes PCC_PEAK_TH 20 kW, at most one
-   pulse per DO4_LOCKOUT. State: the time of the last pulse, reduced to the bit lockout_over */
+/* D5 (0.46-c, grace 0.50-c): DO4 pulse "curtail WR2" (MQTT pv_relay/DO4, FoxESS shedding) when the PCC export stays
+   above PCC_PEAK_TH 20 kW for DO4_GRACE_S (user 2026-10-10: R290 boost and attic air conditioning first, their
+   minute crons need the time), at once above DO4_HARD_W; at most one pulse per DO4_LOCKOUT. State: the time of the
+   last pulse and the time since the PCC is above 20 kW, reduced to the bits lockout_over and grace_over */
 struct bm_d5_in {
 	int pcc_over;                                /* PCC younger than DO4_PCC_MAX_AGE and > PCC_PEAK_TH */
+	int grace_over;                              /* ... continuously for DO4_GRACE_S */
+	int pcc_hard;                                /* ... and > DO4_HARD_W */
 	int lockout_over;                            /* no pulse yet, or the last one DO4_LOCKOUT ago */
 };
 int bm_d5(const struct bm_d5_in *b);                                  /* 1 = pulse now */

@@ -631,15 +631,20 @@ static void test_forecast_keeps_source(void)
 	CHECK(fabs(sum_sp(&r) + r.bat1 + 3300) <= 60, "stacks + Sofar = house + WP, sp sum %d", sum_sp(&r));
 }
 
-/* 0.46-c: PCC export above 20 kW -> one DO4 pulse "curtail WR2", then DO4_LOCKOUT 5 min */
+/* 0.46-c / 0.50-c: PCC export above 20 kW for DO4_GRACE_S (120 s) -> one DO4 pulse "curtail WR2", at once above
+   DO4_HARD_W (23 kW); then DO4_LOCKOUT 5 min */
 static void test_do4_pulse(void)
 {
 	struct run r;
-	struct plant pl = BASE(.pv = 32000, .house = 500, .soc = {100, 100});   /* stacks full: export ~31 kW */
+	struct plant pl = BASE(.pv = 32000, .house = 500, .soc = {100, 100});   /* stacks full: export ~31.5 kW */
 	simulate(&r, &pl, local_time(2026, 6, 21, 12, 0), 120);              /* 10 min */
 	print_state("21 June 12:00, PV 32 kW, stacks full", &r);
-	CHECK(r.pcc > 20000 && r.do4_pulses == 2, "PCC %.0f W: one pulse at once, one after 5 min, got %d", r.pcc,
-		  r.do4_pulses);
+	CHECK(r.pcc > 23000 && r.do4_pulses == 2, "above 23 kW: a pulse at once, one after 5 min, got %d", r.do4_pulses);
+	pl.pv = 22000;                                               /* export 21.5 kW: grace first */
+	simulate(&r, &pl, local_time(2026, 6, 21, 12, 0), 23);       /* 110 s */
+	CHECK(r.do4_pulses == 0, "21.5 kW for 110 s: boost / air conditioning first, no pulse, got %d", r.do4_pulses);
+	simulate(&r, &pl, local_time(2026, 6, 21, 12, 0), 26);       /* 125 s */
+	CHECK(r.do4_pulses == 1, "21.5 kW for 2 min: pulse, got %d", r.do4_pulses);
 	pl.pv = 19000;
 	simulate(&r, &pl, local_time(2026, 6, 21, 12, 0), 120);
 	CHECK(r.do4_pulses == 0, "export below 20 kW: no pulse, got %d", r.do4_pulses);

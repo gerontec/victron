@@ -27,6 +27,8 @@ int main(int argc, char **argv)
 			in.now = now; in.t = t0 + k * 5;
 			in.have_pcc = ri(20) != 0; in.have_pv = ri(20) != 0;
 			in.pcc = r(-8000, 12000); in.pv = ri(3) ? r(0, 25000) : r(0, 150); in.bat1 = r(-2500, 2500);
+			if (run % 7 == 0 && k >= 30 && k < 90)          /* 0.50-c: export peaks for D5 (deterministic, no rand) */
+				in.pcc = 21000 + 400 * (k % 31);
 			in.pcc_avg5 = in.pcc + r(-500, 500); in.bat1_avg5 = in.bat1 + r(-300, 300);
 			in.inv_time = ri(15) ? now : now - 400;
 			sb1 += r(-2, 2); if (sb1 < 0) sb1 = 0; if (sb1 > 100) sb1 = 100;
@@ -106,6 +108,8 @@ int main(int argc, char **argv)
 			printf("%d %d %d %d %d\t%s\t%s\t%s\t%.3f %.3f %.3f %.3f %d %d %d %d %d %d\n", run, k, out.sp[0], out.sp[1], out.sp[2],
 				   out.why[0], out.why[1], out.why[2], out.wp_eff, out.surplus, out.pi.u, out.pi.y, out.pi.sp[0], out.pi.sp[1],
 				   out.pi.sp[2], out.fc_active, out.fc_bad, out.bat1_first);
+			if (io)                                         /* the DO4 pulse too (D5 changes no setpoint) */
+				printf("D5 %d %d %d\n", run, k, out.do4_pulse);
 		}
 	}
 	return 0;
