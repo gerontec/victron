@@ -10,7 +10,8 @@ DB credentials: ~/.victron2db.cnf in my.cnf format ([client] host, user, passwor
 Cron (pi):  * * * * * /usr/bin/python3 /home/pi/python/victron2db.py >/tmp/victron2db.log 2>&1
 Options:    --print   show the row, do not write
 batmonitor: its decisions of the last cycle come from /data/batmonitor/state.json (Venus /data = host /data)
-into the bm_* columns (setpoints, rules, SoC balancing lead, protection / forced charge flags, surplus);
+into the bm_* columns (setpoints, rules, SoC balancing lead, protection / forced charge flags, surplus,
+5 min average DC power and forecast time of 100 % SoC per stack);
 NULL if the file is missing or older than BM_STATE_MAX_AGE.
 EBox pack counters (cycle count per Pytes pack) from the cache of ebox_mqtt.py (EBOX_STAT, `ebox stat <n>`, refreshed
 every 6 h) into ebox_p1..p3_cycles; NULL if missing or older than EBOX_STAT_MAX_AGE.
@@ -179,7 +180,7 @@ def batmonitor_columns():
 	"""bm_* columns from the batmonitor state file, all None if it is missing or stale"""
 	cols = {f'bm_l{ph}_{k}': None for ph in (1, 2, 3) for k in ('sp_w', 'rule')}
 	cols.update({'bm_balance_lead': None, 'bm_surplus_w': None})
-	cols.update({f'bm_{s}_{k}': None for s, _ in BM_STACKS for k in ('prot', 'force')})
+	cols.update({f'bm_{s}_{k}': None for s, _ in BM_STACKS for k in ('prot', 'force', 'chg_avg5_w', 'full_at')})
 	try:
 		with open(BM_STATE) as f:
 			st = json.load(f)
@@ -195,6 +196,9 @@ def batmonitor_columns():
 	for s, name in BM_STACKS:
 		cols[f'bm_{s}_prot'] = st.get('prot', {}).get(name)
 		cols[f'bm_{s}_force'] = st.get('force', {}).get(name)
+		fc = st.get('forecast', {}).get(name, {})
+		cols[f'bm_{s}_chg_avg5_w'] = fc.get('avg5_w')
+		cols[f'bm_{s}_full_at'] = datetime.fromtimestamp(fc['full_at']) if fc.get('full_at') else None
 	return cols
 
 

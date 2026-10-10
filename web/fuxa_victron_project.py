@@ -99,6 +99,26 @@ text(30, 34, 'Victron MultiPlus-II · three-phase ESS', 20, 'bold')
 text(560, 34, 'as of', 13, fill=MUTED)
 value(600, 34, 'timestamp', '', None, 13, 'normal', fill=MUTED)
 text(790, 34, 'victron_api.php, 1/min', 13, fill=MUTED)
+
+
+def weather_icon(cx, cy):
+    """tomorrow's forecast after the timestamp: sun if sunny_tomorrow (> 3 h sun), else a cloud; hidden (fill/stroke none)
+    while the value is null"""
+    hide, SUN, CLOUD = 'none', '#facc15', '#cbd5e1'
+
+    def r(lo, hi, c, prop):
+        return {'type': 2, 'min': lo, 'max': hi, 'color': c if prop == 'color' else '', 'stroke': c if prop == 'stroke' else ''}
+    sun_on = lambda prop: [r(-1, 0.5, hide, prop), r(0.5, 2, SUN, prop)]
+    cloud_on = lambda prop: [r(-1, 0.5, CLOUD, prop), r(0.5, 2, hide, prop)]
+    rays = ' '.join(f'M{cx + 6.5 * c:.1f},{cy + 6.5 * s:.1f} L{cx + 9 * c:.1f},{cy + 9 * s:.1f}'
+                    for c, s in ((1, 0), (0.707, 0.707), (0, 1), (-0.707, 0.707), (-1, 0), (-0.707, -0.707), (0, -1), (0.707, -0.707)))
+    shape('path', {'d': rays, 'fill': 'none', 'stroke': hide, 'stroke-width': 1.6, 'stroke-linecap': 'round'}, 'sunny_tomorrow', sun_on('stroke'))
+    shape('circle', {'cx': cx, 'cy': cy, 'r': 4.5, 'fill': hide, 'stroke': 'none'}, 'sunny_tomorrow', sun_on('color'))
+    shape('path', {'d': f'M{cx - 8},{cy + 5} a3.5,3.5 0 0 1 1,-6.8 a5,5 0 0 1 9.3,-1.2 a4,4 0 0 1 5.2,4.2 a2.9,2.9 0 0 1 -0.5,3.8 Z',
+                   'fill': hide, 'stroke': 'none'}, 'sunny_tomorrow', cloud_on('color'))
+
+
+weather_icon(762, 29)
 box(1250, 14, 180, 28, '#16263a', 6)
 text(1340, 33, '◂ Heat pump', 13, 'bold', 'middle', '#93c5fd')
 click_tile(1250, 14, 180, 28, 'nav_ww', {'action': 'onOpenTab', 'actparam': 'https://fuxa.heissa.de/', 'actoptions': {'newTab': False}})

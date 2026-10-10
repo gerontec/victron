@@ -89,6 +89,13 @@ ALTER TABLE pv_victron
   ADD COLUMN bm_s2_force TINYINT NULL COMMENT 'Stack2 Pytes forced grid charge (SoC < 3 % until 5 %)',
   ADD COLUMN bm_surplus_w INT NULL COMMENT 'surplus used for charging: PCC + Sofar Bat1 + own AC-in charge (W)';
 
+-- 2026-10-08: full-charge forecast per stack (batmonitor 0.14)
+ALTER TABLE pv_victron
+  ADD COLUMN bm_s1_chg_avg5_w INT NULL COMMENT 'Stack1 MUST DC power, 5 min average (W, + charge)',
+  ADD COLUMN bm_s2_chg_avg5_w INT NULL COMMENT 'Stack2 Pytes DC power, 5 min average (W, + charge)',
+  ADD COLUMN bm_s1_full_at DATETIME NULL COMMENT 'Stack1 MUST forecast 100 % SoC at the 5 min average power',
+  ADD COLUMN bm_s2_full_at DATETIME NULL COMMENT 'Stack2 Pytes forecast 100 % SoC at the 5 min average power';
+
 -- 2026-10-09: cycle count per Pytes pack (ebox_mqtt.py `ebox stat <n>` "CYCLE Times", refreshed every 6 h)
 ALTER TABLE pv_victron
   ADD COLUMN ebox_p1_cycles SMALLINT UNSIGNED NULL COMMENT 'Stack2 Pytes pack 1 cycle count (BMS CYCLE Times)',

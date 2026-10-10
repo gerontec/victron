@@ -3,7 +3,7 @@
 //   victron_api.php            JSON (same layout as dyness_api.php / ww_api.php: values.<key>.value/unit/description/source)
 //   victron_api.php?format=md  plain-text Markdown summary for language models
 // Data: wagodb.pv_victron, one row per minute from victron2db.py on the Venus Pi 4 (192.168.178.119)
-// Topology: dev0 = L1 and dev2 = L3 on Stack2 (Pytes, EBox reader), dev1 = L2 (middle unit) on Stack1 (MUST, CAN BMS)
+// Topology (wall, left to right): unit 1 = dev1 = L2 (Stack2 Pytes), unit 2 middle = dev0 = L1 (Stack1 MUST, CAN BMS), unit 3 = dev2 = L3 (Stack2 Pytes)
 date_default_timezone_set('Europe/Berlin');
 require_once __DIR__ . '/config.php';
 
@@ -21,6 +21,35 @@ try {
         FROM pv_victron WHERE ts >= NOW() - INTERVAL 24 HOUR")->fetch(PDO::FETCH_ASSOC) ?: [];
 } catch (Exception $e) {
     $errors[] = 'database: ' . $e->getMessage();
+}
+
+// sunshine forecast for tomorrow from the OWM 3 h slots in heissa wagodb.weather_data (config2.php, local time, Lenggries):
+// each slot covers timestamp +-90 min; sun hours = daylight part of the slot (date_sun_info) * (1 - cloudiness/100)
+const WX_LAT = 47.6833, WX_LON = 11.5667;
+function wx_pdo(): PDO {
+    require __DIR__ . '/config2.php';   // function scope: keeps config.php's $db_* for pv_victron
+    return new PDO("mysql:host=$db_host;dbname=$db_name;charset=utf8mb4", $db_user, $db_pass, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+}
+$sun_h = null;
+{
+    try {
+        $day = strtotime('tomorrow');
+        $si = date_sun_info($day + 12 * 3600, WX_LAT, WX_LON);
+        $st = wx_pdo()->prepare("SELECT UNIX_TIMESTAMP(timestamp) AS t, cloudiness FROM weather_data
+            WHERE latitude = ? AND longitude = ? AND timestamp >= FROM_UNIXTIME(?) AND timestamp < FROM_UNIXTIME(?)");
+        $st->execute([WX_LAT, WX_LON, $day - 5400, $day + 86400 + 5400]);
+        $slots = $st->fetchAll(PDO::FETCH_ASSOC);
+        if (count($slots) >= 6 && is_int($si['sunrise']) && is_int($si['sunset'])) {
+            $sun_h = 0.0;
+            foreach ($slots as $s) {
+                $lit = min($s['t'] + 5400, $si['sunset']) - max($s['t'] - 5400, $si['sunrise']);
+                if ($lit > 0 && $s['cloudiness'] !== null) $sun_h += $lit / 3600 * (1 - $s['cloudiness'] / 100);
+            }
+            $sun_h = round($sun_h, 1);
+        }
+    } catch (Exception $e) {
+        $errors[] = 'weather_data: ' . $e->getMessage();
+    }
 }
 if (!$r) $errors[] = 'no row in pv_victron';
 
@@ -56,10 +85,10 @@ if ($r) {
         'ac_out_kw' => v(kw($acout), 'kW', 'Power at AC-out of all three MultiPlus (backup loads)', 'derived'),
         'dc_v' => v(num($r['dc_v']), 'V', 'DC voltage measured by the VE.Bus master (dev0)', 'pv_victron.dc_v'),
         'dc_a' => v(num($r['dc_a']), 'A', 'DC current of the VE.Bus system, + = charging', 'pv_victron.dc_a'),
-        // the three units: dev0 L1 + dev2 L3 on Stack2 (Pytes), dev1 L2 on Stack1 (MUST)
-        'l1_ac_in_v' => v(num($r['ac_in_l1_v']), 'V', 'dev0 / L1 (on Stack2 Pytes): AC-in voltage', 'pv_victron.ac_in_l1_v'),
-        'l2_ac_in_v' => v(num($r['ac_in_l2_v']), 'V', 'dev1 / L2 (middle unit, on Stack1 MUST): AC-in voltage', 'pv_victron.ac_in_l2_v'),
-        'l3_ac_in_v' => v(num($r['ac_in_l3_v']), 'V', 'dev2 / L3 (on Stack2 Pytes): AC-in voltage', 'pv_victron.ac_in_l3_v'),
+        // the three units: unit 2 middle = dev0 = L1 on Stack1 (MUST); unit 1 left = dev1 = L2 and unit 3 right = dev2 = L3 on Stack2 (Pytes)
+        'l1_ac_in_v' => v(num($r['ac_in_l1_v']), 'V', 'unit 2 middle, dev0 / L1 (on Stack1 MUST): AC-in voltage', 'pv_victron.ac_in_l1_v'),
+        'l2_ac_in_v' => v(num($r['ac_in_l2_v']), 'V', 'unit 1 left, dev1 / L2 (on Stack2 Pytes): AC-in voltage', 'pv_victron.ac_in_l2_v'),
+        'l3_ac_in_v' => v(num($r['ac_in_l3_v']), 'V', 'unit 3 right, dev2 / L3 (on Stack2 Pytes): AC-in voltage', 'pv_victron.ac_in_l3_v'),
         'l1_ac_in_w' => v(num($r['ac_in_l1_w']), 'W', 'dev0 / L1: AC-in power, + = charging', 'pv_victron.ac_in_l1_w'),
         'l2_ac_in_w' => v(num($r['ac_in_l2_w']), 'W', 'dev1 / L2: AC-in power, + = charging', 'pv_victron.ac_in_l2_w'),
         'l3_ac_in_w' => v(num($r['ac_in_l3_w']), 'W', 'dev2 / L3: AC-in power, + = charging', 'pv_victron.ac_in_l3_w'),
@@ -103,25 +132,32 @@ if ($r) {
         'ess_setpoint_w' => v(num($r['ess_setpoint_w']), 'W', 'ESS grid setpoint (+ = import)', 'pv_victron.ess_setpoint_w'),
         'grid_kw' => v(kw($grid), 'kW', 'Grid value used by ESS: -(Sofar PCC + Bat1) with observer (dbus-pcc-grid), + = import', 'derived: pv_victron.grid_l1..l3_w'),
         // batmonitor decisions (venus-addons/batmonitor, Hub4Mode 3)
-        'bm_l1_sp_w' => v(num($r['bm_l1_sp_w'] ?? null), 'W', 'batmonitor setpoint L1 (dev0, Stack2), + = charging', 'pv_victron.bm_l1_sp_w'),
-        'bm_l2_sp_w' => v(num($r['bm_l2_sp_w'] ?? null), 'W', 'batmonitor setpoint L2 (dev1, Stack1), + = charging', 'pv_victron.bm_l2_sp_w'),
-        'bm_l3_sp_w' => v(num($r['bm_l3_sp_w'] ?? null), 'W', 'batmonitor setpoint L3 (dev2, Stack2), + = charging', 'pv_victron.bm_l3_sp_w'),
+        'bm_l1_sp_w' => v(num($r['bm_l1_sp_w'] ?? null), 'W', 'batmonitor setpoint L1 (dev0, middle, Stack1), + = charging', 'pv_victron.bm_l1_sp_w'),
+        'bm_l2_sp_w' => v(num($r['bm_l2_sp_w'] ?? null), 'W', 'batmonitor setpoint L2 (dev1, left, Stack2), + = charging', 'pv_victron.bm_l2_sp_w'),
+        'bm_l3_sp_w' => v(num($r['bm_l3_sp_w'] ?? null), 'W', 'batmonitor setpoint L3 (dev2, right, Stack2), + = charging', 'pv_victron.bm_l3_sp_w'),
         'bm_l1_rule' => v($r['bm_l1_rule'] ?? null, 'text', 'batmonitor rule L1', 'pv_victron.bm_l1_rule'),
         'bm_l2_rule' => v($r['bm_l2_rule'] ?? null, 'text', 'batmonitor rule L2', 'pv_victron.bm_l2_rule'),
         'bm_l3_rule' => v($r['bm_l3_rule'] ?? null, 'text', 'batmonitor rule L3', 'pv_victron.bm_l3_rule'),
         'bm_balance_lead' => v($r['bm_balance_lead'] ?? null, 'text', 'Stack more than 3 % SoC ahead (it alone feeds the house, the other is charged first); null = balanced', 'pv_victron.bm_balance_lead'),
         'bm_surplus_kw' => v(kw($r['bm_surplus_w'] ?? null), 'kW', 'Surplus used for charging: Sofar PCC + Bat1 + own AC-in charging', 'pv_victron.bm_surplus_w'),
+        's1_chg_avg5_kw' => v(kw($r['bm_s1_chg_avg5_w'] ?? null), 'kW', 'Stack1 DC power, 5 min average (+ = charging)', 'pv_victron.bm_s1_chg_avg5_w'),
+        's2_chg_avg5_kw' => v(kw($r['bm_s2_chg_avg5_w'] ?? null), 'kW', 'Stack2 DC power, 5 min average (+ = charging)', 'pv_victron.bm_s2_chg_avg5_w'),
+        's1_full_at' => v(isset($r['bm_s1_full_at']) ? date('H:i', strtotime($r['bm_s1_full_at'])) : null, 'text', 'Stack1 forecast: 100 % SoC at this time (hh:mm) if the 5 min average charge power holds; null = not charging or full', 'pv_victron.bm_s1_full_at'),
+        's2_full_at' => v(isset($r['bm_s2_full_at']) ? date('H:i', strtotime($r['bm_s2_full_at'])) : null, 'text', 'Stack2 forecast: 100 % SoC at this time (hh:mm) if the 5 min average charge power holds; null = not charging or full', 'pv_victron.bm_s2_full_at'),
         's1_discharge_blocked' => v(isset($r['bm_s1_prot']) ? (bool)$r['bm_s1_prot'] : null, 'bool', 'Stack1 discharge protection (SoC < 5 % until 7 %)', 'pv_victron.bm_s1_prot'),
         's2_discharge_blocked' => v(isset($r['bm_s2_prot']) ? (bool)$r['bm_s2_prot'] : null, 'bool', 'Stack2 discharge protection (SoC < 5 % until 7 %)', 'pv_victron.bm_s2_prot'),
         's1_forced_charge' => v(isset($r['bm_s1_force']) ? (bool)$r['bm_s1_force'] : null, 'bool', 'Stack1 forced grid charge (SoC < 3 % until 5 %)', 'pv_victron.bm_s1_force'),
         's2_forced_charge' => v(isset($r['bm_s2_force']) ? (bool)$r['bm_s2_force'] : null, 'bool', 'Stack2 forced grid charge (SoC < 3 % until 5 %)', 'pv_victron.bm_s2_force'),
+        // weather
+        'sun_h_tomorrow' => v($sun_h, 'h', 'Forecast sunshine hours tomorrow: OWM 3 h slots, daylight part * (1 - cloudiness)', 'weather_data.cloudiness'),
+        'sunny_tomorrow' => v($sun_h === null ? null : ($sun_h > 3 ? 1 : 0), '', '1 = more than 3 h of sun forecast for tomorrow (sun icon), 0 = cloud icon', 'derived: sun_h_tomorrow'),
         'consumption_kw' => v(($r['consumption_l1_w'] === null) ? null : kw($r['consumption_l1_w'] + $r['consumption_l2_w'] + $r['consumption_l3_w']), 'kW', 'Consumption seen by Venus', 'derived'),
     ];
 }
 
 $api = [
     'api' => ['name' => 'Victron MultiPlus live API', 'version' => '1.0', 'self' => $self,
-              'description' => 'Latest minute of the Victron three-phase system in Lenggries: 3x MultiPlus-II 48/5000 (dev0 L1, dev1 L2 middle, dev2 L3), Venus OS v3.81 on a Raspberry Pi 4. dev1 runs on Stack1 (MUST, 300 Ah, CAN BMS), dev0 and dev2 on Stack2 (Pytes EBox, 300 Ah). ESS regulates on the Sofar PCC plus the Sofar house battery.'],
+              'description' => 'Latest minute of the Victron three-phase system in Lenggries: 3x MultiPlus-II 48/5000 (on the wall left to right: unit 1 = dev1 = L2, unit 2 = dev0 = L1 = VE.Bus master, unit 3 = dev2 = L3), Venus OS v3.81 on a Raspberry Pi 4. The middle unit (L1) runs on Stack1 (MUST, 300 Ah, CAN BMS), the outer units (L2, L3) on Stack2 (Pytes EBox, 300 Ah). ESS regulates on the Sofar PCC plus the Sofar house battery.'],
     'timestamp' => $r['ts'] ?? null,
     'timezone' => 'Europe/Berlin',
     'ok' => !$errors,
