@@ -571,33 +571,47 @@ static void chain_inputs(const struct bm_in *in, struct bm_out *out, struct chai
 /* forecast, S3 source, S2 scope: bits for bm_d1, then the heat pump power the stacks must NOT cover (Z2 point =
    Z1 PCC + that, 0.19): all of it in winter, the part above WP_BAT_MAX_TRANSITION in the transition (0.22), none in
    summer, with a bad forecast all but WP_BAT_SHARE_BAD % (0.37-c) */
+static double lowest_soc(const struct bm_in *in)
+{
+	double min_soc = 101;
+	for (int k = 0; k < NBANK; k++)
+		if (in->bms_ok[k] && in->soc[k] < min_soc)
+			min_soc = in->soc[k];
+	return min_soc;
+}
+
+/* the predicates of bm_d1 from the inputs (tests/cbmc_harness.c proves the constraints check_matrix assumes) */
+static void d1_bits(const struct bm_cfg *cfg, const struct bm_in *in, const struct bm_out *out, const struct chain *c,
+					struct bm_d1_in *b)
+{
+	double min_soc = lowest_soc(in);
+	double base_share = out->season == BM_WINTER ? 0.0
+						: out->season == BM_TRANSITION ? fmin(in->wp, cfg->wp_bat_max_transition) : in->wp;
+	memset(b, 0, sizeof(*b));
+	b->season = out->season;
+	b->night = c->night;
+	b->wp_fresh = c->wp_fresh;
+	b->wp_pos = c->wp_fresh && in->wp > 0;
+	b->wp_on = c->wp_on;
+	b->wp_running = c->wp_running;
+	b->wp_gt_trans = in->wp > cfg->wp_bat_max_transition;
+	b->fc_share_lt_share = in->wp * cfg->wp_bat_share_bad / 100.0 < base_share;
+	b->fc_fresh = cfg->forecast && in->fc_target >= 0 && in->fc_ts > 0 && in->t - in->fc_ts < FC_MAX_AGE;
+	b->fc_minsoc_ok = min_soc <= 100;
+	b->fc_above_on = min_soc > in->fc_target + cfg->fc_hyst;
+	b->fc_below_off = min_soc < in->fc_target;
+	b->fc_target_bad = in->fc_target >= cfg->fc_bad_target;
+	b->b1_above_min = in->have_soc_bat1 && in->soc_bat1 > cfg->bat1_soc_min;
+	b->b1_ge_release = in->soc_bat1 >= cfg->bat1_soc_min + BAT1_FIRST_HYST;
+}
+
 static void chain_d1(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *st, struct bm_out *out,
 					 struct chain *c)
 {
 	struct bm_d1_in b;
 	struct bm_d1_out o;
-	memset(&b, 0, sizeof(b));
-	double min_soc = 101;
-	for (int k = 0; k < NBANK; k++)
-		if (in->bms_ok[k] && in->soc[k] < min_soc)
-			min_soc = in->soc[k];
-	double base_share = out->season == BM_WINTER ? 0.0
-						: out->season == BM_TRANSITION ? fmin(in->wp, cfg->wp_bat_max_transition) : in->wp;
-	b.season = out->season;
-	b.night = c->night;
-	b.wp_fresh = c->wp_fresh;
-	b.wp_pos = c->wp_fresh && in->wp > 0;
-	b.wp_on = c->wp_on;
-	b.wp_running = c->wp_running;
-	b.wp_gt_trans = in->wp > cfg->wp_bat_max_transition;
-	b.fc_share_lt_share = in->wp * cfg->wp_bat_share_bad / 100.0 < base_share;
-	b.fc_fresh = cfg->forecast && in->fc_target >= 0 && in->fc_ts > 0 && in->t - in->fc_ts < FC_MAX_AGE;
-	b.fc_minsoc_ok = min_soc <= 100;
-	b.fc_above_on = min_soc > in->fc_target + cfg->fc_hyst;
-	b.fc_below_off = min_soc < in->fc_target;
-	b.fc_target_bad = in->fc_target >= cfg->fc_bad_target;
-	b.b1_above_min = in->have_soc_bat1 && in->soc_bat1 > cfg->bat1_soc_min;
-	b.b1_ge_release = in->soc_bat1 >= cfg->bat1_soc_min + BAT1_FIRST_HYST;
+	double min_soc = lowest_soc(in);
+	d1_bits(cfg, in, out, c, &b);
 	bm_d1(&b, st->fc_active, st->bat1_first, &o);
 	st->fc_active = o.fc_active;
 	st->bat1_first = o.bat1_first;
@@ -649,6 +663,19 @@ static void chain_gates(const struct bm_cfg *cfg, const struct bm_in *in, struct
 	}
 }
 
+/* the per-bank predicates of bm_d2 (tests/cbmc_harness.c proves the constraints check_matrix assumes) */
+static void d2_bank_bits(const struct bm_cfg *cfg, int soc_ok, double soc, int power_ok, double power,
+						 struct bm_d2_bank *x)
+{
+	x->bms_ok = soc_ok;
+	x->soc_lt_min = soc < cfg->soc_min;
+	x->soc_ge_release = soc >= cfg->soc_min_release;
+	x->soc_lt_force = soc < cfg->soc_force;
+	x->soc_ge_force_release = soc >= cfg->soc_force_release;
+	x->soc_lt_100 = soc < 100.0;
+	x->charging = power_ok && power > CHARGING_TH;
+}
+
 /* S1: charge or discharge, then per phase the first matching state */
 static void chain_mode(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *st, struct bm_out *out,
 					   struct chain *c)
@@ -672,16 +699,8 @@ static void chain_mode(const struct bm_cfg *cfg, const struct bm_in *in, struct 
 	d.block = c->block;
 	d.surplus_gt_on = c->surplus > PCC_SURPLUS_TH;
 	d.surplus_gt_hold = c->surplus > SOYO_HOLD_TH;
-	for (int b = 0; b < NBANK; b++) {
-		struct bm_d2_bank *x = &d.bank[b];
-		x->bms_ok = st->soc_ok[b];
-		x->soc_lt_min = st->soc[b] < cfg->soc_min;
-		x->soc_ge_release = st->soc[b] >= cfg->soc_min_release;
-		x->soc_lt_force = st->soc[b] < cfg->soc_force;
-		x->soc_ge_force_release = st->soc[b] >= cfg->soc_force_release;
-		x->soc_lt_100 = st->soc[b] < 100.0;
-		x->charging = in->power_ok[b] && in->power[b] > CHARGING_TH;
-	}
+	for (int b = 0; b < NBANK; b++)
+		d2_bank_bits(cfg, st->soc_ok[b], st->soc[b], in->power_ok[b], in->power[b], &d.bank[b]);
 	bm_d2(&d, st->prot, st->force, st->soyo_chg_prev, &o);
 	memcpy(st->prot, o.prot, sizeof(st->prot));
 	memcpy(st->force, o.force, sizeof(st->force));
