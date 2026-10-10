@@ -1,5 +1,5 @@
 """
-bm_logic.py - the batmonitor control logic in Python, a 1:1 port of c/bm_logic.c (0.48-c).
+bm_logic.py - the batmonitor control logic in Python, a 1:1 port of c/bm_logic.c (0.49-c).
 
 One cycle = bm_step(cfg, inp, st) -> Out. Pure: no D-Bus, MQTT, clock or files; batmonitor.py collects the inputs and
 writes the outputs. The names, stages and tables are the ones of the C file, so both can be read side by side:
@@ -180,6 +180,8 @@ BM_PARAMS = [
     Param("BAT1_SOC_MIN", "bat1_soc_min", 5, 0, 101, "%", "night: the Sofar Bat1 serves house + heat pump first down to this SoC; 101 = off"),
     Param("FC_BAD_TARGET", "fc_bad_target", 100, 0, 101, "%", "bad forecast when target_soc >= this; 101 = off"),
     Param("WP_BAT_SHARE_BAD", "wp_bat_share_bad", 50, 0, 100, "%", "bad forecast: the stacks cover at most this share of the heat pump"),
+    Param("EXPORT_CAP", "export_cap", 18000, 0, 30000, "W", "summer peak window: while the forecast expects export above this, the stacks charge only the export above it (0 = off)"),
+    Param("HOUSE_EST", "house_est", 1000, 0, 5000, "W", "summer peak window: house load assumed when turning the PV forecast into export"),
     Param("CHARGER_DC_W", "charger_dc_w", 3600, 500, 5000, "W", "full_at forecast: DC at the BMS per MultiPlus at its limit"),
 ]
 
@@ -228,6 +230,8 @@ class In:
     season_ts: int = 0
     fc_target: float = 0.0                      # batmonitor/forecast target_soc %, < 0 = none
     fc_ts: int = 0
+    fc_corr: float = 0.0                        # forecast.py correction, <= 0 = none (0.49-c)
+    fc_slots: list = field(default_factory=list)                 # [(unix t, kt)] OWM 3 h slots (kt_slots)
     ac_ok: list = field(default_factory=lambda: [0] * NPH)
     ac_in: list = field(default_factory=lambda: [0.0] * NPH)     # vebus /Ac/ActiveIn/Lx/P, + = the Multi takes
     ac_out_ok: list = field(default_factory=lambda: [0] * NPH)
@@ -254,9 +258,7 @@ class State:
     soyo_chg_prev: int = 0
     soyo_prop_prev: int = 0
     ls_yday: int = -1
-    peak_today: int = 0
-    ls_latched: int = 0
-    badweather_today: int = 0
+    peak_today: int = 0                         # PCC > 20 kW seen today (display)
     fc_active: int = 0
     bat1_first: int = 0
     do4_last: float = 0.0
@@ -267,7 +269,8 @@ class State:
 
 @dataclass
 class Ls:
-    active: int = 0
+    active: int = 0                             # waiting below the cap (block)
+    cap: int = 0                                # charge only the export above EXPORT_CAP
     peak_h: int = 0
     win_end_h: int = 0
     dc: float = 0.0
@@ -637,28 +640,18 @@ def bm_d3(any_dis, house_import, deficit_gt_hold, prop_hold, prop_prev):
     return int(bool(any_dis and (house_import or ((prop_prev or prop_hold) and deficit_gt_hold))))
 
 
-def bm_d4(b, s):
-    """D4 summer charge block LADESPERRE. s = (peak_today, latched, badweather). Reset at midnight; the PCC peak ends the
-    window for the day; bad weather (ratio_now) releases it for the day; the latch follows the 5 min ratio with
-    hysteresis inside the window and drops outside. Returns (block, next state)."""
-    peak_today, latched, badweather = s
+def bm_d4(b, peak_today):
+    """D4 summer peak window as a forecast export cap (0.49-c). The cap holds while enabled, in the season and the
+    forecast still expects export above EXPORT_CAP today; then the stacks charge only the surplus above the cap (charge
+    mode on that surplus, held down to SOYO_HOLD_TH) and wait below it. peak_today: PCC above PCC_PEAK_TH seen today.
+    Returns (block = wait below the cap, cap_active, peak_today)."""
     if b["new_day"]:
-        peak_today = latched = badweather = 0
+        peak_today = 0
     if b["pcc_peak"]:
         peak_today = 1
-    if not b["enabled"]:
-        return 0, (peak_today, latched, badweather)
-    in_window = b["season"] and b["day_can_peak"] and not peak_today and b["before_peak"]
-    if in_window and b["now_bad"]:
-        badweather = 1
-    if not in_window:
-        latched = 0
-    elif b["ratio_valid"]:
-        if not latched and b["ratio_le_on"]:
-            latched = 1
-        elif latched and b["ratio_ge_off"]:
-            latched = 0
-    return int(bool(in_window and latched and not badweather)), (peak_today, latched, badweather)
+    cap = bool(b["enabled"] and b["season"] and b["fc_cap_ahead"])
+    cap_charge = b["surplus_cap_on"] or (b["chg_prev"] and b["surplus_cap_hold"])
+    return int(cap and not cap_charge), int(cap), peak_today
 
 
 def bm_d5(pcc_over, lockout_over):
@@ -684,6 +677,7 @@ class Chain:
         self.wp_cap_armed = 0
         self.bat1_eff = self.chg_ref = self.surplus = 0.0
         self.block = self.charge_mode = 0
+        self.cap_active = 0                     # D4: charge only the export above EXPORT_CAP
         self.discharge = [0] * NPH
         self.charge = [0] * NPH
         self.n_dis = self.n_chg = 0
@@ -809,12 +803,17 @@ def d2_bank_bits(cfg, soc_ok, soc, power_ok, power):
     }
 
 
-def ladesperre(cfg, inp, st, out, stale, multis):
-    """the model part of the summer charge block (clear-sky dc, peak hour, ratio) and D4 on its bits.
-    multis = signed AC-in sum of the Multis (+ = they take from the AC side). 1 = do not charge from PV"""
+CAP_STEP = 900                 # s: forecast scan step of the peak window
+CAP_DAY_END_H = 21             # local hour: the scan ends here
+
+
+def ladesperre(cfg, inp, st, out, stale, multis, surplus, c):
+    """the model part of the summer peak window and D4 on its bits. Forecast scan: expected PV of both inverters from
+    now to CAP_DAY_END_H (clear sky x OWM slot x correction, anchored to the measured Sofar PV of now, as
+    bm_full_forecast), minus HOUSE_EST = expected export. Sets c.cap_active, returns block (wait below the cap)"""
     now = inp.t
     lt = time.localtime(now)
-    month, yday, hour = lt.tm_mon, lt.tm_yday - 1, lt.tm_hour
+    month, yday = lt.tm_mon, lt.tm_yday - 1
     new_day = yday != st.ls_yday
     st.ls_yday = yday
     dc = bm_dc_now(now, month)
@@ -822,34 +821,41 @@ def ladesperre(cfg, inp, st, out, stale, multis):
         elev, _ = bm_sun_pos(now)
         dc *= dc_temp_factor(elev, inp.aussen)
     midnight = int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)))
-    best_w, peak_h, win_end = 0.0, -1, -1
-    for h in range(5, 21):
-        w = bm_dc_now(midnight + h * 3600, month)
-        if w > best_w:
-            best_w, peak_h = w, h
-        if w > PCC_PEAK_TH:
-            win_end = h
     noon = solar_noon_utc(now)
-    # measured PV minus house load: export + Sofar Bat1 + what the Multis take
+    # measured PV minus house load against the model (display, r290_boost reads ratio_now)
     ratio = ratio_now = -1.0
     if dc > DC_RATIO_MIN and not stale and inp.have_pcc:
         ratio = (dc - (inp.pcc_avg5 + multis + inp.bat1_avg5)) / dc
         ratio_now = (dc - (inp.pcc + multis + inp.bat1)) / dc
+    # forecast scan
+    fi = FcIn(t=now, corr=inp.fc_corr, slots=list(inp.fc_slots[:BM_FC_SLOTS]))
+    kt0, _ = fc_kt(fi, now)
+    clear_sofar = calc_arrays_kt(ARRAYS, now, 1.0) * kt0
+    anchor = 1.0
+    if inp.have_pv and not stale and clear_sofar >= FC_ANCHOR_MIN_W:
+        anchor = fmax(0.05, fmin(3.0, inp.pv / clear_sofar))
+    best, peak_h, end_h, ahead = 0.0, -1, -1, False
+    t = now
+    while t <= midnight + CAP_DAY_END_H * 3600:
+        pv, _ = fc_pv(fi, t, anchor)
+        hour = time.localtime(t).tm_hour
+        if pv > best:
+            best, peak_h = pv, hour
+        if pv - cfg.house_est > cfg.export_cap:
+            ahead, end_h = True, hour
+        t += CAP_STEP
     bits = {
         "new_day": new_day,
-        "enabled": cfg.ladesperre,
-        "pcc_peak": bool(inp.have_pcc and not stale and inp.pcc > PCC_PEAK_TH),
+        "enabled": bool(cfg.ladesperre and cfg.export_cap > 0),
         "season": LADESPERRE_FROM <= month <= LADESPERRE_TO,
-        "day_can_peak": best_w > PCC_PEAK_TH and win_end >= 0,
-        "before_peak": hour <= peak_h and now < noon,
-        "ratio_valid": ratio >= 0.0,
-        "ratio_le_on": ratio <= LADESPERRE_RATIO,
-        "ratio_ge_off": ratio >= LADESPERRE_RATIO + LADESPERRE_HYST,
-        "now_bad": ratio_now >= LADESPERRE_NOW_RATIO,
+        "fc_cap_ahead": ahead,
+        "pcc_peak": bool(inp.have_pcc and not stale and inp.pcc > PCC_PEAK_TH),
+        "surplus_cap_on": surplus - cfg.export_cap > PCC_SURPLUS_TH,
+        "surplus_cap_hold": surplus - cfg.export_cap > SOYO_HOLD_TH,
+        "chg_prev": st.soyo_chg_prev,
     }
-    block, (st.peak_today, st.ls_latched, st.badweather_today) = bm_d4(
-        bits, (st.peak_today, st.ls_latched, st.badweather_today))
-    out.ls = Ls(block, peak_h if best_w > PCC_PEAK_TH else -1, win_end, dc, ratio, ratio_now,
+    block, c.cap_active, st.peak_today = bm_d4(bits, st.peak_today)
+    out.ls = Ls(block, c.cap_active, peak_h if ahead else -1, end_h, dc, ratio, ratio_now,
                 (noon - midnight) / 3600.0)
     return block
 
@@ -862,7 +868,7 @@ def chain_mode(cfg, inp, st, out, c):
     # charging on the Z2 point too (0.30-c): in winter the PV goes into the stacks, the heat pump takes the Z1 grid
     c.chg_ref = c.z2 if inp.have_pcc else 0.0
     c.surplus = c.chg_ref + c.bat1_eff + c.own_charge - c.own_discharge
-    c.block = ladesperre(cfg, inp, st, out, c.stale, c.multis)
+    c.block = ladesperre(cfg, inp, st, out, c.stale, c.multis, c.surplus, c)
     d = {
         "stale": c.stale,
         "block": c.block,
@@ -942,13 +948,17 @@ def chain_charge(cfg, st, out, c):
     below 0"""
     cap = int_caps(out.chg_cap)
     cap_sum = sum(cap[p] for p in range(NPH) if c.charge[p])
-    want = watt(c.own_charge) + c_div(KP_PM * (watt(c.chg_ref + c.bat1_eff) - watt(cfg.soyo_target)), 1000)
+    # D4 cap (0.49-c): aim at PCC = +EXPORT_CAP, so only the export above the cap goes into the stacks
+    target = watt(cfg.soyo_target + (cfg.export_cap if c.cap_active else 0.0))
+    want = watt(c.own_charge) + c_div(KP_PM * (watt(c.chg_ref + c.bat1_eff) - target), 1000)
     if want < 0:
         want = 0
     alloc_charge(cfg, st.lead, min(want, cap_sum), c.charge, c.n_chg, cap, out.sp)
     for p in range(NPH):
         if c.charge[p]:
             out.why[p] = (out.why[p] + (" BAL" if st.lead >= 0 else " EQ"))[:WHY_LEN - 1]
+            if c.cap_active:
+                out.why[p] = (out.why[p] + " CAP")[:WHY_LEN - 1]
 
 
 def chain_pi(cfg, inp, st, out, c):

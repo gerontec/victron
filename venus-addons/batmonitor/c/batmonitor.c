@@ -51,7 +51,7 @@
  *     there until the SoC drops below 100 again (was: the current time). After a restart that time is the restart.
  *   - peak model out (0.33-c, user 2026-10-09): the clear-sky peak model of the charge block (fox2db_logic.h, as the
  *     Waveshare ESP sent it in sofar/state until 2026-10-08) goes retained to PEAK_MODEL_TOPIC once a minute:
- *     {"ts", "peak_h", "win_end_h", "ratio", "ratio_now", "dc_expected_w", "noon_h", "peak_today", "badweather_today",
+ *     {"ts", "peak_h", "win_end_h", "ratio", "ratio_now", "dc_expected_w", "noon_h", "peak_today", "cap_active",
  *     "ladesperre_active", "version"}; r290_boost.py on .218 reads it for its peak reserve.
  * PI prototype (not armed): BATMONITOR_PI=1 lets a velocity-form PI on y = PCC + Sofar Bat1 replace the soyo
  * discharge/charge amounts (same gates, same phase split). Without it the PI runs in shadow: every cycle one line
@@ -77,7 +77,7 @@
 #include "bm_logic.h"
 #include "bm_parse.h"
 
-#define VERSION "0.48-c"
+#define VERSION "0.49-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
@@ -549,6 +549,7 @@ static void write_state(const int *sp, char why[][WHY_LEN], double surplus)
 	}
 	o = cJSON_AddObjectToObject(js, "ladesperre");
 	cJSON_AddNumberToObject(o, "active", o_.ls.active);
+	cJSON_AddNumberToObject(o, "cap_active", o_.ls.cap);           /* 0.49-c: charge only the export above EXPORT_CAP */
 	cJSON_AddNumberToObject(o, "dc_expected_w", round(o_.ls.dc));
 	cJSON_AddNumberToObject(o, "ratio", round(o_.ls.ratio * 1000) / 1000);
 	cJSON_AddNumberToObject(o, "ratio_now", round(o_.ls.ratio_now * 1000) / 1000);
@@ -556,7 +557,6 @@ static void write_state(const int *sp, char why[][WHY_LEN], double surplus)
 	cJSON_AddNumberToObject(o, "win_end_h", o_.ls.win_end_h);
 	cJSON_AddNumberToObject(o, "noon_h", round(o_.ls.noon_h * 100) / 100);
 	cJSON_AddNumberToObject(o, "peak_today", st.peak_today);
-	cJSON_AddNumberToObject(o, "badweather_today", st.badweather_today);
 	cJSON_AddStringToObject(js, "season", o_.season == BM_WINTER ? "winter" : o_.season == BM_TRANSITION ? "transition"
 							: "summer");
 	cJSON_AddStringToObject(js, "season_source", o_.season_measured ? "measured" : "months");
@@ -621,9 +621,9 @@ static void publish_peak_model(double now)
 		return;
 	char buf[512];
 	int n = snprintf(buf, sizeof(buf), "{\"ts\":%ld,\"peak_h\":%d,\"win_end_h\":%d,\"ratio\":%.3f,\"ratio_now\":%.3f,"
-					 "\"dc_expected_w\":%.0f,\"noon_h\":%.2f,\"peak_today\":%d,\"badweather_today\":%d,"
+					 "\"dc_expected_w\":%.0f,\"noon_h\":%.2f,\"peak_today\":%d,\"cap_active\":%d,"
 					 "\"ladesperre_active\":%d,\"version\":\"%s\"}", (long)time(NULL), o_.ls.peak_h, o_.ls.win_end_h,
-					 o_.ls.ratio, o_.ls.ratio_now, o_.ls.dc, o_.ls.noon_h, st.peak_today, st.badweather_today,
+					 o_.ls.ratio, o_.ls.ratio_now, o_.ls.dc, o_.ls.noon_h, st.peak_today, o_.ls.cap,
 					 o_.ls.active, VERSION);
 	if (n > 0 && n < (int)sizeof(buf)
 		&& mosquitto_publish(mosq_g, NULL, PEAK_MODEL_TOPIC, n, buf, 1, true) == MOSQ_ERR_SUCCESS)
@@ -660,6 +660,12 @@ static void calc(void)
 	in.season_ts = (time_t)mq.season_ts;
 	in.fc_target = mq.fc_ts > 0 ? mq.fc_target : -1;
 	in.fc_ts = (time_t)mq.fc_ts;
+	if (mq.fc_ts > 0 && in.t - (time_t)mq.fc_ts < 3 * 3600) {      /* the slots for the peak window, as FC_MAX_AGE */
+		in.fc_corr = mq.fc_corr;
+		in.fc_n = mq.fc_n;
+		memcpy(in.fc_slot_t, mq.fc_slot_t, sizeof(in.fc_slot_t));
+		memcpy(in.fc_slot_kt, mq.fc_slot_kt, sizeof(in.fc_slot_kt));
+	}
 	pthread_mutex_unlock(&mq_lock);
 	const char *vb = vebus();
 	for (int p = 0; p < NPH; p++) {

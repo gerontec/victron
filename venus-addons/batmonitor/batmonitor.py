@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 batmonitor.py - battery protection and charge / discharge control for a three-phase MultiPlus system whose phases sit
-on separate battery banks (Stack1 MUST on L1, Stack2 Pytes on L2 + L3). Python port of c/batmonitor.c 0.48-c.
+on separate battery banks (Stack1 MUST on L1, Stack2 Pytes on L2 + L3). Python port of c/batmonitor.c 0.49-c.
 
 This file is the shell: it reads the inputs (D-Bus of Venus, MQTT on .218), calls bm_logic.bm_step once per cycle
 and writes the outputs (ESS setpoints per phase, state file, log, PI shadow CSV, DO4 pulse, peak model). The rules
@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bm_logic as L  # noqa: E402
 import bm_parse  # noqa: E402
 
-VERSION = "0.48-py"
+VERSION = "0.49-py"
 INVERTER_TOPIC = "inverter/power_grid_exchange/json"
 R290_TOPIC = "r290/heatpump/all"
 AUSSEN_TOPIC = "aussen/temp"
@@ -253,9 +253,9 @@ class Batmonitor:
             return
         o, st = self.out, self.st
         payload = ('{"ts":%d,"peak_h":%d,"win_end_h":%d,"ratio":%.3f,"ratio_now":%.3f,"dc_expected_w":%.0f,'
-                   '"noon_h":%.2f,"peak_today":%d,"badweather_today":%d,"ladesperre_active":%d,"version":"%s"}'
+                   '"noon_h":%.2f,"peak_today":%d,"cap_active":%d,"ladesperre_active":%d,"version":"%s"}'
                    % (int(time.time()), o.ls.peak_h, o.ls.win_end_h, o.ls.ratio, o.ls.ratio_now, o.ls.dc, o.ls.noon_h,
-                      st.peak_today, st.badweather_today, o.ls.active, VERSION))
+                      st.peak_today, o.ls.cap, o.ls.active, VERSION))
         if self.publish(PEAK_MODEL_TOPIC, payload, 1, True):
             self.last_peak_model = now
 
@@ -340,10 +340,10 @@ class Batmonitor:
             "bms_limits": {bank.name: ({"ccl_a": il.ccl[b], "dcl_a": il.dcl[b]} if il.lim_ok[b]
                                        else {"ccl_a": None, "dcl_a": None})
                            for b, bank in enumerate(L.BM_BANKS)},
-            "ladesperre": {"active": o.ls.active, "dc_expected_w": c_round(o.ls.dc),
+            "ladesperre": {"active": o.ls.active, "cap_active": o.ls.cap, "dc_expected_w": c_round(o.ls.dc),
                            "ratio": c_round(o.ls.ratio * 1000) / 1000, "ratio_now": c_round(o.ls.ratio_now * 1000) / 1000,
                            "peak_h": o.ls.peak_h, "win_end_h": o.ls.win_end_h, "noon_h": c_round(o.ls.noon_h * 100) / 100,
-                           "peak_today": st.peak_today, "badweather_today": st.badweather_today},
+                           "peak_today": st.peak_today},
             "season": "winter" if o.season == L.BM_WINTER else "transition" if o.season == L.BM_TRANSITION else "summer",
             "season_source": "measured" if o.season_measured else "months",
             "forecast_rule": {"active": o.fc_active, "bad": o.fc_bad, "target_soc": o.fc_target,
@@ -397,6 +397,9 @@ class Batmonitor:
             i.season, i.season_ts = m["season"], int(m["season_ts"])
             i.fc_target = m["fc_target"] if m["fc_ts"] > 0 else -1
             i.fc_ts = int(m["fc_ts"])
+            if m["fc_ts"] > 0 and i.t - int(m["fc_ts"]) < 3 * 3600:    # the slots for the peak window, as FC_MAX_AGE
+                i.fc_corr = m["fc_corr"]
+                i.fc_slots = list(m["fc_slots"])
         vb = self.vebus()
         for p in range(L.NPH):
             v = self.get(vb, "/Ac/ActiveIn/%s/P" % L.BM_PH[p])

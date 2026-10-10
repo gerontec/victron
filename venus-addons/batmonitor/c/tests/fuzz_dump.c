@@ -36,6 +36,14 @@ int main(int argc, char **argv)
 			in.wp = ri(3) ? r(0, 5000) : r(200, 450); in.wp_time = ri(6) ? now : now - 300;
 			in.season = ri(4); in.season_ts = in.t - ri(4) * 86400 / 2;
 			in.fc_target = ri(4) ? (ri(2) ? 100 : r(5, 100)) : -1; in.fc_ts = in.t - ri(5) * 3600;
+			/* 0.49-c: OWM slots for the peak window, deterministic (no rand: the input sequence stays the one of older
+			   revisions, so make fuzz-compare still compares the same inputs) */
+			in.fc_corr = (run % 3) * 0.5;
+			in.fc_n = (run + k / 20) % 9;
+			for (int i = 0; i < in.fc_n; i++) {
+				in.fc_slot_t[i] = (in.t / 10800) * 10800 + (time_t)(i - 2) * 10800;
+				in.fc_slot_kt[i] = 0.15 + 0.2 * ((run + i) % 5);
+			}
 			for (int p = 0; p < NPH; p++) { in.ac_ok[p] = ri(15) != 0; in.ac_in[p] = st.setpoints[p] + r(-200, 200); }
 			for (int b = 0; b < NBANK; b++) {
 				soc[b] += r(-3, 3); if (soc[b] < 0) soc[b] = 0; if (soc[b] > 100) soc[b] = 100;
@@ -55,6 +63,9 @@ int main(int argc, char **argv)
 				for (int b = 0; b < NBANK; b++)
 					printf(" %d %.17g %d %.17g %d %.17g %d %.17g %.17g", in.bms_ok[b], in.soc[b], in.power_ok[b],
 						   in.power[b], in.volt_ok[b], in.volt[b], in.lim_ok[b], in.ccl[b], in.dcl[b]);
+				printf(" %.17g %d", in.fc_corr, in.fc_n);
+				for (int i = 0; i < in.fc_n; i++)
+					printf(" %lld %.17g", (long long)in.fc_slot_t[i], in.fc_slot_kt[i]);
 				putchar('\n');
 			}
 			bm_step(&cfg, &in, &st, &out);

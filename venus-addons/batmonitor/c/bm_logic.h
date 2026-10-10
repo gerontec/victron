@@ -45,6 +45,7 @@ struct bm_cfg {
 	double charger_dc_w;            /* measured DC at the BMS per MultiPlus at its limit, full_at forecast (0.31-c) */
 	double bat1_soc_min;            /* night: the Sofar battery serves house + WP first while above this % (0.38-c) */
 	double fc_bad_target, wp_bat_share_bad;   /* bad forecast (target_soc >= this): stacks cover at most this % of the WP (0.37-c) */
+	double export_cap, house_est;   /* summer peak window (0.49-c): charge only the export above this W; house load guess */
 };
 
 /* parameter table: name (env BATMONITOR_<name>), default, allowed range, unit, meaning */
@@ -76,6 +77,10 @@ struct bm_in {
 	time_t season_ts;                                       /* its "ts" (unix) */
 	double fc_target;                                       /* batmonitor/forecast target_soc %, < 0 = none */
 	time_t fc_ts;
+	double fc_corr;                                         /* forecast.py correction, <= 0 = none (0.49-c) */
+	int fc_n;                                               /* OWM 3 h slots of today / tomorrow (kt_slots) */
+	time_t fc_slot_t[24];
+	double fc_slot_kt[24];
 	int ac_ok[NPH];
 	double ac_in[NPH];                                      /* vebus /Ac/ActiveIn/Lx/P, + = the Multi takes */
 	int ac_out_ok[NPH];
@@ -91,7 +96,7 @@ struct bm_in {
 	double ccl[NBANK], dcl[NBANK];                          /* A DC (CAN 0x351 of the MUST: 100 A, tapering to 0 near full) */
 };
 
-struct bm_ls { int active, peak_h, win_end_h; double dc, ratio, ratio_now, noon_h; };
+struct bm_ls { int active, cap, peak_h, win_end_h; double dc, ratio, ratio_now, noon_h; };   /* active = waiting below the cap */
 struct bm_pi { double y, e, applied, u, u_min, u_max; int sp[NPH]; };
 
 /* what survives from cycle to cycle */
@@ -100,7 +105,7 @@ struct bm_state {
 	double soc[NBANK];
 	int lead;                                    /* bank more than SOC_BALANCE_ON ahead, -1 = none */
 	int soyo_chg_prev, soyo_prop_prev;
-	int ls_yday, peak_today, ls_latched, badweather_today;
+	int ls_yday, peak_today;                     /* local day of the peak window, PCC > 20 kW seen today */
 	int fc_active;                               /* forecast: stacks above the target SoC -> serve everything */
 	int bat1_first;                              /* Sofar Bat1 above BAT1_SOC_MIN: it discharges first (0.38-c) */
 	double do4_last;                             /* monotonic s of the last DO4 pulse, 0 = none (0.46-c) */
@@ -223,22 +228,23 @@ struct bm_d3_in {
 };
 int bm_d3(const struct bm_d3_in *b, int prop_prev, int *prop_next);   /* 1 = PROPORTIONAL, 0 = IDLE */
 
-/* D4 (0.48-c): the summer charge block LADESPERRE (peak window). State: peak_today, latched, badweather (reset at
-   local midnight). block = in the window, latched (sunny: little of the clear-sky power missing), no bad weather today */
+/* D4 (0.49-c): the summer peak window as a forecast export cap. While the forecast (clear sky x OWM slot x correction,
+   anchored to the measured PV) still expects export above EXPORT_CAP today, the stacks charge only the export above
+   the cap (charge target PCC = +EXPORT_CAP) and wait below it (block -> mode LADESPERRE, 0 W); so their capacity is
+   left for the afternoon peaks instead of being full at noon (summer 2026: DO4 on 55 days, 11:45-16:15).
+   State: peak_today (PCC > 20 kW seen, display; reset at local midnight) */
 struct bm_d4_in {
-	int new_day;                                 /* local day changed since the last cycle: reset the state */
-	int enabled;                                 /* BATMONITOR_LADESPERRE */
-	int pcc_peak;                                /* PCC fresh and > PCC_PEAK_TH: the peak is here */
+	int new_day;                                 /* local day changed since the last cycle */
+	int enabled;                                 /* BATMONITOR_LADESPERRE and EXPORT_CAP > 0 */
 	int season;                                  /* LADESPERRE_FROM..TO (May..August) */
-	int day_can_peak;                            /* clear-sky maximum today > PCC_PEAK_TH and a window end exists */
-	int before_peak;                             /* hour <= peak hour and before solar noon */
-	int ratio_valid;                             /* dc > DC_RATIO_MIN, data fresh: ratio computed */
-	int ratio_le_on;                             /* 5 min ratio <= LADESPERRE_RATIO */
-	int ratio_ge_off;                            /* 5 min ratio >= LADESPERRE_RATIO + LADESPERRE_HYST */
-	int now_bad;                                 /* ratio_now >= LADESPERRE_NOW_RATIO (invalid ratio_now: 0) */
+	int fc_cap_ahead;                            /* forecast export above EXPORT_CAP from now until the evening */
+	int pcc_peak;                                /* PCC fresh and > PCC_PEAK_TH */
+	int surplus_cap_on, surplus_cap_hold;        /* surplus - EXPORT_CAP > PCC_SURPLUS_TH / > SOYO_HOLD_TH */
+	int chg_prev;                                /* a stack charged last cycle */
 };
-struct bm_d4_state { int peak_today, latched, badweather; };
-int bm_d4(const struct bm_d4_in *b, const struct bm_d4_state *s, struct bm_d4_state *next);   /* 1 = block */
+struct bm_d4_state { int peak_today; };
+int bm_d4(const struct bm_d4_in *b, const struct bm_d4_state *s, struct bm_d4_state *next, int *cap_active);
+/* returns block (wait below the cap); *cap_active = the charge target is the cap */
 
 /* D5 (0.46-c): DO4 pulse "curtail WR2" (MQTT pv_relay/DO4) when the PCC export passes PCC_PEAK_TH 20 kW, at most one
    pulse per DO4_LOCKOUT. State: the time of the last pulse, reduced to the bit lockout_over */

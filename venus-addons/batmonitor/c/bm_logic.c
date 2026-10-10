@@ -99,6 +99,8 @@ const struct bm_param BM_PARAMS[] = {
 	{"BAT1_SOC_MIN",          P(bat1_soc_min),              5,       0,       101,     "%", "night: the Sofar Bat1 serves house + heat pump first down to this SoC, only then the stacks (Sofar DOD 95 %); 101 = off (stacks take over the Sofar as 0.25)"},
 	{"FC_BAD_TARGET",         P(fc_bad_target),             100,     0,       101,     "%", "bad forecast when target_soc >= this (100 = the day's PV does not exceed the day load, free_kwh 0); 101 = off"},
 	{"WP_BAT_SHARE_BAD",      P(wp_bat_share_bad),          50,      0,       100,     "%", "bad forecast: the stacks cover at most this share of the heat pump (summer/transition, winter stays 0)"},
+	{"EXPORT_CAP",            P(export_cap),                18000,   0,       30000,   "W", "summer peak window: while the forecast expects export above this, the stacks charge only the export above it (0 = off)"},
+	{"HOUSE_EST",             P(house_est),                 1000,    0,       5000,    "W", "summer peak window: house load assumed when turning the PV forecast into export"},
 	{"CHARGER_DC_W",          P(charger_dc_w),              3600,    500,     5000,    "W", "full_at forecast: DC at the BMS per MultiPlus at its limit (measured 2026-10-09: ~3.6 kW, 65-67 A, flat over 53.6-54.6 V)"},
 };
 const int BM_NPARAMS = sizeof(BM_PARAMS) / sizeof(BM_PARAMS[0]);
@@ -202,16 +204,24 @@ static double dc_temp_factor(double elev, double ambient)
 
 /* ---- control ------------------------------------------------------------------------------------ */
 
-/* fox2db_logic.h step(): charge block until the PCC peak window, summer only. 1 = do not charge from PV.
-   multis = signed AC-in sum of the Multis (+ = they take from the AC side) */
+static double fc_kt(const struct bm_fc_in *in, time_t t, int *weather);
+static double fc_pv(const struct bm_fc_in *in, time_t t, double anchor, int *weather);
+
+#define CAP_STEP 900               /* s: forecast scan step of the peak window */
+#define CAP_DAY_END_H 21           /* local hour: the scan ends here */
+
+/* the model part of the summer peak window (0.49-c) and D4 on its bits. The forecast scan: expected PV of both
+   inverters from now to CAP_DAY_END_H (clear sky x OWM slot x correction, the measured/modelled Sofar PV of now as
+   anchor fading over FC_ANCHOR_TAU, as bm_full_forecast), minus HOUSE_EST = expected export. Returns block (wait below
+   the cap); *cap_active = charge only the export above EXPORT_CAP. multis = signed AC-in sum of the Multis */
 static int ladesperre(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *st, struct bm_out *out,
-					  int stale, double multis)
+					  int stale, double multis, double surplus, int *cap_active)
 {
 	time_t now = in->t;
 	struct tm loc, mid;
 	localtime_r(&now, &loc);
 	int month = loc.tm_mon + 1;
-	int new_day = loc.tm_yday != st->ls_yday;      /* midnight reset (in bm_d4) */
+	int new_day = loc.tm_yday != st->ls_yday;
 	st->ls_yday = loc.tm_yday;
 	double dc = bm_dc_now(now, month);
 	if (dc > 0 && in->aussen_time > 0 && in->now - in->aussen_time < AUSSEN_MAX_AGE) {
@@ -223,39 +233,54 @@ static int ladesperre(const struct bm_cfg *cfg, const struct bm_in *in, struct b
 	mid.tm_hour = mid.tm_min = mid.tm_sec = 0;
 	mid.tm_isdst = -1;
 	time_t midnight = mktime(&mid);
-	double best_w = 0;
-	int peak_h = -1, win_end = -1;
-	for (int h = 5; h <= 20; h++) {
-		double w = bm_dc_now(midnight + (time_t)h * 3600, month);
-		if (w > best_w) {
-			best_w = w;
-			peak_h = h;
-		}
-		if (w > PCC_PEAK_TH)
-			win_end = h;
-	}
 	time_t noon = solar_noon_utc(now);
-	/* measured PV minus house load: export + Sofar Bat1 + what the Multis take (ESP: + EBox charger) */
+	/* measured PV minus house load against the model (display, r290_boost reads ratio_now) */
 	double ratio = -1.0, ratio_now = -1.0;
 	if (dc > DC_RATIO_MIN && !stale && in->have_pcc) {
 		ratio = (dc - (in->pcc_avg5 + multis + in->bat1_avg5)) / dc;
 		ratio_now = (dc - (in->pcc + multis + in->bat1)) / dc;
 	}
-	struct bm_d4_in d = {new_day, cfg->ladesperre, in->have_pcc && !stale && in->pcc > PCC_PEAK_TH,
-						 month >= LADESPERRE_FROM && month <= LADESPERRE_TO, best_w > PCC_PEAK_TH && win_end >= 0,
-						 loc.tm_hour <= peak_h && now < noon, ratio >= 0.0, ratio <= LADESPERRE_RATIO,
-						 ratio >= LADESPERRE_RATIO + LADESPERRE_HYST, ratio_now >= LADESPERRE_NOW_RATIO};
-	struct bm_d4_state s0 = {st->peak_today, st->ls_latched, st->badweather_today}, s1;
-	int block = bm_d4(&d, &s0, &s1);
+	/* forecast scan */
+	struct bm_fc_in fi;
+	memset(&fi, 0, sizeof(fi));
+	fi.t = now;
+	fi.corr = in->fc_corr;
+	fi.n_slots = in->fc_n < BM_FC_SLOTS ? in->fc_n : BM_FC_SLOTS;
+	memcpy(fi.slot_t, in->fc_slot_t, sizeof(fi.slot_t));
+	memcpy(fi.slot_kt, in->fc_slot_kt, sizeof(fi.slot_kt));
+	int w;
+	double clear_sofar = calc_arrays_kt(ARRAYS, 2, now, 1.0) * fc_kt(&fi, now, &w), anchor = 1.0;
+	if (in->have_pv && !stale && clear_sofar >= FC_ANCHOR_MIN_W)
+		anchor = fmax(0.05, fmin(3.0, in->pv / clear_sofar));
+	double best = 0;
+	int peak_h = -1, end_h = -1, ahead = 0;
+	for (time_t t = now; t <= midnight + CAP_DAY_END_H * 3600; t += CAP_STEP) {
+		double pv = fc_pv(&fi, t, anchor, &w);
+		struct tm lt;
+		localtime_r(&t, &lt);
+		if (pv > best) {
+			best = pv;
+			peak_h = lt.tm_hour;
+		}
+		if (pv - cfg->house_est > cfg->export_cap) {
+			ahead = 1;
+			end_h = lt.tm_hour;
+		}
+	}
+	struct bm_d4_in d = {new_day, cfg->ladesperre && cfg->export_cap > 0, month >= LADESPERRE_FROM && month <= LADESPERRE_TO,
+						 ahead, in->have_pcc && !stale && in->pcc > PCC_PEAK_TH,
+						 surplus - cfg->export_cap > PCC_SURPLUS_TH, surplus - cfg->export_cap > SOYO_HOLD_TH,
+						 st->soyo_chg_prev};
+	struct bm_d4_state s0 = {st->peak_today}, s1;
+	int block = bm_d4(&d, &s0, &s1, cap_active);
 	st->peak_today = s1.peak_today;
-	st->ls_latched = s1.latched;
-	st->badweather_today = s1.badweather;
 	out->ls.active = block;
+	out->ls.cap = *cap_active;
 	out->ls.dc = dc;
 	out->ls.ratio = ratio;
 	out->ls.ratio_now = ratio_now;
-	out->ls.peak_h = best_w > PCC_PEAK_TH ? peak_h : -1;
-	out->ls.win_end_h = win_end;
+	out->ls.peak_h = ahead ? peak_h : -1;              /* r290_boost: a danger window today, until win_end_h */
+	out->ls.win_end_h = end_h;
 	out->ls.noon_h = (double)(noon - midnight) / 3600.0;
 	return block;
 }
@@ -531,30 +556,19 @@ int bm_d3(const struct bm_d3_in *b, int prop_prev, int *prop_next)
 	return prop;
 }
 
-/* D4. Reset at midnight; the PCC peak ends the window for the day; bad weather (ratio_now) releases it for the day;
-   the latch follows the 5 min ratio with hysteresis inside the window and drops outside. Disabled: only the reset and
-   peak_today run (as before 0.48-c) */
-int bm_d4(const struct bm_d4_in *b, const struct bm_d4_state *s, struct bm_d4_state *next)
+/* D4. The cap holds while enabled, in the season and the forecast still expects export above EXPORT_CAP today; then
+   the stacks charge only the surplus above the cap (charge mode on that surplus, held down to SOYO_HOLD_TH) and wait
+   below it. peak_today: PCC above PCC_PEAK_TH seen today (display), cleared at midnight */
+int bm_d4(const struct bm_d4_in *b, const struct bm_d4_state *s, struct bm_d4_state *next, int *cap_active)
 {
 	*next = *s;
 	if (b->new_day)
-		next->peak_today = next->latched = next->badweather = 0;
+		next->peak_today = 0;
 	if (b->pcc_peak)
 		next->peak_today = 1;
-	if (!b->enabled)
-		return 0;
-	int in_window = b->season && b->day_can_peak && !next->peak_today && b->before_peak;
-	if (in_window && b->now_bad)
-		next->badweather = 1;
-	if (!in_window)
-		next->latched = 0;
-	else if (b->ratio_valid) {
-		if (!next->latched && b->ratio_le_on)
-			next->latched = 1;
-		else if (next->latched && b->ratio_ge_off)
-			next->latched = 0;
-	}
-	return in_window && next->latched && !next->badweather;
+	*cap_active = b->enabled && b->season && b->fc_cap_ahead;
+	int cap_charge = b->surplus_cap_on || (b->chg_prev && b->surplus_cap_hold);
+	return *cap_active && !cap_charge;
 }
 
 /* D5. A fresh PCC above PCC_PEAK_TH and no pulse within DO4_LOCKOUT -> pulse */
@@ -600,6 +614,7 @@ struct chain {
 	int wp_cap_armed;                  /* WP_CAP fallback: em0/power stale, R290 running, not summer */
 	double bat1_eff, chg_ref, surplus;
 	int block, charge_mode;
+	int cap_active;                    /* D4: charge only the export above EXPORT_CAP */
 	int discharge[NPH], charge[NPH], n_dis, n_chg;
 };
 
@@ -765,7 +780,7 @@ static void chain_mode(const struct bm_cfg *cfg, const struct bm_in *in, struct 
 	   While the Sofar can, it covers the heat pump from Bat1 (own PCC regulation at Z1): Bat1 -> WP, PV -> stacks */
 	c->chg_ref = in->have_pcc ? c->z2 : 0.0;
 	c->surplus = c->chg_ref + c->bat1_eff + c->own_charge - c->own_discharge;
-	c->block = ladesperre(cfg, in, st, out, c->stale, c->multis);
+	c->block = ladesperre(cfg, in, st, out, c->stale, c->multis, c->surplus, &c->cap_active);
 	struct bm_d2_in d;
 	struct bm_d2_out o;
 	memset(&d, 0, sizeof(d));
@@ -876,14 +891,18 @@ static void chain_charge(const struct bm_cfg *cfg, const struct bm_state *st, st
 	for (int p = 0; p < NPH; p++)
 		if (c->charge[p])
 			cap_sum += cap[p];
-	int want = watt(c->own_charge)
-			   + (int)((long)KP_PM * (watt(c->chg_ref + c->bat1_eff) - watt(cfg->soyo_target)) / 1000);
+	/* D4 cap (0.49-c): aim at PCC = +EXPORT_CAP, so only the export above the cap goes into the stacks */
+	int target = watt(cfg->soyo_target + (c->cap_active ? cfg->export_cap : 0.0));
+	int want = watt(c->own_charge) + (int)((long)KP_PM * (watt(c->chg_ref + c->bat1_eff) - target) / 1000);
 	if (want < 0)
 		want = 0;
 	alloc_charge(cfg, st->lead, want < cap_sum ? want : cap_sum, c->charge, c->n_chg, cap, out->sp);
 	for (int p = 0; p < NPH; p++)                       /* CHARGE_PRIORITY order; with a lead the other stack first */
-		if (c->charge[p])
+		if (c->charge[p]) {
 			strncat(out->why[p], st->lead >= 0 ? " BAL" : " EQ", WHY_LEN - 1 - strlen(out->why[p]));
+			if (c->cap_active)
+				strncat(out->why[p], " CAP", WHY_LEN - 1 - strlen(out->why[p]));
+		}
 }
 
 /* PI prototype (shadow unless BATMONITOR_PI=1). y = PCC + Sofar Bat1: Bat1 charging counts with BAT1_CHARGE_FACTOR

@@ -1,9 +1,9 @@
-// batmonitor 0.48-c: charge path of one cycle as decision matrices, with the summer peak window (D4 LADESPERRE)
+// batmonitor 0.49-c: charge path of one cycle as decision matrices, with the summer peak window (D4 LADESPERRE)
 // that keeps the stacks free in the morning so they take the midday PV and the PCC export stays below 20 kW.
 // render: dot -Tpdf charge_flow.dot -o charge_flow.pdf   (or -Tpng)
 digraph charge {
 	graph [rankdir=TB, fontname="Helvetica", fontsize=11, nodesep=0.35, ranksep=0.35, newrank=true,
-		   label="batmonitor 0.48-c: charge path (every 5 s)   |   blue = pure decision function (bits + state, enumerated by make check)   |   green = matrix / amounts   |   [CBMC] = proved for all inputs",
+		   label="batmonitor 0.49-c: charge path (every 5 s)   |   blue = pure decision function (bits + state, enumerated by make check)   |   green = matrix / amounts   |   [CBMC] = proved for all inputs",
 		   labelloc=t];
 	node [shape=box, style="rounded,filled", fillcolor="#f4f4f4", fontname="Helvetica", fontsize=10];
 	edge [fontname="Helvetica", fontsize=9];
@@ -13,7 +13,7 @@ digraph charge {
 	surplus [label=<<b>surplus</b> (chain_mode)<br/>Bat1_eff = Bat1 discharge x 1, Bat1 charge x BAT1_CHARGE_FACTOR 0.5<br/>surplus = z2 + Bat1_eff + own_charge - own_discharge<br/><font point-size="9">z2 = PCC + WP part the stacks do not cover (S2, as discharge)</font>>];
 
 	subgraph cluster_d4 {
-		label=<<b>D4 peak window LADESPERRE</b> (0.48-c: pure function bm_d4)<br/>goal: stacks stay empty in the morning, at midday they take the PV above the 20 kW export limit>;
+		label=<<b>D4 peak window as a forecast export cap</b> (0.49-c: pure function bm_d4)<br/>goal: keep the stacks free for the afternoon peaks, charge only the export above EXPORT_CAP (summer 2026: DO4 on 55 days, 11:45-16:15)>;
 		style="rounded,filled"; fillcolor="#fdf0e0"; color="#d9822b"; fontsize=11;
 		subgraph cluster_sky {
 			label=<<b>clear-sky model</b> dc(t) (bm_logic.c calc_arrays_kt, from fox2db_logic.h / clearsky.tex)>;
@@ -34,22 +34,20 @@ digraph charge {
 				<tr><td colspan="2">dc(t) = &Sigma; power x T x kt x cos(incidence) x shade x temperature factor</td></tr>
 				</table>>];
 		}
-		model [label=<<b>model part</b> (ladesperre wrapper, not a decision)<br/>dc now; peak_h (hour 5..20 with max dc), win_end (last hour &gt; 20 kW), solar noon<br/>ratio = (dc - (PCC + Multis + Bat1)) / dc (5 min mean and now; dc &gt; 5 kW)>, fillcolor="#ffffff"];
+		model [label=<<b>forecast scan</b> (ladesperre wrapper, not a decision)<br/>now .. 21:00 in 15 min: PV = clear sky x OWM slot kt x correction,<br/>anchored to the measured Sofar PV of now (fades over 1.5 h)<br/>expected export = PV - HOUSE_EST 1000 W; peak_h, win_end_h (last export &gt; cap)>, fillcolor="#ffffff"];
 		sky -> model [label=" dc(t)"];
 		d4bits [shape=plain, label=<
 			<table border="0" cellborder="1" cellspacing="0" cellpadding="3" bgcolor="#ffffff">
 			<tr><td colspan="2"><b>bm_d4 bits</b></td></tr>
-			<tr><td>new_day</td><td>local day changed: reset the state</td></tr>
-			<tr><td>enabled</td><td>BATMONITOR_LADESPERRE</td></tr>
-			<tr><td>pcc_peak</td><td>PCC fresh &gt; 20 kW</td></tr>
+			<tr><td>enabled</td><td>BATMONITOR_LADESPERRE and EXPORT_CAP &gt; 0 (18000 W)</td></tr>
 			<tr><td>season</td><td>May..August</td></tr>
-			<tr><td>day_can_peak</td><td>clear-sky max &gt; 20 kW</td></tr>
-			<tr><td>before_peak</td><td>hour &le; peak_h, before solar noon</td></tr>
-			<tr><td>ratio_valid / le_on / ge_off</td><td>5 min ratio valid, &le; 0.50, &ge; 0.75</td></tr>
-			<tr><td>now_bad</td><td>ratio now &ge; 0.20</td></tr>
+			<tr><td>fc_cap_ahead</td><td>forecast export &gt; EXPORT_CAP before 21:00</td></tr>
+			<tr><td>surplus_cap_on / hold</td><td>surplus - EXPORT_CAP &gt; 200 W / &gt; 20 W</td></tr>
+			<tr><td>chg_prev</td><td>a stack charged last cycle</td></tr>
+			<tr><td>new_day, pcc_peak</td><td>display: PCC &gt; 20 kW seen today</td></tr>
 			</table>>];
-		d4 [label=<<b>bm_d4</b>   state: peak_today, latched, badweather<br/>new_day -&gt; all 0;  pcc_peak -&gt; peak_today<br/>in_window = enabled and season and day_can_peak and before_peak and not peak_today<br/>in_window and now_bad -&gt; badweather (for the day)<br/>latch: on at le_on, off at ge_off, off outside the window<br/><b>block</b> = in_window and latched and not badweather<br/><font point-size="9">[make check: 4096 combinations, 12 block; fixed point]</font>>, fillcolor="#dbe8fb"];
-		note_ls [shape=note, fillcolor="#fff7d6", fontsize=9, label=<observation: only 12 of 4096 combinations block:<br/>one cycle with ratio now &ge; 0.20 (house load counts)<br/>ends the window for the day; NOW_RATIO 0.20 &lt; latch 0.50>];
+		d4 [label=<<b>bm_d4</b>   state: peak_today (display)<br/><b>cap_active</b> = enabled and season and fc_cap_ahead<br/>charge above the cap = surplus_cap_on or (chg_prev and surplus_cap_hold)<br/><b>block</b> (wait, LADESPERRE 0 W) = cap_active and not charge above the cap<br/>cap_active -&gt; charge target PCC = +EXPORT_CAP (rule text CAP)<br/><font point-size="9">[make check: 384 combinations, 48 cap, 24 waiting; fixed point]</font>>, fillcolor="#dbe8fb"];
+		note_ls [shape=note, fillcolor="#fff7d6", fontsize=9, label=<replaces 0.48-c latch / ratio / bad weather<br/>(only 12 of 4096 combinations blocked, one cloudy<br/>cycle ended the window for the day); the anchored<br/>forecast follows clouds within one cycle>];
 		model -> d4bits -> d4;
 		d4 -> note_ls [style=dotted, arrowhead=none];
 	}
@@ -73,7 +71,7 @@ digraph charge {
 			<tr><td>DIS</td><td>discharge amount</td><td>1</td><td>(S4: PROP / IDLE)</td></tr>
 			</table>>];
 		force [label=<<b>FORCE</b>: min(FORCE_CHARGE_W, chg_cap) per phase<br/>from the grid, obeys the BMS CCL (was: 500 W even at CCL 0)>, fillcolor="#ffffff"];
-		amount [label=<<b>charge amount</b> (chain_charge, whole watts since 0.48-c)<br/>want = max(0, own_charge + KP_PM 1010 x (z2 + Bat1_eff - SOYO_TARGET) / 1000)<br/>at most the sum of chg_cap over the charging phases<br/><font point-size="9">[CBMC h_charge]</font>>, fillcolor="#ffffff"];
+		amount [label=<<b>charge amount</b> (chain_charge, whole watts since 0.48-c)<br/>want = max(0, own_charge + KP_PM 1010 x (z2 + Bat1_eff - target) / 1000)<br/>target = SOYO_TARGET, + EXPORT_CAP while D4 cap_active (0.49-c)<br/>at most the sum of chg_cap over the charging phases<br/><font point-size="9">[CBMC h_charge]</font>>, fillcolor="#ffffff"];
 		caps [label=<<b>chg_cap</b> per phase (one per stack)<br/>min(CHARGER_A 70 A x U / 0.93, CHARGE_MAX_PHASE 4900, BMS CCL)<br/>~4.0-4.2 kW per phase -&gt; ~12 kW for the three Multis>, fillcolor="#ffffff"];
 		alloc [label=<<b>alloc_levels</b> (0.48-c: one split core for charge and discharge)<br/>charge: one level per stack in CHARGE_PRIORITY order (Stack1, Stack2), the lead stack last,<br/>each up to min(chg_cap, CHARGER_CAP_PHASE); water filling within a level;<br/>only what the caps cut goes on; a rest up to CHARGE_MAX_PHASE on all charging phases<br/><font point-size="9">[CBMC h_charge without bank assumption, h_alloc_discharge]</font>>, fillcolor="#ffffff"];
 		mrule -> force [label=" FORCE"];
@@ -90,13 +88,13 @@ digraph charge {
 
 	timeline [shape=plain, label=<
 		<table border="0" cellborder="1" cellspacing="0" cellpadding="4" bgcolor="#ffffff">
-		<tr><td colspan="4"><b>clear summer day: how the window keeps the PCC below 20 kW</b></td></tr>
+		<tr><td colspan="4"><b>clear summer day: how the export cap keeps the PCC below 20 kW</b></td></tr>
 		<tr><td><b>time</b></td><td><b>PV / PCC</b></td><td><b>batmonitor</b></td><td><b>stacks</b></td></tr>
-		<tr><td>05:00 .. peak</td><td>PV rising, export &lt; 20 kW</td><td bgcolor="#ffd09a">LADESPERRE (block)</td><td>0 W, stay empty</td></tr>
-		<tr><td>export would pass 20 kW</td><td>PCC &gt; 20 kW once</td><td>peak_today -&gt; window ends -&gt; CHARGE;<br/>DO4 pulse sheds the FoxESS</td><td>take up to ~12 kW</td></tr>
-		<tr><td>peak hour / solar noon</td><td>highest PV</td><td>window over anyway -&gt; CHARGE</td><td>export - ~12 kW</td></tr>
-		<tr><td>afternoon</td><td>PV falling</td><td>CHARGE until FULL</td><td>-&gt; 100 %</td></tr>
-		<tr><td>cloudy morning</td><td>shortfall &ge; 20 %</td><td>badweather -&gt; no block</td><td>charge at once</td></tr>
+		<tr><td>morning</td><td>export below the cap</td><td bgcolor="#ffd09a">LADESPERRE (wait)</td><td>0 W, stay free</td></tr>
+		<tr><td>midday .. afternoon</td><td>export above 18 kW</td><td>CHARGE CAP: PCC held at 18 kW</td><td>take the export above the cap</td></tr>
+		<tr><td>after the forecast window</td><td>export below the cap again</td><td>CHARGE (no cap)</td><td>fill up to 100 %</td></tr>
+		<tr><td>cloudy forecast</td><td>no export &gt; cap expected</td><td>no cap</td><td>charge at once</td></tr>
+		<tr><td>clouds come up</td><td>measured PV low</td><td>anchor drops -&gt; cap ends</td><td>charge at once</td></tr>
 		</table>>];
 
 	in -> surplus -> d2;

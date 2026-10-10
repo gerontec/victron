@@ -83,6 +83,9 @@ def main():
             i.lim_ok[b] = int(next(it))
             i.ccl[b] = float(next(it))
             i.dcl[b] = float(next(it))
+        i.fc_corr = float(next(it))
+        n_slots = int(next(it))
+        i.fc_slots = [(int(next(it)), float(next(it))) for _ in range(n_slots)]
         o = L.bm_step(cfg, i, st)
         out_lines.append("%d %d %d %d %d\t%s\t%s\t%s\t%.3f %.3f %.3f %.3f %d %d %d %d %d %d\n" % (
             run, k, o.sp[0], o.sp[1], o.sp[2], o.why[0], o.why[1], o.why[2], o.wp_eff, o.surplus, o.pi.u, o.pi.y,

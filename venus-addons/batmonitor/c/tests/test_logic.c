@@ -33,9 +33,12 @@ struct plant {
 	double volt[NBANK];            /* BMS voltage, 0 = none; given: the Multis saturate at 70 A x U / 0.93 (real) */
 	int lim[NBANK];                /* 1 = the BMS sends CCL / DCL */
 	double ccl[NBANK], dcl[NBANK]; /* A */
+	double pv_sofar;               /* measured Sofar PV (the forecast anchor), 0 = pv */
+	double fc_kt;                  /* OWM kt of every 3 h slot (correction 1.0), 0 = no slots */
 };
 
 static double r_override_w_max;     /* > 0: W_MAX for the next simulate() (parameter test) */
+static int r_override_cap_off;   /* 1: EXPORT_CAP 0 in simulate */
 
 struct run {
 	struct bm_cfg cfg;
@@ -67,6 +70,8 @@ static void simulate(struct run *r, const struct plant *pl, time_t t0, int n)
 	bm_cfg_default(&r->cfg);
 	if (r_override_w_max > 0)
 		bm_param_set(&r->cfg, 0, r_override_w_max);
+	if (r_override_cap_off)
+		r->cfg.export_cap = 0;
 	bm_init(&r->st);
 	double now = 1000.0;
 	for (int k = 0; k < n; k++, now += CYCLE_SECONDS) {
@@ -88,7 +93,15 @@ static void simulate(struct run *r, const struct plant *pl, time_t t0, int n)
 		in->bat1 = in->bat1_avg5 = b1;
 		in->have_soc_bat1 = pl->bat1_soc > 0;
 		in->soc_bat1 = pl->bat1_soc;
-		in->pv = pl->pv;
+		in->pv = pl->pv_sofar > 0 ? pl->pv_sofar : pl->pv;
+		if (pl->fc_kt > 0) {
+			in->fc_corr = 1.0;
+			in->fc_n = 8;
+			for (int i = 0; i < 8; i++) {
+				in->fc_slot_t[i] = (t0 / 10800) * 10800 + (time_t)i * 10800;
+				in->fc_slot_kt[i] = pl->fc_kt;
+			}
+		}
 		in->inv_time = pl->stale_inv ? 1.0 : now;
 		in->r290_hz = pl->r290_hz;
 		in->r290_time = now;
@@ -436,34 +449,46 @@ static void test_balance(void)
 		  r.out.sp[0], r.out.sp[1], r.out.sp[2]);
 }
 
-static void test_ladesperre_summer_vs_winter(void)
+/* 0.49-c peak window as a forecast export cap. Clear-sky model 21 June (KT_MONTH 0.909): 09:00 total 9165 W of it
+   Sofar 1605 W, 12:30 total 23012 W of it Sofar 11003 W; with OWM kt 1.0 the forecast peak is ~25 kW */
+static void test_peak_window_cap(void)
 {
 	struct run r;
-	time_t t = local_time(2026, 6, 21, 9, 0);
-	struct plant pl = BASE(.house = 500, .soc = {50, 50});
-	pl.pv = bm_dc_now(t, 6);                                    /* clear-sky day: measured = model */
-	simulate(&r, &pl, t, 10);
-	print_state("21 June 09:00, clear sky", &r);
-	CHECK(r.out.ls.active && rule_has(&r, "LADESPERRE"), "summer: charge block before the peak, why %s", r.out.why[0]);
-	CHECK(sum_sp(&r) == 0, "no charging while blocked, sp sum %d", sum_sp(&r));
+	struct plant pl = BASE(.house = 500, .soc = {50, 50}, .pv = 9165, .pv_sofar = 1605, .fc_kt = 1.0);
+	simulate(&r, &pl, local_time(2026, 6, 21, 9, 0), 10);
+	print_state("21 June 09:00, clear forecast", &r);
+	CHECK(r.out.ls.cap && rule_has(&r, "LADESPERRE"), "export above the cap expected later: wait, why %s", r.out.why[0]);
+	CHECK(sum_sp(&r) == 0 && r.out.ls.peak_h >= 11 && r.out.ls.win_end_h >= r.out.ls.peak_h,
+		  "no charging below the cap, peak %d h, window to %d h", r.out.ls.peak_h, r.out.ls.win_end_h);
 
-	t = local_time(2026, 1, 21, 11, 0);
-	pl.pv = 6000;
-	simulate(&r, &pl, t, 20);
+	pl.pv = 23012 + 2500;                                        /* a real noon a bit above the model */
+	pl.pv_sofar = 11003;
+	simulate(&r, &pl, local_time(2026, 6, 21, 12, 30), 40);
+	print_state("21 June 12:30, PV 25.5 kW", &r);
+	CHECK(r.out.ls.cap && rule_has(&r, "CAP"), "charging above the cap, why %s", r.out.why[0]);
+	CHECK(fabs(r.pcc - 18000) <= 250, "PCC held at the cap 18 kW, pcc %.0f", r.pcc);
+	CHECK(abs(sum_sp(&r) - (25512 - 500 - 18000)) <= 250, "stacks take the export above the cap, sp sum %d",
+		  sum_sp(&r));
+
+	pl = BASE(.house = 500, .soc = {50, 50}, .pv = 0.33 * 23012, .pv_sofar = 0.33 * 11003, .fc_kt = 0.3);
+	simulate(&r, &pl, local_time(2026, 6, 21, 12, 30), 40);
+	print_state("21 June 12:30, cloudy forecast", &r);
+	CHECK(!r.out.ls.cap && !rule_has(&r, "CAP") && fabs(r.pcc) <= 100, "no cap: every watt charges, pcc %.0f", r.pcc);
+
+	pl = BASE(.house = 500, .soc = {50, 50}, .pv = 6000, .fc_kt = 1.0);
+	simulate(&r, &pl, local_time(2026, 1, 21, 11, 0), 20);
 	print_state("21 Jan 11:00, PV 6 kW", &r);
-	CHECK(!r.out.ls.active && sum_sp(&r) > 0, "winter: every watt charges, sp sum %d", sum_sp(&r));
+	CHECK(!r.out.ls.cap && sum_sp(&r) > 0, "winter: no cap, sp sum %d", sum_sp(&r));
 }
 
-static void test_ladesperre_clouds_release(void)
+static void test_peak_window_off(void)
 {
 	struct run r;
-	time_t t = local_time(2026, 6, 21, 9, 0);
-	struct plant pl = BASE(.house = 500, .soc = {50, 50});
-	pl.pv = 0.5 * bm_dc_now(t, 6);                              /* half the clear-sky power: clouds */
-	simulate(&r, &pl, t, 10);
-	print_state("21 June 09:00, clouds", &r);
-	CHECK(!r.out.ls.active && r.st.badweather_today, "clouds release the block for the day");
-	CHECK(sum_sp(&r) > 0, "charging, sp sum %d", sum_sp(&r));
+	struct plant pl = BASE(.house = 500, .soc = {50, 50}, .pv = 9165, .pv_sofar = 1605, .fc_kt = 1.0);
+	r_override_cap_off = 1;
+	simulate(&r, &pl, local_time(2026, 6, 21, 9, 0), 20);
+	r_override_cap_off = 0;
+	CHECK(!r.out.ls.cap && sum_sp(&r) > 0, "EXPORT_CAP 0: no cap, sp sum %d", sum_sp(&r));
 }
 
 static void test_season_measured_overrides_months(void)
@@ -846,8 +871,8 @@ int main(void)
 	test_stale();
 	test_wp_cap_fallback();
 	test_balance();
-	test_ladesperre_summer_vs_winter();
-	test_ladesperre_clouds_release();
+	test_peak_window_cap();
+	test_peak_window_off();
 	test_season_measured_overrides_months();
 	test_season_stale_falls_back_to_months();
 	test_transition_wp_1900();

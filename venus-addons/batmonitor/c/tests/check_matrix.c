@@ -244,35 +244,32 @@ static void check_lead(void)
 	printf("\nlead: %ld consistent combinations, invariants checked\n", combos);
 }
 
-/* ---- D4: summer charge block LADESPERRE (0.48-c) --------------------------------------------------------------- */
+/* ---- D4: summer peak window as a forecast export cap (0.49-c) -------------------------------------------------- */
 static void check_d4(void)
 {
-	long combos = 0, blocks = 0;
-	for (unsigned v = 0; v < (1u << 10); v++)
-		for (int k = 0; k < 8; k++) {
-			struct bm_d4_in b = {BIT(v, 0), BIT(v, 1), BIT(v, 2), BIT(v, 3), BIT(v, 4), BIT(v, 5), BIT(v, 6), BIT(v, 7),
-								 BIT(v, 8), BIT(v, 9)};
-			/* constraints: the latch thresholds exclude each other; an invalid ratio is -1 (<= on, not >= off) */
-			if ((b.ratio_le_on && b.ratio_ge_off) || (!b.ratio_valid && (!b.ratio_le_on || b.ratio_ge_off)))
+	long combos = 0, blocks = 0, caps = 0;
+	for (unsigned v = 0; v < (1u << 8); v++)
+		for (int k = 0; k < 2; k++) {
+			struct bm_d4_in b = {BIT(v, 0), BIT(v, 1), BIT(v, 2), BIT(v, 3), BIT(v, 4), BIT(v, 5), BIT(v, 6), BIT(v, 7)};
+			if (b.surplus_cap_on && !b.surplus_cap_hold)      /* PCC_SURPLUS_TH > SOYO_HOLD_TH */
 				continue;
-			struct bm_d4_state s = {k & 1, (k >> 1) & 1, (k >> 2) & 1}, n, n2;
-			int r = bm_d4(&b, &s, &n);
+			struct bm_d4_state s = {k}, n, n2;
+			int cap, cap2, r = bm_d4(&b, &s, &n, &cap);
 			combos++;
 			blocks += r;
-			INV(!r || (b.enabled && b.season && b.day_can_peak && b.before_peak), "block only in the window");
-			INV(!r || (!n.peak_today && n.latched && !n.badweather), "block only latched, before the peak, good weather");
-			INV(!r || !b.pcc_peak, "a PCC peak always ends the block");
+			caps += cap;
+			INV(cap == (b.enabled && b.season && b.fc_cap_ahead), "cap exactly when enabled, in season and expected");
+			INV(!r || cap, "waiting below the cap only while the cap holds");
+			INV(!r || !b.surplus_cap_on, "a surplus above the cap always charges");
+			INV(!r || !(b.chg_prev && b.surplus_cap_hold), "charging above the cap holds down to SOYO_HOLD_TH");
 			INV(!b.pcc_peak || n.peak_today, "a PCC peak is remembered for the day");
-			INV(b.new_day || !s.peak_today || n.peak_today, "peak_today holds until midnight");
-			INV(b.new_day || !s.badweather || n.badweather, "bad weather holds until midnight");
-			INV(!b.new_day || b.pcc_peak || !n.peak_today, "midnight clears peak_today");
-			INV(b.enabled || (n.latched == (b.new_day ? 0 : s.latched) && n.badweather == (b.new_day ? 0 : s.badweather)),
-				"disabled: latch and bad weather untouched (only the midnight reset)");
+			INV(b.pcc_peak || (b.new_day ? !n.peak_today : n.peak_today == s.peak_today), "peak_today until midnight");
 			b.new_day = 0;
-			int r2 = bm_d4(&b, &n, &n2);
-			INV(r2 == r && !memcmp(&n, &n2, sizeof(n)), "D4 fixed point after one step (same bits, no new day)");
+			int r2 = bm_d4(&b, &n, &n2, &cap2);
+			INV(r2 == r && cap2 == cap && n2.peak_today == n.peak_today, "D4 fixed point after one step");
 		}
-	printf("\nD4 LADESPERRE: %ld consistent combinations (10 bits x 8 states), %ld block\n", combos, blocks);
+	printf("\nD4 peak window (export cap): %ld consistent combinations (8 bits x 2 states), %ld cap, %ld waiting\n",
+		   combos, caps, blocks);
 }
 
 /* ---- D5: DO4 pulse (0.46-c) ----------------------------------------------------------------------------------- */

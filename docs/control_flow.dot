@@ -1,9 +1,9 @@
-// batmonitor 0.48-c: overview of one cycle - a common trunk, then one charge path and one discharge branch.
+// batmonitor 0.49-c: overview of one cycle - a common trunk, then one charge path and one discharge branch.
 // Details: charge_flow.pdf (charge path, peak window) and discharge_flow.pdf (discharge matrix, CBMC coverage).
 // render: dot -Tpdf control_flow.dot -o control_flow.pdf   (or -Tpng)
 digraph control {
 	graph [rankdir=TB, fontname="Helvetica", fontsize=11, nodesep=0.5, ranksep=0.4, newrank=true,
-		   label="batmonitor 0.48-c: one cycle every 5 s   |   blue = decision (bits + state, make check)   |   green = matrix / amount   |   details: charge_flow.pdf, discharge_flow.pdf",
+		   label="batmonitor 0.49-c: one cycle every 5 s   |   blue = decision (bits + state, make check)   |   green = matrix / amount   |   details: charge_flow.pdf, discharge_flow.pdf",
 		   labelloc=t];
 	node [shape=box, style="rounded,filled", fillcolor="#f4f4f4", fontname="Helvetica", fontsize=10];
 	edge [fontname="Helvetica", fontsize=9];
@@ -17,9 +17,9 @@ digraph control {
 
 	subgraph cluster_charge {
 		label=<<b>charge path</b>>; style="rounded,filled"; fillcolor="#eef4fb"; color="#4a7fb5"; fontsize=12;
-		d4 [label=<<b>D4 LADESPERRE</b> (May-Aug)<br/>stacks stay free until the PCC peak>, fillcolor="#dbe8fb"];
+		d4 [label=<<b>D4 forecast export cap</b> (May-Aug)<br/>while the forecast expects export &gt; 18 kW:<br/>wait below the cap, charge only above it>, fillcolor="#dbe8fb"];
 		cforce [label=<<b>FORCE</b>: min(500 W, chg_cap)>, fillcolor="#eaf6e6"];
-		camount [label=<<b>charge amount</b><br/>max(0, own + KP x (z2 + Bat1_eff - target))<br/>&le; sum of chg_cap>, fillcolor="#eaf6e6"];
+		camount [label=<<b>charge amount</b><br/>max(0, own + KP x (z2 + Bat1_eff - target))<br/>target + EXPORT_CAP while D4 cap; &le; sum of chg_cap>, fillcolor="#eaf6e6"];
 		csplit [label=<<b>alloc_levels</b> up to chg_cap<br/>stack by stack in CHARGE_PRIORITY,<br/>lead stack last>, fillcolor="#eaf6e6"];
 		camount -> csplit;
 	}
