@@ -122,6 +122,76 @@ struct bm_out {
 	int ccl_bind[NPH], dcl_bind[NPH];            /* 1 = the BMS current limit is below the charger / phase limit */
 };
 
+/* ---- decision layer (0.43-c): the discrete part of the rule chain as pure functions of predicates ("bits", each a
+   threshold comparison of the inputs) and the hysteresis state bits; the amounts (W) stay in bm_step. Every
+   input / state combination of each function is enumerated by tests/check_matrix.c (make check). */
+enum bm_wp_reason { BM_WP_NA, BM_WP_OFF, BM_WP_FC, BM_WP_FCBAD, BM_WP_Z2, BM_WP_T1900, BM_WP_ALL, BM_WP_N };
+enum bm_src_reason { BM_SRC_DAY, BM_SRC_B1, BM_SRC_STK, BM_SRC_B1W, BM_SRC_N };
+enum bm_mode { BM_M_BMS_MISSING, BM_M_FORCE, BM_M_STALE, BM_M_LADESPERRE, BM_M_CHARGE, BM_M_FULL, BM_M_PROT,
+			   BM_M_CHARGING, BM_M_DIS, BM_M_N };
+extern const char *BM_WP_NAME[BM_WP_N], *BM_SRC_NAME[BM_SRC_N], *BM_MODE_NAME[BM_M_N];
+
+/* D1: forecast rule, S3 source, S2 scope. State: fc_active, bat1_first */
+struct bm_d1_in {
+	int season;                 /* base season BM_SUMMER / BM_WINTER / BM_TRANSITION (measured, else months) */
+	int night;                  /* have_pv && pv < NIGHT_PV_TH */
+	int wp_fresh;               /* em0/power younger than WP_MAX_AGE */
+	int wp_pos, wp_on;          /* ... and > 0 W / >= WP_ON_TH */
+	int wp_running;             /* R290 compressor > 0 Hz, data fresh */
+	int wp_gt_trans;            /* wp > WP_BAT_MAX_TRANSITION (reason text only) */
+	int fc_share_lt_share;      /* WP_BAT_SHARE_BAD % of wp < the base season's share */
+	int fc_fresh;               /* forecast on, target_soc present, younger than FC_MAX_AGE */
+	int fc_minsoc_ok;           /* lowest stack SoC <= 100 (a BMS present) */
+	int fc_above_on, fc_below_off;   /* lowest SoC > target + FC_HYST / < target */
+	int fc_target_bad;          /* target_soc >= FC_BAD_TARGET */
+	int b1_above_min;           /* SOC_Bat1 present and > BAT1_SOC_MIN */
+	int b1_ge_release;          /* SOC_Bat1 >= BAT1_SOC_MIN + BAT1_FIRST_HYST */
+};
+struct bm_d1_out {
+	int fc_active, bat1_first;  /* next state */
+	int fc_ok, fc_bad, season_wp, winter, b1_first, night_floor, wp_fc_capped, wp_cap_armed;
+	int wp_reason, src_reason;
+};
+void bm_d1(const struct bm_d1_in *b, int fc_active, int bat1_first, struct bm_d1_out *o);
+
+/* D2: S0 SoC protection / force charge per bank and the S1 mode per bank. State: prot[], force[], chg_prev */
+struct bm_d2_bank {
+	int bms_ok;
+	int soc_lt_min, soc_ge_release;              /* SoC < SOC_MIN / >= SOC_MIN_RELEASE */
+	int soc_lt_force, soc_ge_force_release;      /* SoC < SOC_FORCE / >= SOC_FORCE_RELEASE */
+	int soc_lt_100;
+	int charging;                                /* BMS power present and > CHARGING_TH */
+};
+struct bm_d2_in {
+	int stale;                                   /* inverter data older than STALE_SECONDS */
+	int block;                                   /* summer charge block (ladesperre) */
+	int surplus_gt_on, surplus_gt_hold;          /* Z2 surplus > PCC_SURPLUS_TH / > SOYO_HOLD_TH */
+	struct bm_d2_bank bank[NBANK];
+};
+struct bm_d2_out {
+	int prot[NBANK], force[NBANK], chg_prev;     /* next state */
+	int charge_mode;
+	int mode[NBANK];                             /* enum bm_mode, the same for all phases of a bank */
+};
+void bm_d2(const struct bm_d2_in *b, const int *prot, const int *force, int chg_prev, struct bm_d2_out *o);
+
+/* SoC balancing lead. State: lead (-1 none, 0, 1) */
+struct bm_dl_in {
+	int both_ok;                                 /* both BMS present */
+	int diff_gt_on, diff_lt_off;                 /* |SoC0 - SoC1| > SOC_BALANCE_ON / < SOC_BALANCE_OFF */
+	int first_ahead;                             /* SoC0 > SoC1 */
+};
+int bm_dlead(const struct bm_dl_in *b, int lead, int *event);        /* next lead; event 1 = new lead, -1 = cleared */
+
+/* D3: S4 discharge PROPORTIONAL or IDLE. State: prop_prev */
+struct bm_d3_in {
+	int any_dis;                                 /* a phase discharges (mode DIS) */
+	int house_import;                            /* Z2 house balance < PCC_IMPORT_TH */
+	int deficit_gt_hold;                         /* deficit > SOYO_HOLD_TH */
+	int night_floor;                             /* D1 */
+};
+int bm_d3(const struct bm_d3_in *b, int prop_prev, int *prop_next);   /* 1 = PROPORTIONAL, 0 = IDLE */
+
 void bm_init(struct bm_state *st);
 /* charge ceiling of one phase (W AC): charger_a x BMS voltage of its bank / charge_eff, at most CHARGE_MAX_PHASE;
    without a plausible voltage CHARGER_CAP_PHASE (no spill above it any more) */

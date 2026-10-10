@@ -15,7 +15,7 @@ tests/test_logic: tests/test_logic.c bm_logic.c bm_logic.h
 	$(CC) $(CFLAGS) -I. -o $@ tests/test_logic.c bm_logic.c -lm
 
 clean:
-	rm -f batmonitor tests/test_logic
+	rm -f batmonitor tests/test_logic tests/check_matrix
 
 # behaviour comparison against an older bm_logic.c (refactor check): same random inputs, outputs must be identical
 # usage: git show HEAD:venus-addons/batmonitor/c/bm_logic.c > /tmp/bm_old.c && make fuzz-compare OLD=/tmp/bm_old.c
@@ -24,3 +24,10 @@ fuzz-compare: tests/fuzz_dump.c bm_logic.c bm_logic.h
 	$(CC) -O2 -I. -o /tmp/bm_fz_old tests/fuzz_dump.c $(OLD) -lm
 	for s in 1 2 3 4 5; do /tmp/bm_fz_old $$s > /tmp/bm_fz_old.$$s; /tmp/bm_fz_new $$s > /tmp/bm_fz_new.$$s; \
 		cmp -s /tmp/bm_fz_old.$$s /tmp/bm_fz_new.$$s && echo "seed $$s identical" || { echo "seed $$s DIFFERS"; exit 1; }; done
+
+# exhaustive check of the decision layer (bm_d1 / bm_d2 / bm_dlead / bm_d3) + amount properties of bm_step
+check: tests/check_matrix
+	./tests/check_matrix
+
+tests/check_matrix: tests/check_matrix.c bm_logic.c bm_logic.h
+	$(CC) $(CFLAGS) -I. -o $@ tests/check_matrix.c bm_logic.c -lm
