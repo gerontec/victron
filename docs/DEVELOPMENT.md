@@ -14,7 +14,7 @@ automatic check.
 | 1 | **Name decisions in the output first**, then structure them. One reason per stage in the rule text / log. | `PROP WP:FC SRC:STK EQ`; the reason enums later became the table rows |
 | 2 | **Keep decisions apart from amounts.** Decisions are pure functions of predicate bits + hysteresis state; amounts (W) are formulas outside them. | `bm_d1` / `bm_d2` / `bm_dlead` / `bm_d3` contain no watts |
 | 3 | **Every consumer of a decision bit becomes a named column.** grep the bit, one column per use. | 4 uses of `night_floor` -> `b1_signed`, `trickle`, `idle_w`, `prop_hold` |
-| 4 | **Refactor without behaviour change first, proven by a differential test.** The table values come from the current behaviour, not from a redesign. | `make fuzz-compare OLD=<old bm_logic.c>`: identical over 5 x 48000 cycles |
+| 4 | **Refactor without behaviour change first, proven by a differential test.** The table values come from the current behaviour, not from a redesign. | `make fuzz-compare REV=<commit>`: identical over 5 x 48000 cycles |
 | 5 | **Behaviour changes afterwards, one at a time, each with its own test.** | 0.45-c step 5 (source independent of the forecast) + `test_forecast_keeps_source` |
 | 6 | **Keep axes orthogonal.** Factorise into small one-dimensional tables instead of a product table. | `BM_SRC_RULE[4]` and `bm_wp_kind[4]` instead of a 4 x 7 table |
 | 7 | **Every rule gets an automatic check.** Exhaustive enumeration of the discrete layer, proofs for the amounts. | `make check`, `make cbmc` |
@@ -31,7 +31,7 @@ Run in `venus-addons/batmonitor/c`:
 |---------|--------------|------|
 | `make test` | unit tests: plant simulation, setpoints and rule texts per scenario | seconds |
 | `make check` | enumerates every input / state combination of the decision layer (invariants, fixed point after one step, reachability), prints the discharge matrix, plus amount properties over 200000 random cycles | ~1 min |
-| `make fuzz-compare OLD=...` | differential test of the setpoints and rule texts against an older `bm_logic.c` | ~10 s |
+| `make fuzz-compare [REV=HEAD]` | differential test of the setpoints and rule texts against a git revision (its own `bm_logic.c`, `bm_logic.h`, `tests/fuzz_dump.c`); prints the count of differing cycles per seed | ~10 s |
 | `make cbmc` | CBMC proofs of the predicate constraints and the amount formula, plus one harness that must give a counterexample | seconds |
 | `make cbmc-full` | adds the floating-point / split proofs (`h_alloc_discharge`, `h_charge`, `h_discharge`) | minutes, ~5 GB RAM |
 | `make cbmc-remote CBMC_HOST=... CBMC_REMOTE_BIN=...` | runs `cbmc-full` on a faster build host | |

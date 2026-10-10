@@ -17,13 +17,20 @@ tests/test_logic: tests/test_logic.c bm_logic.c bm_logic.h
 clean:
 	rm -f batmonitor tests/test_logic tests/check_matrix
 
-# behaviour comparison against an older bm_logic.c (refactor check): same random inputs, outputs must be identical
-# usage: git show HEAD:venus-addons/batmonitor/c/bm_logic.c > /tmp/bm_old.c && make fuzz-compare OLD=/tmp/bm_old.c
+# behaviour comparison against an older revision (refactor check): same random inputs, setpoints and rule texts must
+# be identical. The old bm_logic.c, bm_logic.h and tests/fuzz_dump.c come from git, so a changed header does not break
+# the old build. usage: make fuzz-compare [REV=HEAD]
+REV ?= HEAD
+FZ = /tmp/bm_fz
 fuzz-compare: tests/fuzz_dump.c bm_logic.c bm_logic.h
-	$(CC) -O2 -I. -o /tmp/bm_fz_new tests/fuzz_dump.c bm_logic.c -lm
-	$(CC) -O2 -I. -o /tmp/bm_fz_old tests/fuzz_dump.c $(OLD) -lm
-	for s in 1 2 3 4 5; do /tmp/bm_fz_old $$s > /tmp/bm_fz_old.$$s; /tmp/bm_fz_new $$s > /tmp/bm_fz_new.$$s; \
-		cmp -s /tmp/bm_fz_old.$$s /tmp/bm_fz_new.$$s && echo "seed $$s identical" || { echo "seed $$s DIFFERS"; exit 1; }; done
+	rm -rf $(FZ) && mkdir -p $(FZ)/old/tests
+	for f in bm_logic.c bm_logic.h tests/fuzz_dump.c; do git show $(REV):./$$f > $(FZ)/old/$$f || exit 1; done
+	$(CC) -O2 -I$(FZ)/old -o $(FZ)/fz_old $(FZ)/old/tests/fuzz_dump.c $(FZ)/old/bm_logic.c -lm
+	$(CC) -O2 -I. -o $(FZ)/fz_new tests/fuzz_dump.c bm_logic.c -lm
+	@fail=0; for s in 1 2 3 4 5; do $(FZ)/fz_old $$s > $(FZ)/old.$$s; $(FZ)/fz_new $$s > $(FZ)/new.$$s; \
+		n=$$(diff $(FZ)/old.$$s $(FZ)/new.$$s | grep -c '^>'); \
+		if [ $$n -eq 0 ]; then echo "seed $$s identical"; else echo "seed $$s: $$n of $$(wc -l < $(FZ)/new.$$s) cycles differ"; fail=1; fi; \
+	done; [ $$fail -eq 0 ] || { echo "outputs in $(FZ)/old.<seed> / new.<seed>"; exit 1; }
 
 # exhaustive check of the decision layer (bm_d1 / bm_d2 / bm_dlead / bm_d3) + amount properties of bm_step
 check: tests/check_matrix
