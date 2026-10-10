@@ -1,0 +1,75 @@
+// batmonitor 0.45-c: decision flow of one cycle (bm_step), the discharge matrix highlighted.
+// render: dot -Tpdf decision_flow.dot -o decision_flow.pdf   (or -Tpng)
+digraph batmonitor {
+	graph [rankdir=TB, fontname="Helvetica", fontsize=11, nodesep=0.35, ranksep=0.35, newrank=true,
+		   label="batmonitor 0.45-c: one cycle (bm_step, every 5 s)   |   blue = pure decision function (bits + state, enumerated by make check)   |   green = discharge matrix   |   [CBMC] = proved for all inputs",
+		   labelloc=t];
+	node [shape=box, style="rounded,filled", fillcolor="#f4f4f4", fontname="Helvetica", fontsize=10];
+	edge [fontname="Helvetica", fontsize=9];
+
+	in [label=<<b>inputs</b> (chain_inputs)<br/>PCC, Sofar Bat1 W + SoC, em0 WP W, R290 Hz, PV,<br/>BMS SoC / U / CCL / DCL, season, forecast<br/>-&gt; stale, wp_fresh, wp_on (&ge; WP_ON_TH), night (PV &lt; NIGHT_PV_TH)>, fillcolor="#ffffff"];
+
+	d1 [label=<<b>D1</b> bm_d1   state: fc_active, bat1_first<br/>FC_ACTIVE: lowest SoC &gt; target + FC_HYST (off &lt; target)<br/>FC_BAD: target &ge; FC_BAD_TARGET<br/>B1FIRST: Bat1 SoC &gt; BAT1_SOC_MIN (on from +2 %) and WP on<br/><font point-size="9">[CBMC h_d1_bits]</font>>, fillcolor="#dbe8fb"];
+
+	src [label=<<b>S3 source</b> (measured season only, 0.45-c)<br/>day -&gt; <b>DAY</b><br/>night + B1FIRST -&gt; <b>B1</b><br/>night, not (winter + WP on) -&gt; <b>STK</b> (night floor)<br/>night, winter + WP on -&gt; <b>B1W</b>>, fillcolor="#dbe8fb"];
+
+	wpk [label=<<b>S2 heat pump kind</b><br/>forecast cap binds -&gt; <b>BAD</b><br/>else season_wp (FC_ACTIVE = summer):<br/>winter -&gt; <b>NONE</b>, transition -&gt; <b>CAP</b>, summer -&gt; <b>ALL</b>>, fillcolor="#dbe8fb"];
+
+	share [label=<<b>wp_share</b><br/>NONE 0  |  CAP min(WP, WP_BAT_MAX_TRANSITION)  |  ALL WP  |  BAD WP x WP_BAT_SHARE_BAD %<br/>z2 = PCC + (WP - share)   (the point the stacks regulate on)>];
+
+	gates [label=<<b>S0 gates</b> per bank (chain_gates)<br/>SoC from the BMS; caps per phase, one per bank:<br/>chg_cap = min(charger x U, BMS CCL)   dis_cap = min(DISCHARGE_MAX_PHASE, BMS DCL)>];
+
+	d2 [label=<<b>D2</b> bm_d2 per bank   state: prot, force, chg_prev<br/>first match: BMS_MISSING &gt; FORCE &gt; STALE &gt; LADESPERRE &gt;<br/>CHARGE / FULL &gt; PROT &gt; CHARGING &gt; <b>DIS</b><br/><font point-size="9">[CBMC h_d2_bits; threshold order needed: h_d2_bits_any_order]</font>>, fillcolor="#dbe8fb"];
+
+	lead [label=<<b>D-lead</b> bm_dlead   state: lead<br/>|SoC1 - SoC2| &gt; SOC_BALANCE_ON -&gt; the stack ahead leads<br/>&lt; SOC_BALANCE_OFF -&gt; no lead>, fillcolor="#dbe8fb"];
+
+	modesplit [label="mode per phase", shape=diamond, fillcolor="#ffffff"];
+	other [label=<BMS_MISSING / FORCE / STALE / LADESPERRE /<br/>FULL / PROT / CHARGING<br/>-&gt; fixed setpoint (0, force charge, ...)>];
+
+	subgraph cluster_dis {
+		label=<<b>discharge matrix</b> (0.45-c, whole watts)>; style="rounded,filled"; fillcolor="#eaf6e6"; color="#5a9e4b"; fontsize=11;
+		rule [shape=plain, fillcolor="#ffffff", label=<
+			<table border="0" cellborder="1" cellspacing="0" cellpadding="3" bgcolor="#ffffff">
+			<tr><td colspan="5"><b>BM_SRC_RULE[src]</b></td></tr>
+			<tr><td><b>SRC</b></td><td>b1_signed</td><td>trickle</td><td>idle_w</td><td>prop_hold</td></tr>
+			<tr><td>DAY</td><td>0</td><td>0</td><td>20</td><td>0</td></tr>
+			<tr><td>B1</td><td>0</td><td>0</td><td>20</td><td>0</td></tr>
+			<tr><td bgcolor="#cfe8c6">STK</td><td bgcolor="#cfe8c6">1</td><td bgcolor="#cfe8c6">1</td><td bgcolor="#cfe8c6">0</td><td bgcolor="#cfe8c6">1</td></tr>
+			<tr><td>B1W</td><td>0</td><td>0</td><td>20</td><td>0</td></tr>
+			</table>>];
+		deficit [label=<<b>deficit</b> (int W)<br/>b1 = b1_signed ? Bat1 : max(Bat1 charge, 0)<br/>target = SOYO_TARGET + (trickle ? SOFAR_TRICKLE : 0)<br/>deficit = own_discharge - b1 - KP_PM x (z2 + own_charge - target) / 1000>, fillcolor="#ffffff"];
+		d3 [label=<<b>D3</b> bm_d3   state: prop_prev<br/>PROP = import (&lt; -100 W) or<br/>((prop_prev or prop_hold) and deficit &gt; 20 W)>, fillcolor="#dbe8fb"];
+		amount [label=<<b>dis_amount</b>: w = min(PROP ? max(deficit, 0) : idle_w, W_MAX, WP_CAP if armed)<br/><font point-size="9">[CBMC h_dis_amount]</font>>, fillcolor="#ffffff"];
+		alloc [label=<<b>alloc_discharge</b> (one routine)<br/>lead: level 0 = lead stack (BAL), level 1 = only what its caps cut (SPILL / WAIT)<br/>no lead: one level, every stack the same share (EQ)<br/>within a level: water filling up to dis_cap<br/><font point-size="9">[CBMC h_alloc_discharge: within caps, total &le; w, lead first, equal per stack]</font>>, fillcolor="#ffffff"];
+		rule -> deficit -> d3 -> amount -> alloc;
+	}
+
+	chg [label=<<b>charge</b> (chain_charge)<br/>want = max(0, own_charge + KP x surplus)<br/>alloc_charge: CHARGE_PRIORITY, lead stack last, up to chg_cap<br/><font point-size="9">[CBMC h_charge]</font>>];
+
+	out [label=<<b>setpoints</b> per phase -&gt; Multis (ESS AcPowerSetpoint)<br/>rule text: &lt;mode&gt; WP:&lt;reason&gt; SRC:&lt;src&gt; &lt;split&gt; [WPCAP] [CCL/DCL]<br/><font point-size="9">[CBMC h_discharge: whole discharge path]</font>>, fillcolor="#ffffff"];
+	pi [label="PI prototype (shadow, not armed)", fillcolor="#eeeeee", fontcolor="#777777", style="rounded,filled,dashed"];
+
+	in -> d1;
+	d1 -> src [label=" src"];
+	d1 -> wpk [label=" wp_kind"];
+	wpk -> share;
+	in -> gates;
+	share -> d2 [label=" z2 surplus"];
+	gates -> d2;
+	d2 -> lead;
+	lead -> modesplit;
+	modesplit -> rule [label=" DIS", color="#5a9e4b", fontcolor="#3c7a30"];
+	modesplit -> chg [label=" CHARGE"];
+	modesplit -> other [label=" else"];
+	src -> rule [color="#5a9e4b", style=dashed, label=" row"];
+	share -> deficit [style=dashed, label=" z2"];
+	d1 -> amount [style=dashed, label=" wp_cap_armed\n(em0 stale, winter, R290 on)"];
+	gates -> alloc [style=dashed, label=" dis_cap"];
+	lead -> alloc [style=dashed, label=" lead"];
+	alloc -> out;
+	chg -> out;
+	other -> out;
+	out -> pi [style=dashed, arrowhead=none];
+
+	{rank=same; src; wpk;}
+}

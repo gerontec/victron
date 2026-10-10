@@ -48,6 +48,9 @@ CAPACITY_KWH = 2 * 300 * 51.2 / 1000          # both Multi stacks
 SOFAR_BAT1_KWH = 5.0                          # what the Sofar battery takes first (rough, 2026-10-08)
 RELY = 0.8                                    # plan with 80 % of the predicted surplus
 TARGET_MIN = 5.0                              # = batmonitor SOC_MIN
+WX_MIN_HORIZON_H = 84                         # weather_data must reach this far ahead (OWM: 5 days from the fetch),
+                                              # else the import on heissa stalls: publish nothing (batmonitor falls
+                                              # back to the season rules after FC_MAX_AGE 3 h)
 MQTT_HOST, MQTT_TOPIC = "127.0.0.1", "batmonitor/forecast"
 
 # ---- clear-sky model (fox2db_logic.h / batmonitor bm_logic.c, without the monthly kt) --------------------------
@@ -108,6 +111,13 @@ def weather_kt(cur, day):
 	if not r or not r[0] or r[1] is None:
 		return None
 	return kt_formula(day, *r[1:])
+
+
+def weather_horizon(cur):
+	"""newest weather_data timestamp of the location (local time): fetch time + ~5 days"""
+	cur.execute("SELECT MAX(timestamp) FROM weather_data WHERE latitude=%s AND longitude=%s", (wx.LAT, wx.LON))
+	r = cur.fetchone()
+	return r[0] if r else None
 
 
 def kt_formula(day, cloud, rain, pop, temp, hum, vis, wind):
@@ -185,15 +195,21 @@ def main():
 		clear_t, window_t = clear_day(for_date)
 		kt_t = weather_kt(wcur, for_date)
 		slots = weather_slots(wcur, now.date())
+		horizon = weather_horizon(wcur)
 	finally:
 		con.close()
 		wcon.close()
+	min_horizon = now.replace(tzinfo=None) + dt.timedelta(hours=WX_MIN_HORIZON_H)
+	if kt_t is None or horizon is None or horizon < min_horizon:
+		print("no fresh weather forecast (kt for %s: %s, weather_data up to %s, needed %s): not published"
+			  % (for_date, kt_t, horizon, min_horizon.strftime("%Y-%m-%d %H:%M")), file=sys.stderr)
+		return 1
 	cal = [(c, k, m[0]) for _, c, k, m in rows if k is not None and m is not None]
 	model_sum = sum(c * k for c, k, _ in cal)
 	corr = max(CORR_MIN, min(CORR_MAX, sum(x for _, _, x in cal) / model_sum)) if model_sum > 0 else 1.0
 	loads = [m[1] for _, _, _, m in rows[-LOAD_DAYS:] if m is not None]
 	day_load = sum(loads) / len(loads) if loads else 0.0
-	expected = clear_t * (kt_t if kt_t is not None else 0.5) * corr
+	expected = clear_t * kt_t * corr
 	free = max(0.0, min(CAPACITY_KWH, (expected - day_load - SOFAR_BAT1_KWH) * RELY))
 	target = max(TARGET_MIN, 100.0 - free / CAPACITY_KWH * 100.0)
 	msg = {"for_date": str(for_date), "target_soc": round(target, 1), "expected_kwh": round(expected, 1),
