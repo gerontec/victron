@@ -76,7 +76,7 @@
 #include <unistd.h>
 #include "bm_logic.h"
 
-#define VERSION "0.40-c"
+#define VERSION "0.41-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"

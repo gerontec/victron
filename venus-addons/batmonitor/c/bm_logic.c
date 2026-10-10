@@ -427,132 +427,94 @@ static void alloc_charge(const struct bm_cfg *cfg, int lead, double rest, const 
 				sp[p] += (int)fmax(0.0, fmin(rest / n_chg, fmin(cfg->charge_max_phase, cap[p]) - sp[p]));
 }
 
-/* one cycle: the ESP soyo calculation per bank, the charge block and the PI prototype */
-void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *st, struct bm_out *out)
+/* ---- the rule chain (0.41-c): one function per stage, run in this order by bm_step ---------------------------------
+   inputs     derived facts: data age, heat pump running, season, night, own AC-in
+   forecast   FC_ACTIVE / FC_BAD from batmonitor/forecast
+   S0 gates   per bank: SoC protection / force charge state, charge and discharge ceilings (charger, BMS CCL/DCL)
+   S2 scope   what the stacks may cover of the heat pump: wp_eff = the part they must NOT cover
+   S3 source  who delivers first at night: the Sofar Bat1 (B1FIRST) or the stacks (night floor)
+   S1 mode    per phase, first match: BMS_MISSING > FORCE_CHARGE > STALE > LADESPERRE > PV_SURPLUS >
+              DISCHARGE_PROTECTION > CHARGING > discharge
+   S4 amount  discharge W (PROPORTIONAL / IDLE + tags), charge W
+   S5 split   alloc_discharge / alloc_charge over the phases, BMS limit tags
+   PI         shadow prototype (not armed), reads the same stages
+   A stage reads the results of the stages before it and changes none of them. */
+struct chain {
+	int stale, wp_running, wp_fresh, wp_on, night;
+	int season_wp;                     /* season for the heat pump rules: FC_ACTIVE serves it as in summer (0.24) */
+	int winter;                        /* season_wp != summer: WP_CAP fallback with stale em0/power */
+	double own_charge, own_discharge, multis;
+	double wp_eff;                     /* S2: heat pump W the stacks must NOT cover */
+	int wp_fc_capped;                  /* S2: the bad-forecast cap binds */
+	double z2;                         /* PCC + wp_eff: the point the stacks regulate on */
+	int b1_first, night_floor;         /* S3 */
+	double bat1_eff, chg_ref, surplus;
+	int block, charge_mode;
+	int discharge[NPH], charge[NPH], n_dis, n_chg;
+};
+
+static void chain_inputs(const struct bm_in *in, struct bm_out *out, struct chain *c)
 {
-	double now = in->now;
 	struct tm loc;
 	localtime_r(&in->t, &loc);
 	int month = loc.tm_mon + 1;
-	double pcc = in->pcc, pv = in->pv, bat1 = in->bat1;
-	int have_pcc = in->have_pcc, have_pv = in->have_pv;
-
-	memset(out, 0, sizeof(*out));
-	int stale = in->inv_time == 0 || now - in->inv_time > STALE_SECONDS;
-	int wp_running = in->r290_time > 0 && now - in->r290_time < STALE_SECONDS && in->r290_hz > 0;
-	/* Z2 point = Z1 PCC + heat pump: the discharge serves only the house (0.19), winter only. Winter/summer from
-	   the measured energy (season.py on .218: summer when export > 2 x heat pump over 7 days, winter below 1 x,
-	   0.21), the months Oct-Apr only when that is missing or older than 2 days */
-	int wp_fresh = in->wp_time > 0 && now - in->wp_time < WP_MAX_AGE;
+	c->stale = in->inv_time == 0 || in->now - in->inv_time > STALE_SECONDS;
+	c->wp_running = in->r290_time > 0 && in->now - in->r290_time < STALE_SECONDS && in->r290_hz > 0;
+	c->wp_fresh = in->wp_time > 0 && in->now - in->wp_time < WP_MAX_AGE;
+	c->wp_on = c->wp_fresh && in->wp >= WP_ON_TH;
+	c->night = in->have_pv && in->pv < NIGHT_PV_TH;
+	/* Winter/summer from the measured energy (season.py on .218: summer when export > 2 x heat pump over 7 days,
+	   winter below 1 x, 0.21), the months only when that is missing or older than 2 days */
 	int season_ok = in->season && in->t - in->season_ts < SEASON_MAX_AGE;
-	int season = season_ok ? in->season : (month >= SUMMER_FROM && month <= SUMMER_TO) ? BM_SUMMER : BM_WINTER;
-	out->season = season;
+	out->season = season_ok ? in->season : (month >= SUMMER_FROM && month <= SUMMER_TO) ? BM_SUMMER : BM_WINTER;
 	out->season_measured = season_ok;
-	/* forecast (0.24, readers/forecast.py): while both stacks are above the SoC that the next day's PV surplus will
-	   refill, they serve everything, the heat pump included, in any season (sell less, use more); below the target
-	   the season rules apply again, back on above target + FC_HYST */
-	{
-		double min_soc = 101;
-		for (int b = 0; b < NBANK; b++)
-			if (in->bms_ok[b] && in->soc[b] < min_soc)
-				min_soc = in->soc[b];
-		int fc_ok = cfg->forecast && in->fc_target >= 0 && in->fc_ts > 0 && in->t - in->fc_ts < FC_MAX_AGE && min_soc <= 100;
-		if (!fc_ok)
-			st->fc_active = 0;
-		else if (!st->fc_active && min_soc > in->fc_target + cfg->fc_hyst)
-			st->fc_active = 1;
-		else if (st->fc_active && min_soc < in->fc_target)
-			st->fc_active = 0;
-		out->fc_active = st->fc_active;
-		out->fc_target = fc_ok ? in->fc_target : -1;
-		out->fc_min_soc = min_soc;
-		/* bad forecast (0.37-c, user 2026-10-10: rain day): the next day's PV will not refill the stacks
-		   (target_soc >= FC_BAD_TARGET, i.e. free_kwh 0), so they cover at most WP_BAT_SHARE_BAD % of the heat pump */
-		int fc_fresh = cfg->forecast && in->fc_target >= 0 && in->fc_ts > 0 && in->t - in->fc_ts < FC_MAX_AGE;
-		out->fc_bad = fc_fresh && !st->fc_active && in->fc_target >= cfg->fc_bad_target;
-		if (st->fc_active)
-			season = BM_SUMMER;        /* serve the heat pump like in summer */
-	}
-	/* Sofar first (0.38-c, user 2026-10-10): while the Sofar Bat1 is above BAT1_SOC_MIN it covers the night load
-	   (heat pump included) by its own PCC regulation; the stacks only take the import it leaves (its 2.5 kW limit)
-	   and take over completely once it is down at BAT1_SOC_MIN (the Sofar stops there by its DOD).
-	   Only while the heat pump runs (user: WP off -> the normal rule). In winter it changes only the rule tag: there
-	   the stacks never cover the running heat pump and the night floor is off anyway */
-	if (!in->have_soc_bat1 || in->soc_bat1 <= cfg->bat1_soc_min)
-		st->bat1_first = 0;
-	else if (!st->bat1_first && in->soc_bat1 >= cfg->bat1_soc_min + BAT1_FIRST_HYST)
-		st->bat1_first = 1;
-	int b1_first = st->bat1_first && wp_fresh && in->wp >= WP_ON_TH;
-	out->bat1_first = b1_first;
-	int winter = season != BM_SUMMER;          /* transition counts as winter for the WP_CAP fallback */
-	/* the heat pump power the batteries must NOT cover: all of it in winter, the part above 1900 W in the
-	   transition (0.22), none in summer */
-	double wp_eff = 0.0;
-	int wp_fc_capped = 0;                      /* the bad-forecast cap binds (rule |FCBAD instead of |WP1900 / |Z2) */
-	if (wp_fresh && in->wp > 0) {
-		double share = season == BM_WINTER ? 0.0 : season == BM_TRANSITION ? fmin(in->wp, cfg->wp_bat_max_transition)
-					   : in->wp;
-		double fc_share = in->wp * cfg->wp_bat_share_bad / 100.0;
-		if (out->fc_bad && fc_share < share) {
-			share = fc_share;
-			wp_fc_capped = 1;
-		}
-		wp_eff = in->wp - share;
-	}
-	double z2 = pcc + wp_eff;
-	int *sp = out->sp;
-	char (*why)[WHY_LEN] = out->why;
-	for (int b = 0; b < NBANK; b++)
-		for (int i = 0; i < BM_BANKS[b].nph; i++) {
-			int p = BM_BANKS[b].ph[i];
-			double c = bm_charge_cap(cfg, in->volt_ok[b], in->volt[b]), d = cfg->discharge_max_phase;
-			out->ccl_bind[p] = out->dcl_bind[p] = 0;
-			if (in->lim_ok[b]) {                 /* 0.35-c: the BMS's own CCL / DCL (MUST CAN 0x351) */
-				double bc = bm_bms_cap_phase(cfg, b, in->volt_ok[b], in->volt[b], in->ccl[b], 1);
-				double bd = bm_bms_cap_phase(cfg, b, in->volt_ok[b], in->volt[b], in->dcl[b], 0);
-				out->ccl_bind[p] = bc < fmin(c, cfg->charger_cap_phase);
-				out->dcl_bind[p] = bd < d;
-				c = fmin(c, bc);
-				d = fmin(d, bd);
-			}
-			out->chg_cap[p] = c;
-			out->dis_cap[p] = d;
-		}
-	int discharge[NPH] = {0}, charge[NPH] = {0}, n_dis = 0, n_chg = 0;
-	int pi_ok[NPH] = {0}, pi_chg[NPH] = {0}, pi_dis[NPH] = {0}, n_pichg = 0, n_pidis = 0;
-
 	/* the meter already includes our own charging: use the measured AC-in, not the setpoints */
-	double own_charge = 0.0, own_discharge = 0.0, multis = 0.0;
 	for (int p = 0; p < NPH; p++)
 		if (in->ac_ok[p]) {
 			double a = in->ac_in[p];
-			multis += a;
+			c->multis += a;
 			if (a > 0)
-				own_charge += a;
+				c->own_charge += a;
 			else
-				own_discharge -= a;
+				c->own_discharge -= a;
 		}
-	/* a Sofar Bat1 discharge is no surplus; its charging counts with BAT1_CHARGE_FACTOR. The own discharge is
-	   subtracted (0.20, found by tests/test_logic.c): else the 936 W night floor, partly going into the Sofar
-	   battery, counted as PV surplus and the Multis switched to charging at night / one stack charged the other */
-	double bat1_eff = bat1 < 0 ? bat1 : bat1 * BAT1_CHARGE_FACTOR;
-	/* charging on the Z2 point too (0.30-c, user 2026-10-09: Z2 power costs 30 ct): in winter the PV goes into the
-	   stacks and the heat pump takes the cheap Z1 grid (in the transition its part above 1900 W, as the discharge).
-	   While the Sofar can, it covers the heat pump from Bat1 (own PCC regulation at Z1): Bat1 -> WP, PV -> stacks */
-	double chg_ref = have_pcc ? z2 : 0.0;
-	double surplus = chg_ref + bat1_eff + own_charge - own_discharge;
-	int block = ladesperre(cfg, in, st, out, stale, multis);
-	/* surplus includes the own charging: once charging, it holds down to SOYO_HOLD_TH instead of 200 W */
-	int charge_mode = surplus > PCC_SURPLUS_TH || (st->soyo_chg_prev && surplus > SOYO_HOLD_TH);
+}
 
+/* forecast (0.24, readers/forecast.py): while both stacks are above the SoC that the next day's PV surplus will
+   refill, they serve everything, the heat pump included, in any season (sell less, use more); below the target the
+   season rules apply again, back on above target + FC_HYST. Bad forecast (0.37-c, user 2026-10-10: rain day): the next
+   day's PV will not refill the stacks (target_soc >= FC_BAD_TARGET, i.e. free_kwh 0) -> WP share capped in S2 */
+static void chain_forecast(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *st, struct bm_out *out,
+						   struct chain *c)
+{
+	double min_soc = 101;
+	for (int b = 0; b < NBANK; b++)
+		if (in->bms_ok[b] && in->soc[b] < min_soc)
+			min_soc = in->soc[b];
+	int fc_fresh = cfg->forecast && in->fc_target >= 0 && in->fc_ts > 0 && in->t - in->fc_ts < FC_MAX_AGE;
+	int fc_ok = fc_fresh && min_soc <= 100;
+	if (!fc_ok)
+		st->fc_active = 0;
+	else if (!st->fc_active && min_soc > in->fc_target + cfg->fc_hyst)
+		st->fc_active = 1;
+	else if (st->fc_active && min_soc < in->fc_target)
+		st->fc_active = 0;
+	out->fc_active = st->fc_active;
+	out->fc_target = fc_ok ? in->fc_target : -1;
+	out->fc_min_soc = min_soc;
+	out->fc_bad = fc_fresh && !st->fc_active && in->fc_target >= cfg->fc_bad_target;
+	c->season_wp = st->fc_active ? BM_SUMMER : out->season;
+	c->winter = c->season_wp != BM_SUMMER;      /* transition counts as winter for the WP_CAP fallback */
+}
+
+/* S0: per bank SoC protection (stop < SOC_MIN until SOC_MIN_RELEASE) and force charge (< SOC_FORCE until
+   SOC_FORCE_RELEASE); per phase ceilings: charger (bm_charge_cap), DISCHARGE_MAX_PHASE, the BMS's own CCL / DCL (0.35-c) */
+static void chain_gates(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *st, struct bm_out *out)
+{
 	for (int b = 0; b < NBANK; b++) {
-		const char *bn = BM_BANKS[b].name;
 		st->soc_ok[b] = in->bms_ok[b];
-		if (st->soc_ok[b])
-			st->soc[b] = in->soc[b];
-		int have_power = in->power_ok[b];
-		double power = in->power[b];
 		if (st->soc_ok[b]) {
+			st->soc[b] = in->soc[b];
 			if (st->soc[b] < cfg->soc_min)
 				st->prot[b] = 1;
 			else if (st->soc[b] >= cfg->soc_min_release)
@@ -564,168 +526,265 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 		}
 		for (int i = 0; i < BM_BANKS[b].nph; i++) {
 			int p = BM_BANKS[b].ph[i];
-			sp[p] = 0;
-			/* PI: own gates (the soyo ones depend on its fixed thresholds) */
-			if (st->soc_ok[b] && !st->force[b] && !stale) {
-				pi_ok[p] = 1;
-				if (!block && st->soc[b] < 100.0) {
-					pi_chg[p] = 1;
-					n_pichg++;
-				}
-				if (!st->prot[b]) {
-					pi_dis[p] = 1;
-					n_pidis++;
-				}
+			double ch = bm_charge_cap(cfg, in->volt_ok[b], in->volt[b]), d = cfg->discharge_max_phase;
+			out->ccl_bind[p] = out->dcl_bind[p] = 0;
+			if (in->lim_ok[b]) {
+				double bc = bm_bms_cap_phase(cfg, b, in->volt_ok[b], in->volt[b], in->ccl[b], 1);
+				double bd = bm_bms_cap_phase(cfg, b, in->volt_ok[b], in->volt[b], in->dcl[b], 0);
+				out->ccl_bind[p] = bc < fmin(ch, cfg->charger_cap_phase);
+				out->dcl_bind[p] = bd < d;
+				ch = fmin(ch, bc);
+				d = fmin(d, bd);
 			}
+			out->chg_cap[p] = ch;
+			out->dis_cap[p] = d;
+		}
+	}
+}
+
+/* S2: the heat pump power the stacks must NOT cover (Z2 point = Z1 PCC + that, 0.19): all of it in winter, the part
+   above WP_BAT_MAX_TRANSITION in the transition (0.22), none in summer; with a bad forecast the stacks cover at most
+   WP_BAT_SHARE_BAD % (0.37-c). The smallest cap wins */
+static void chain_scope(const struct bm_cfg *cfg, const struct bm_in *in, const struct bm_out *out, struct chain *c)
+{
+	if (c->wp_fresh && in->wp > 0) {
+		double share = c->season_wp == BM_WINTER ? 0.0
+					   : c->season_wp == BM_TRANSITION ? fmin(in->wp, cfg->wp_bat_max_transition) : in->wp;
+		double fc_share = in->wp * cfg->wp_bat_share_bad / 100.0;
+		if (out->fc_bad && fc_share < share) {
+			share = fc_share;
+			c->wp_fc_capped = 1;
+		}
+		c->wp_eff = in->wp - share;
+	}
+	c->z2 = in->pcc + c->wp_eff;
+}
+
+/* S3: who delivers first at night. Sofar first (0.38-c, user 2026-10-10): while the heat pump runs and the Sofar Bat1
+   is above BAT1_SOC_MIN it covers the night load by its own PCC regulation; the stacks only take the import it leaves
+   (its 2.5 kW limit) and take over once it is down at BAT1_SOC_MIN (its DOD). Otherwise the night floor (0.25): the
+   stacks take the night load over from the Sofar, not with the heat pump running in winter (the base load would flow
+   into it). By day the Sofar goes first anyway (its discharge is ignored in S4) */
+static void chain_source(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *st, struct bm_out *out,
+						 struct chain *c)
+{
+	if (!in->have_soc_bat1 || in->soc_bat1 <= cfg->bat1_soc_min)
+		st->bat1_first = 0;
+	else if (!st->bat1_first && in->soc_bat1 >= cfg->bat1_soc_min + BAT1_FIRST_HYST)
+		st->bat1_first = 1;
+	c->b1_first = st->bat1_first && c->wp_on;
+	out->bat1_first = c->b1_first;
+	c->night_floor = c->night && !c->b1_first && (c->season_wp != BM_WINTER || !c->wp_on);
+}
+
+/* S1: charge or discharge, then per phase the first matching state */
+static void chain_mode(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *st, struct bm_out *out,
+					   struct chain *c)
+{
+	int *sp = out->sp;
+	char (*why)[WHY_LEN] = out->why;
+	/* a Sofar Bat1 discharge is no surplus; its charging counts with BAT1_CHARGE_FACTOR. The own discharge is
+	   subtracted (0.20, found by tests/test_logic.c): else the 936 W night floor, partly going into the Sofar
+	   battery, counted as PV surplus and the Multis switched to charging at night / one stack charged the other */
+	c->bat1_eff = in->bat1 < 0 ? in->bat1 : in->bat1 * BAT1_CHARGE_FACTOR;
+	/* charging on the Z2 point too (0.30-c, user 2026-10-09: Z2 power costs 30 ct): in winter the PV goes into the
+	   stacks and the heat pump takes the cheap Z1 grid (in the transition its part above 1900 W, as the discharge).
+	   While the Sofar can, it covers the heat pump from Bat1 (own PCC regulation at Z1): Bat1 -> WP, PV -> stacks */
+	c->chg_ref = in->have_pcc ? c->z2 : 0.0;
+	c->surplus = c->chg_ref + c->bat1_eff + c->own_charge - c->own_discharge;
+	c->block = ladesperre(cfg, in, st, out, c->stale, c->multis);
+	/* surplus includes the own charging: once charging, it holds down to SOYO_HOLD_TH instead of 200 W */
+	c->charge_mode = c->surplus > PCC_SURPLUS_TH || (st->soyo_chg_prev && c->surplus > SOYO_HOLD_TH);
+	for (int b = 0; b < NBANK; b++) {
+		const char *bn = BM_BANKS[b].name;
+		for (int i = 0; i < BM_BANKS[b].nph; i++) {
+			int p = BM_BANKS[b].ph[i];
+			sp[p] = 0;
 			if (!st->soc_ok[b])
 				snprintf(why[p], WHY_LEN, "%s:BMS_MISSING", bn);
 			else if (st->force[b]) {
 				sp[p] = (int)cfg->force_charge_w;
 				snprintf(why[p], WHY_LEN, "%s:FORCE_CHARGE(%.1f%%)", bn, st->soc[b]);
-			} else if (stale)
+			} else if (c->stale)
 				snprintf(why[p], WHY_LEN, "STALE");
-			else if (charge_mode && block)
+			else if (c->charge_mode && c->block)
 				snprintf(why[p], WHY_LEN, "%s:LADESPERRE(peak %dh)", bn, out->ls.peak_h);
-			else if (charge_mode) {
+			else if (c->charge_mode) {
 				snprintf(why[p], WHY_LEN, "%s:PV_SURPLUS", bn);
 				if (st->soc[b] < 100.0) {
-					charge[p] = 1;
-					n_chg++;
+					c->charge[p] = 1;
+					c->n_chg++;
 				}
 			} else if (st->prot[b])
 				snprintf(why[p], WHY_LEN, "%s:DISCHARGE_PROTECTION(%.1f%%)", bn, st->soc[b]);
-			else if (have_power && power > CHARGING_TH)
-				snprintf(why[p], WHY_LEN, "%s:CHARGING(%.0fW)", bn, power);
+			else if (in->power_ok[b] && in->power[b] > CHARGING_TH)
+				snprintf(why[p], WHY_LEN, "%s:CHARGING(%.0fW)", bn, in->power[b]);
 			else {
-				discharge[p] = 1;
-				n_dis++;
+				c->discharge[p] = 1;
+				c->n_dis++;
 			}
 		}
 	}
-	update_lead(cfg, st, out);
-	int night = have_pv && pv < NIGHT_PV_TH;
-	/* night floor: the stacks take the night load over from the Sofar (0.25). Not with the heat pump running in
-	   winter (the base load would flow into it) and not while the Sofar goes first (B1FIRST, 0.38-c) */
-	int night_floor = night && !b1_first && (season != BM_WINTER || !wp_fresh || in->wp < WP_ON_TH);
-	if (n_dis) {
-		int w;
-		char rule[64];
-		/* deficit = what the Multis already give (minus what of it goes into the Sofar battery) + the import still
-		   left (0.18; old: -KP * pcc, which dropped back to IDLE as soon as the own discharge covered the import) */
-		/* the own charging (force charge of the other stack) is no house load: it comes from the grid (0.20) */
-		double house = z2 + own_charge;
-		/* night (0.25, user 2026-10-08: PCC near 0): the Sofar Bat1 counts signed instead of the fixed 936 W floor.
-		   Its discharge is house load the stacks take over, its charge is our own overshoot (the 936 W floor charged
-		   the Sofar battery with ~600 W at a 300 W house). pcc + bat1 is the load behind the Sofar however the Sofar
-		   splits it, so both regulators do not fight; the Sofar battery idles, the PCC stays near 0 */
-		double b1_def = night_floor ? bat1 : (bat1 > 0 ? bat1 : 0.0);
-		/* 0.27 (user 2026-10-08): at night aim at pcc + bat1 = +SOFAR_TRICKLE, so the Sofar battery charges a few W
-		   steadily instead of swinging between charge and discharge around 0 */
-		double target = cfg->soyo_target + (night_floor ? cfg->sofar_trickle : 0.0);
-		double deficit = own_discharge - b1_def - KP * (house - target);
-		if (house < PCC_IMPORT_TH || ((st->soyo_prop_prev || night_floor) && deficit > SOYO_HOLD_TH)) {
-			w = deficit > 0 ? (int)deficit : 0;   /* never turn a discharge into charging (Sofar TOU charge) */
-			if (w > (int)cfg->w_max)
-				w = (int)cfg->w_max;
-			strcpy(rule, "PROPORTIONAL");
-			st->soyo_prop_prev = 1;
-		} else {
-			st->soyo_prop_prev = 0;
-			w = night_floor ? 0 : B_DAY_IDLE;
-			strcpy(rule, "IDLE");
-		}
-		if (night)
-			strcat(rule, "|NIGHT");
-		if (wp_eff >= WP_ON_TH && !wp_fc_capped)
-			strcat(rule, season == BM_TRANSITION ? "|WP1900" : "|Z2");
-		if (st->fc_active)
-			strcat(rule, "|FC");
-		if (night && b1_first)
-			strcat(rule, "|B1FIRST");
-		if (out->fc_bad && wp_fresh && in->wp >= WP_ON_TH)
-			strcat(rule, "|FCBAD");
-		if (!wp_fresh && winter && wp_running && w > (int)cfg->wp_cap) {
-			w = (int)cfg->wp_cap;
-			strcat(rule, "|WP_CAP");
-		}
-		alloc_discharge(st->lead, w, discharge, out->dis_cap, rule, sp, why);
-	}
-	if (n_chg) {
-		double cap_sum = 0;
-		for (int p = 0; p < NPH; p++)
-			if (charge[p])
-				cap_sum += out->chg_cap[p];
-		alloc_charge(cfg, st->lead, fmin((int)(own_charge + KP * (chg_ref + bat1_eff - cfg->soyo_target)),
-									cap_sum), charge, n_chg, out->chg_cap, sp, why);
-	}
-	for (int p = 0; p < NPH; p++)                       /* the BMS limit cut this phase's setpoint */
-		if ((sp[p] > 0 && out->ccl_bind[p] && sp[p] >= (int)out->chg_cap[p] - 1) ||
-			(sp[p] < 0 && out->dcl_bind[p] && -sp[p] >= (int)out->dis_cap[p] - 1))
-			strncat(why[p], sp[p] > 0 ? "|CCL" : "|DCL", WHY_LEN - 1 - strlen(why[p]));
-	st->soyo_chg_prev = n_chg > 0;
-	if (!n_dis)
-		st->soyo_prop_prev = 0;
+}
 
-	/* PI prototype. y = PCC + Sofar Bat1: Bat1 charging counts with BAT1_CHARGE_FACTOR (as the soyo surplus);
-	   a Bat1 discharge counts while the Multis charge (the Sofar must not feed them) and at night (the Multis take
-	   the base load over from the Sofar, soyo: fixed 936 W); by day while they discharge it is ignored (the Sofar
-	   battery covers the house first, the Multis only real grid import, as soyo) */
-	{
-		double applied = 0;
-		for (int p = 0; p < NPH; p++)
-			if (pi_ok[p])
-				applied += st->setpoints[p];
-		double b1 = bat1 > 0 ? bat1 * BAT1_CHARGE_FACTOR
-					: (applied > 0 || night_floor) ? bat1 : 0.0;
-		/* both sides on the Z2 point (discharge 0.19, charge 0.30-c), as soyo */
-		double y = (have_pcc ? z2 : 0.0) + b1, e = y - PI_TARGET;
-		if (fabs(e) < PI_DEADBAND)
-			e = 0;
-		double dt = st->pi_t_prev > 0 ? fmin(fmax(now - st->pi_t_prev, 1.0), 30.0) : CYCLE_SECONDS;
-		double u = applied + (st->pi_t_prev > 0 ? PI_KP * (e - st->pi_e_prev) : 0) + PI_KI * dt * e;
-		double dis_cap = (!wp_fresh && winter && wp_running) ? cfg->wp_cap : cfg->w_max;
-		double u_max = 0, u_min = n_pidis ? -dis_cap : 0;
-		for (int p = 0; p < NPH; p++)
-			if (pi_chg[p])
-				u_max += out->chg_cap[p];
-		/* crossing from discharge into charging: never more than the surplus at the Z2 point */
-		if (applied <= 0 && u > 0)
-			u = fmax(0.0, fmin(u, (have_pcc ? z2 : 0.0) + b1 - PI_TARGET));
-		u = fmax(u_min, fmin(u_max, u));
-		st->pi_e_prev = e;
-		st->pi_t_prev = now;
-		int psp[NPH] = {0};
-		char pwhy[NPH][WHY_LEN];
-		for (int p = 0; p < NPH; p++)
-			snprintf(pwhy[p], WHY_LEN, "%.95s", why[p]);
-		for (int p = 0; p < NPH; p++)
-			if (pi_ok[p])
-				snprintf(pwhy[p], WHY_LEN, "PI(%+.0f)", u);
-		if (u > 0)
-			alloc_charge(cfg, st->lead, u, pi_chg, n_pichg, out->chg_cap, psp, pwhy);
-		else if (u < 0) {
-			char rule[32];
-			snprintf(rule, sizeof(rule), "PI(%+.0f)", u);
-			alloc_discharge(st->lead, (int)-u, pi_dis, out->dis_cap, rule, psp, pwhy);
-		}
-		for (int p = 0; p < NPH; p++)
-			if (!pi_ok[p])
-				psp[p] = sp[p];          /* force charge, BMS missing, stale: as soyo */
-		out->pi.y = y;
-		out->pi.e = e;
-		out->pi.applied = applied;
-		out->pi.u = u;
-		out->pi.u_min = u_min;
-		out->pi.u_max = u_max;
-		memcpy(out->pi.sp, psp, sizeof(psp));
-		if (cfg->pi_armed) {
-			memcpy(sp, psp, sizeof(psp));
-			memcpy(why, pwhy, sizeof(pwhy));
-		}
+/* S4 + S5 discharge: deficit = what the Multis already give (minus what of it goes into the Sofar battery) + the
+   import still left (0.18); the own charging (force charge of the other stack) is no house load (0.20) */
+static void chain_discharge(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *st, struct bm_out *out,
+							const struct chain *c)
+{
+	int w;
+	char rule[64];
+	double house = c->z2 + c->own_charge;
+	/* night floor (0.25, user 2026-10-08: PCC near 0): the Sofar Bat1 counts signed. Its discharge is house load the
+	   stacks take over, its charge is our own overshoot. pcc + bat1 is the load behind the Sofar however the Sofar
+	   splits it, so both regulators do not fight; the Sofar battery idles, the PCC stays near 0 */
+	double b1_def = c->night_floor ? in->bat1 : (in->bat1 > 0 ? in->bat1 : 0.0);
+	/* 0.27 (user 2026-10-08): at night aim at pcc + bat1 = +SOFAR_TRICKLE, so the Sofar battery charges a few W
+	   steadily instead of swinging between charge and discharge around 0 */
+	double target = cfg->soyo_target + (c->night_floor ? cfg->sofar_trickle : 0.0);
+	double deficit = c->own_discharge - b1_def - KP * (house - target);
+	if (house < PCC_IMPORT_TH || ((st->soyo_prop_prev || c->night_floor) && deficit > SOYO_HOLD_TH)) {
+		w = deficit > 0 ? (int)deficit : 0;   /* never turn a discharge into charging (Sofar TOU charge) */
+		if (w > (int)cfg->w_max)
+			w = (int)cfg->w_max;
+		strcpy(rule, "PROPORTIONAL");
+		st->soyo_prop_prev = 1;
+	} else {
+		st->soyo_prop_prev = 0;
+		w = c->night_floor ? 0 : B_DAY_IDLE;
+		strcpy(rule, "IDLE");
 	}
-	out->surplus = surplus;
-	out->wp_eff = wp_eff;
-	memcpy(st->setpoints, sp, sizeof(st->setpoints));
+	if (c->night)
+		strcat(rule, "|NIGHT");
+	if (c->wp_eff >= WP_ON_TH && !c->wp_fc_capped)
+		strcat(rule, c->season_wp == BM_TRANSITION ? "|WP1900" : "|Z2");
+	if (st->fc_active)
+		strcat(rule, "|FC");
+	if (c->night && c->b1_first)
+		strcat(rule, "|B1FIRST");
+	if (out->fc_bad && c->wp_on)
+		strcat(rule, "|FCBAD");
+	if (!c->wp_fresh && c->winter && c->wp_running && w > (int)cfg->wp_cap) {
+		w = (int)cfg->wp_cap;
+		strcat(rule, "|WP_CAP");
+	}
+	alloc_discharge(st->lead, w, c->discharge, out->dis_cap, rule, out->sp, out->why);
+}
+
+/* S4 + S5 charge: own charge + KP x (Z2 surplus incl. the Sofar charge share), at most the phase ceilings */
+static void chain_charge(const struct bm_cfg *cfg, const struct bm_state *st, struct bm_out *out, const struct chain *c)
+{
+	double cap_sum = 0;
+	for (int p = 0; p < NPH; p++)
+		if (c->charge[p])
+			cap_sum += out->chg_cap[p];
+	alloc_charge(cfg, st->lead, fmin((int)(c->own_charge + KP * (c->chg_ref + c->bat1_eff - cfg->soyo_target)), cap_sum),
+				 c->charge, c->n_chg, out->chg_cap, out->sp, out->why);
+}
+
+/* PI prototype (shadow unless BATMONITOR_PI=1). y = PCC + Sofar Bat1: Bat1 charging counts with BAT1_CHARGE_FACTOR
+   (as the soyo surplus); a Bat1 discharge counts while the Multis charge (the Sofar must not feed them) and with the
+   night floor (S3); by day while they discharge it is ignored (the Sofar battery covers the house first) */
+static void chain_pi(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *st, struct bm_out *out,
+					 const struct chain *c)
+{
+	int *sp = out->sp;
+	int pi_ok[NPH] = {0}, pi_chg[NPH] = {0}, pi_dis[NPH] = {0}, n_pichg = 0, n_pidis = 0;
+	for (int b = 0; b < NBANK; b++)                    /* own gates (the soyo ones depend on its fixed thresholds) */
+		for (int i = 0; i < BM_BANKS[b].nph; i++) {
+			int p = BM_BANKS[b].ph[i];
+			if (!st->soc_ok[b] || st->force[b] || c->stale)
+				continue;
+			pi_ok[p] = 1;
+			if (!c->block && st->soc[b] < 100.0) {
+				pi_chg[p] = 1;
+				n_pichg++;
+			}
+			if (!st->prot[b]) {
+				pi_dis[p] = 1;
+				n_pidis++;
+			}
+		}
+	double applied = 0;
+	for (int p = 0; p < NPH; p++)
+		if (pi_ok[p])
+			applied += st->setpoints[p];
+	double b1 = in->bat1 > 0 ? in->bat1 * BAT1_CHARGE_FACTOR : (applied > 0 || c->night_floor) ? in->bat1 : 0.0;
+	/* both sides on the Z2 point (discharge 0.19, charge 0.30-c), as soyo */
+	double y = (in->have_pcc ? c->z2 : 0.0) + b1, e = y - PI_TARGET;
+	if (fabs(e) < PI_DEADBAND)
+		e = 0;
+	double dt = st->pi_t_prev > 0 ? fmin(fmax(in->now - st->pi_t_prev, 1.0), 30.0) : CYCLE_SECONDS;
+	double u = applied + (st->pi_t_prev > 0 ? PI_KP * (e - st->pi_e_prev) : 0) + PI_KI * dt * e;
+	double dis_cap = (!c->wp_fresh && c->winter && c->wp_running) ? cfg->wp_cap : cfg->w_max;
+	double u_max = 0, u_min = n_pidis ? -dis_cap : 0;
+	for (int p = 0; p < NPH; p++)
+		if (pi_chg[p])
+			u_max += out->chg_cap[p];
+	/* crossing from discharge into charging: never more than the surplus at the Z2 point */
+	if (applied <= 0 && u > 0)
+		u = fmax(0.0, fmin(u, (in->have_pcc ? c->z2 : 0.0) + b1 - PI_TARGET));
+	u = fmax(u_min, fmin(u_max, u));
+	st->pi_e_prev = e;
+	st->pi_t_prev = in->now;
+	int psp[NPH] = {0};
+	char pwhy[NPH][WHY_LEN];
+	for (int p = 0; p < NPH; p++)
+		snprintf(pwhy[p], WHY_LEN, "%.95s", out->why[p]);
+	for (int p = 0; p < NPH; p++)
+		if (pi_ok[p])
+			snprintf(pwhy[p], WHY_LEN, "PI(%+.0f)", u);
+	if (u > 0)
+		alloc_charge(cfg, st->lead, u, pi_chg, n_pichg, out->chg_cap, psp, pwhy);
+	else if (u < 0) {
+		char rule[32];
+		snprintf(rule, sizeof(rule), "PI(%+.0f)", u);
+		alloc_discharge(st->lead, (int)-u, pi_dis, out->dis_cap, rule, psp, pwhy);
+	}
+	for (int p = 0; p < NPH; p++)
+		if (!pi_ok[p])
+			psp[p] = sp[p];          /* force charge, BMS missing, stale: as soyo */
+	out->pi.y = y;
+	out->pi.e = e;
+	out->pi.applied = applied;
+	out->pi.u = u;
+	out->pi.u_min = u_min;
+	out->pi.u_max = u_max;
+	memcpy(out->pi.sp, psp, sizeof(psp));
+	if (cfg->pi_armed) {
+		memcpy(sp, psp, sizeof(psp));
+		memcpy(out->why, pwhy, sizeof(pwhy));
+	}
+}
+
+/* one cycle: the rule chain above */
+void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *st, struct bm_out *out)
+{
+	struct chain c;
+	memset(out, 0, sizeof(*out));
+	memset(&c, 0, sizeof(c));
+	chain_inputs(in, out, &c);
+	chain_forecast(cfg, in, st, out, &c);
+	chain_source(cfg, in, st, out, &c);
+	chain_scope(cfg, in, out, &c);
+	chain_gates(cfg, in, st, out);
+	chain_mode(cfg, in, st, out, &c);
+	update_lead(cfg, st, out);
+	if (c.n_dis)
+		chain_discharge(cfg, in, st, out, &c);
+	if (c.n_chg)
+		chain_charge(cfg, st, out, &c);
+	for (int p = 0; p < NPH; p++)                       /* the BMS limit cut this phase's setpoint */
+		if ((out->sp[p] > 0 && out->ccl_bind[p] && out->sp[p] >= (int)out->chg_cap[p] - 1) ||
+			(out->sp[p] < 0 && out->dcl_bind[p] && -out->sp[p] >= (int)out->dis_cap[p] - 1))
+			strncat(out->why[p], out->sp[p] > 0 ? "|CCL" : "|DCL", WHY_LEN - 1 - strlen(out->why[p]));
+	st->soyo_chg_prev = c.n_chg > 0;
+	if (!c.n_dis)
+		st->soyo_prop_prev = 0;
+	chain_pi(cfg, in, st, out, &c);
+	out->surplus = c.surplus;
+	out->wp_eff = c.wp_eff;
+	memcpy(st->setpoints, out->sp, sizeof(st->setpoints));
 }
 
 /* ---- full_at forecast (0.28-c) ------------------------------------------------------------------ */
