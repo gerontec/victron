@@ -4,18 +4,23 @@ CFLAGS ?= -O2 -Wall -Wextra
 CPPFLAGS += -Iinclude -I/usr/include/dbus-1.0 -I/usr/lib/dbus-1.0/include
 LDLIBS += -l:libdbus-1.so.3 -l:libmosquitto.so.1 -l:libcjson.so.1 -lpthread -lm
 
-batmonitor: batmonitor.c bm_logic.c bm_logic.h bm_wire.c bm_wire.h
-	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ batmonitor.c bm_logic.c bm_wire.c $(LDLIBS)
+batmonitor: batmonitor.c bm_logic.c bm_logic.h bm_parse.c bm_parse.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ batmonitor.c bm_logic.c bm_parse.c $(LDLIBS)
 
 # logic tests with a plant model: no D-Bus/MQTT needed, runs on any host (dell, notebook, Venus)
-test: tests/test_logic
+test: tests/test_logic tests/test_parse
 	./tests/test_logic
+	./tests/test_parse
 
-tests/test_logic: tests/test_logic.c bm_logic.c bm_logic.h bm_wire.c bm_wire.h
-	$(CC) $(CFLAGS) -I. -o $@ tests/test_logic.c bm_logic.c bm_wire.c -lm
+# MQTT payload parsing of batmonitor.c (bm_parse.c) with real payloads; cJSON from include/ + libcjson.so.1
+tests/test_parse: tests/test_parse.c bm_parse.c bm_parse.h
+	$(CC) $(CFLAGS) -I. -Iinclude -o $@ tests/test_parse.c bm_parse.c -l:libcjson.so.1 -lm
+
+tests/test_logic: tests/test_logic.c bm_logic.c bm_logic.h
+	$(CC) $(CFLAGS) -I. -o $@ tests/test_logic.c bm_logic.c -lm
 
 clean:
-	rm -f batmonitor tests/test_logic tests/check_matrix
+	rm -f batmonitor tests/test_logic tests/test_parse tests/check_matrix
 
 # behaviour comparison against an older revision (refactor check): same random inputs, setpoints and rule texts must
 # be identical. The old bm_logic.c, bm_logic.h and tests/fuzz_dump.c come from git, so a changed header does not break

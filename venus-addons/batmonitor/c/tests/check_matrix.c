@@ -59,6 +59,22 @@ static void check_dis_table(void)
 	putchar('\n');
 }
 
+/* ---- mode matrix (0.48-c): what each S1 mode means for the setpoint -------------------------------------------- */
+static void check_mode_table(void)
+{
+	static const char *A[] = {"0 W", "FORCE_W", "charge", "discharge"};
+	static const char *W[] = {"-", "NAME", "NAME(soc)", "NAME(h)", "NAME(W)", "NAME WP SRC"};
+	printf("\nmode matrix, S1 mode rows:\n  %-12s %-10s %6s  %s\n", "mode", "action", "capped", "rule text");
+	for (int m = 0; m < BM_M_N; m++) {
+		const struct bm_mode_rule *r = &BM_MODE_RULE[m];
+		printf("  %-12s %-10s %6d  %s\n", BM_MODE_NAME[m], A[r->action], r->capped, W[r->why]);
+		INV((r->action == BM_A_DISCHARGE) == (m == BM_M_DIS), "only mode DIS discharges");
+		INV((r->action == BM_A_CHARGE) == (m == BM_M_CHARGE), "only mode CHARGE takes the charge amount");
+		INV((r->why == BM_W_NONE) == (r->action == BM_A_DISCHARGE), "every mode writes its rule text, DIS in S4");
+		INV(r->action == BM_A_ZERO || r->capped, "every mode that gives power is capped (FORCE since 0.48-c)");
+	}
+}
+
 /* ---- D1: forecast, S3 source, S2 scope ------------------------------------------------------------------------ */
 static void check_d1(void)
 {
@@ -228,6 +244,37 @@ static void check_lead(void)
 	printf("\nlead: %ld consistent combinations, invariants checked\n", combos);
 }
 
+/* ---- D4: summer charge block LADESPERRE (0.48-c) --------------------------------------------------------------- */
+static void check_d4(void)
+{
+	long combos = 0, blocks = 0;
+	for (unsigned v = 0; v < (1u << 10); v++)
+		for (int k = 0; k < 8; k++) {
+			struct bm_d4_in b = {BIT(v, 0), BIT(v, 1), BIT(v, 2), BIT(v, 3), BIT(v, 4), BIT(v, 5), BIT(v, 6), BIT(v, 7),
+								 BIT(v, 8), BIT(v, 9)};
+			/* constraints: the latch thresholds exclude each other; an invalid ratio is -1 (<= on, not >= off) */
+			if ((b.ratio_le_on && b.ratio_ge_off) || (!b.ratio_valid && (!b.ratio_le_on || b.ratio_ge_off)))
+				continue;
+			struct bm_d4_state s = {k & 1, (k >> 1) & 1, (k >> 2) & 1}, n, n2;
+			int r = bm_d4(&b, &s, &n);
+			combos++;
+			blocks += r;
+			INV(!r || (b.enabled && b.season && b.day_can_peak && b.before_peak), "block only in the window");
+			INV(!r || (!n.peak_today && n.latched && !n.badweather), "block only latched, before the peak, good weather");
+			INV(!r || !b.pcc_peak, "a PCC peak always ends the block");
+			INV(!b.pcc_peak || n.peak_today, "a PCC peak is remembered for the day");
+			INV(b.new_day || !s.peak_today || n.peak_today, "peak_today holds until midnight");
+			INV(b.new_day || !s.badweather || n.badweather, "bad weather holds until midnight");
+			INV(!b.new_day || b.pcc_peak || !n.peak_today, "midnight clears peak_today");
+			INV(b.enabled || (n.latched == (b.new_day ? 0 : s.latched) && n.badweather == (b.new_day ? 0 : s.badweather)),
+				"disabled: latch and bad weather untouched (only the midnight reset)");
+			b.new_day = 0;
+			int r2 = bm_d4(&b, &n, &n2);
+			INV(r2 == r && !memcmp(&n, &n2, sizeof(n)), "D4 fixed point after one step (same bits, no new day)");
+		}
+	printf("\nD4 LADESPERRE: %ld consistent combinations (10 bits x 8 states), %ld block\n", combos, blocks);
+}
+
 /* ---- D5: DO4 pulse (0.46-c) ----------------------------------------------------------------------------------- */
 static void check_d5(void)
 {
@@ -337,7 +384,8 @@ static void check_amounts(void)
 					|| !strncmp(w, "FULL", 4) || !strncmp(w, "CHARGING", 8) || !strncmp(w, "LADESPERRE", 10))
 					INV(sp == 0, "no power in %s, got %d", w, sp);
 				if (!strncmp(w, "FORCE", 5))
-					INV(sp == (int)cfg.force_charge_w, "force charge FORCE_CHARGE_W, got %d", sp);
+					INV(sp == (int)fmin(cfg.force_charge_w, out.chg_cap[p]), "force charge min(FORCE_CHARGE_W, chg_cap %.0f), "
+						"got %d", out.chg_cap[p], sp);
 				if (strstr(w, "WPCAP"))
 					wpcap = 1;
 			}
@@ -366,6 +414,8 @@ int main(void)
 {
 	check_threshold_order();
 	check_dis_table();
+	check_mode_table();
+	check_d4();
 	check_d5();
 	check_d1();
 	check_d2();

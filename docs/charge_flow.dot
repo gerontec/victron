@@ -1,56 +1,70 @@
-// batmonitor 0.46-c: charge path of one cycle, with the summer peak window (LADESPERRE) that keeps the stacks free in
-// the morning so they can take the midday PV and the PCC export stays below PCC_PEAK_TH (20 kW).
+// batmonitor 0.48-c: charge path of one cycle as decision matrices, with the summer peak window (D4 LADESPERRE)
+// that keeps the stacks free in the morning so they take the midday PV and the PCC export stays below 20 kW.
 // render: dot -Tpdf charge_flow.dot -o charge_flow.pdf   (or -Tpng)
 digraph charge {
 	graph [rankdir=TB, fontname="Helvetica", fontsize=11, nodesep=0.35, ranksep=0.35, newrank=true,
-		   label="batmonitor 0.46-c: charge path (every 5 s)   |   blue = decision with state   |   orange = peak window (LADESPERRE, May-Aug)   |   red = finding",
+		   label="batmonitor 0.48-c: charge path (every 5 s)   |   blue = pure decision function (bits + state, enumerated by make check)   |   green = matrix / amounts   |   [CBMC] = proved for all inputs",
 		   labelloc=t];
 	node [shape=box, style="rounded,filled", fillcolor="#f4f4f4", fontname="Helvetica", fontsize=10];
 	edge [fontname="Helvetica", fontsize=9];
 
 	in [label=<<b>inputs</b><br/>PCC (+ = export), PCC 5 min mean, Sofar Bat1 W (+ = charge), Multis AC-in,<br/>outdoor temperature, BMS SoC / U / CCL, time (local, solar noon)>, fillcolor="#ffffff"];
 
-	surplus [label=<<b>surplus</b> (chain_mode)<br/>Bat1_eff = Bat1 discharge x 1, Bat1 charge x BAT1_CHARGE_FACTOR 0.5<br/>surplus = z2 + Bat1_eff + own_charge - own_discharge<br/><font point-size="9">z2 = PCC + WP part the stacks do not cover (S2, same as discharge)</font>>];
+	surplus [label=<<b>surplus</b> (chain_mode)<br/>Bat1_eff = Bat1 discharge x 1, Bat1 charge x BAT1_CHARGE_FACTOR 0.5<br/>surplus = z2 + Bat1_eff + own_charge - own_discharge<br/><font point-size="9">z2 = PCC + WP part the stacks do not cover (S2, as discharge)</font>>];
 
-	cmode [label=<<b>charge_mode</b> (in D2)   state: chg_prev<br/>surplus &gt; 200 W -&gt; on   |   held while surplus &gt; 20 W>, fillcolor="#dbe8fb"];
-
-	subgraph cluster_ls {
-		label=<<b>peak window LADESPERRE</b> (ladesperre(), port of fox2db_logic.h)<br/>goal: stacks stay empty in the morning, so at midday they can take the PV above the 20 kW export limit>;
+	subgraph cluster_d4 {
+		label=<<b>D4 peak window LADESPERRE</b> (0.48-c: pure function bm_d4)<br/>goal: stacks stay empty in the morning, at midday they take the PV above the 20 kW export limit>;
 		style="rounded,filled"; fillcolor="#fdf0e0"; color="#d9822b"; fontsize=11;
-
-		model [label=<<b>clear-sky model</b> dc(t)<br/>4 PV arrays (Sofar PV1/PV2, FoxESS) x NOAA sun position<br/>x temperature factor (NOCT 45, -0.30 %/K, outdoor temp &lt; 15 min old)>, fillcolor="#ffffff"];
-		day [label=<<b>per day</b> (reset at midnight: peak_today, ls_latched, badweather_today)<br/>peak_h = hour 5..20 with the highest dc<br/>win_end = last hour with dc &gt; 20 kW>, fillcolor="#ffffff"];
-		window [label=<<b>in_window</b> =<br/>May..August<br/>and the day can exceed 20 kW (dc max &gt; PCC_PEAK_TH)<br/>and no PCC peak yet today (not peak_today)<br/>and hour &le; peak_h and before solar noon>, fillcolor="#ffe3c2"];
-		ratio [label=<<b>ratio</b> = (dc - (PCC + Multis + Bat1)) / dc<br/>share of the clear-sky power that does not reach the meter<br/>(house load + clouds); only when dc &gt; 5 kW<br/>ratio: 5 min means   |   ratio_now: this cycle>, fillcolor="#ffffff"];
-		latch [label=<<b>ls_latched</b> (hysteresis)<br/>ratio &le; 0.50 -&gt; on   |   ratio &ge; 0.75 -&gt; off<br/>outside the window -&gt; off>, fillcolor="#dbe8fb"];
-		bad [label=<<b>badweather_today</b><br/>in the window ratio_now &ge; 0.20 -&gt; set for the rest of the day>, fillcolor="#dbe8fb"];
-		peak [label=<<b>peak_today</b><br/>PCC &gt; 20 kW measured -&gt; set:<br/>the peak is here, the window ends, the stacks charge>, fillcolor="#dbe8fb"];
-		do4 [label=<<b>D5 DO4 pulse</b> (0.46-c) -&gt; MQTT <b>pv_relay/DO4</b><br/>fresh PCC (&lt; 15 s) &gt; 20 kW -&gt; "1", after 3 s "0" (not retained)<br/>at most one pulse per 5 min; relay curtails WR2 (it restarts by itself)>, fillcolor="#ffd09a"];
-		block [label=<<b>block</b> = in_window and ls_latched and not badweather_today>, fillcolor="#ffd09a"];
-		note_ls [shape=note, fillcolor="#fff7d6", fontsize=9, label=<observation: NOW_RATIO 0.20 &lt; latch 0.50 -&gt; one cycle with<br/>&ge; 20 % shortfall (house load counts) ends the block for the day;<br/>the 0.50 / 0.75 latch hardly matters. Ported 1:1 from the ESP>];
-
-		model -> day;
-		model -> ratio [label=" dc now"];
-		day -> window [label=" peak_h, win_end"];
-		peak -> window [label=" not peak_today"];
-		ratio -> latch;
-		ratio -> bad [label=" ratio_now"];
-		window -> block;
-		latch -> block;
-		bad -> block [label=" not"];
-		bad -> note_ls [style=dotted, arrowhead=none];
+		model [label=<<b>model part</b> (ladesperre wrapper, not a decision)<br/>clear-sky dc(t): 4 PV arrays x sun position x temperature factor<br/>peak_h (hour with max dc), win_end (last hour &gt; 20 kW), solar noon<br/>ratio = (dc - (PCC + Multis + Bat1)) / dc (5 min mean and now; dc &gt; 5 kW)>, fillcolor="#ffffff"];
+		d4bits [shape=plain, label=<
+			<table border="0" cellborder="1" cellspacing="0" cellpadding="3" bgcolor="#ffffff">
+			<tr><td colspan="2"><b>bm_d4 bits</b></td></tr>
+			<tr><td>new_day</td><td>local day changed: reset the state</td></tr>
+			<tr><td>enabled</td><td>BATMONITOR_LADESPERRE</td></tr>
+			<tr><td>pcc_peak</td><td>PCC fresh &gt; 20 kW</td></tr>
+			<tr><td>season</td><td>May..August</td></tr>
+			<tr><td>day_can_peak</td><td>clear-sky max &gt; 20 kW</td></tr>
+			<tr><td>before_peak</td><td>hour &le; peak_h, before solar noon</td></tr>
+			<tr><td>ratio_valid / le_on / ge_off</td><td>5 min ratio valid, &le; 0.50, &ge; 0.75</td></tr>
+			<tr><td>now_bad</td><td>ratio now &ge; 0.20</td></tr>
+			</table>>];
+		d4 [label=<<b>bm_d4</b>   state: peak_today, latched, badweather<br/>new_day -&gt; all 0;  pcc_peak -&gt; peak_today<br/>in_window = enabled and season and day_can_peak and before_peak and not peak_today<br/>in_window and now_bad -&gt; badweather (for the day)<br/>latch: on at le_on, off at ge_off, off outside the window<br/><b>block</b> = in_window and latched and not badweather<br/><font point-size="9">[make check: 4096 combinations, 12 block; fixed point]</font>>, fillcolor="#dbe8fb"];
+		note_ls [shape=note, fillcolor="#fff7d6", fontsize=9, label=<observation: only 12 of 4096 combinations block:<br/>one cycle with ratio now &ge; 0.20 (house load counts)<br/>ends the window for the day; NOW_RATIO 0.20 &lt; latch 0.50>];
+		model -> d4bits -> d4;
+		d4 -> note_ls [style=dotted, arrowhead=none];
 	}
 
-	d2 [label=<<b>D2 mode</b> per stack, first match:<br/>BMS_MISSING &gt; <b>FORCE</b> &gt; STALE &gt; <b>LADESPERRE</b> (charge_mode and block) &gt;<br/><b>CHARGE</b> (charge_mode, SoC &lt; 100) / <b>FULL</b> (SoC 100) &gt; PROT &gt; CHARGING &gt; DIS>, fillcolor="#dbe8fb"];
+	d2 [label=<<b>D2</b> bm_d2 per stack   state: prot, force, chg_prev<br/>charge_mode: surplus &gt; 200 W on, held while &gt; 20 W<br/>first match: BMS_MISSING &gt; FORCE &gt; STALE &gt; LADESPERRE (charge_mode and block) &gt;<br/>CHARGE (SoC &lt; 100) / FULL &gt; PROT &gt; CHARGING &gt; DIS<br/><font point-size="9">[make check, CBMC h_d2_bits]</font>>, fillcolor="#dbe8fb"];
 
-	force [label=<<b>FORCE</b>: SoC &lt; SOC_FORCE (until SOC_FORCE_RELEASE)<br/>fixed FORCE_CHARGE_W 500 W per phase from the grid>];
-	force_note [shape=note, fillcolor="#fde2e2", color="#c0392b", fontsize=9, label=<finding: not limited by chg_cap (BMS CCL);<br/>Victron DVCC catches it, another inverter may not>];
-	lsout [label=<<b>LADESPERRE(peak h)</b>: 0 W<br/>PV goes to the grid, stacks stay free>, fillcolor="#ffd09a"];
-	full [label=<<b>FULL</b>: 0 W>];
+	subgraph cluster_mode {
+		label=<<b>mode matrix</b> BM_MODE_RULE[mode] (0.48-c): what each mode means for the setpoint>;
+		style="rounded,filled"; fillcolor="#eaf6e6"; color="#5a9e4b"; fontsize=11;
+		mrule [shape=plain, label=<
+			<table border="0" cellborder="1" cellspacing="0" cellpadding="3" bgcolor="#ffffff">
+			<tr><td><b>mode</b></td><td><b>action</b></td><td><b>capped</b></td><td><b>rule text</b></td></tr>
+			<tr><td>BMS_MISSING</td><td>0 W</td><td>-</td><td>NAME</td></tr>
+			<tr><td bgcolor="#cfe8c6">FORCE</td><td bgcolor="#cfe8c6">FORCE_CHARGE_W 500</td><td bgcolor="#cfe8c6"><b>1</b> (0.48-c)</td><td bgcolor="#cfe8c6">FORCE(soc %)</td></tr>
+			<tr><td>STALE</td><td>0 W</td><td>-</td><td>NAME</td></tr>
+			<tr><td bgcolor="#ffd09a">LADESPERRE</td><td bgcolor="#ffd09a">0 W</td><td bgcolor="#ffd09a">-</td><td bgcolor="#ffd09a">LADESPERRE(peak h)</td></tr>
+			<tr><td bgcolor="#cfe8c6">CHARGE</td><td bgcolor="#cfe8c6">charge amount</td><td bgcolor="#cfe8c6">1</td><td bgcolor="#cfe8c6">CHARGE WP: SRC:</td></tr>
+			<tr><td>FULL</td><td>0 W</td><td>-</td><td>NAME</td></tr>
+			<tr><td>PROT</td><td>0 W</td><td>-</td><td>PROT(soc %)</td></tr>
+			<tr><td>CHARGING</td><td>0 W</td><td>-</td><td>CHARGING(BMS W)</td></tr>
+			<tr><td>DIS</td><td>discharge amount</td><td>1</td><td>(S4: PROP / IDLE)</td></tr>
+			</table>>];
+		force [label=<<b>FORCE</b>: min(FORCE_CHARGE_W, chg_cap) per phase<br/>from the grid, obeys the BMS CCL (was: 500 W even at CCL 0)>, fillcolor="#ffffff"];
+		amount [label=<<b>charge amount</b> (chain_charge, whole watts since 0.48-c)<br/>want = max(0, own_charge + KP_PM 1010 x (z2 + Bat1_eff - SOYO_TARGET) / 1000)<br/>at most the sum of chg_cap over the charging phases<br/><font point-size="9">[CBMC h_charge]</font>>, fillcolor="#ffffff"];
+		caps [label=<<b>chg_cap</b> per phase (one per stack)<br/>min(CHARGER_A 70 A x U / 0.93, CHARGE_MAX_PHASE 4900, BMS CCL)<br/>~4.0-4.2 kW per phase -&gt; ~12 kW for the three Multis>, fillcolor="#ffffff"];
+		alloc [label=<<b>alloc_levels</b> (0.48-c: one split core for charge and discharge)<br/>charge: one level per stack in CHARGE_PRIORITY order (Stack1, Stack2), the lead stack last,<br/>each up to min(chg_cap, CHARGER_CAP_PHASE); water filling within a level;<br/>only what the caps cut goes on; a rest up to CHARGE_MAX_PHASE on all charging phases<br/><font point-size="9">[CBMC h_charge without bank assumption, h_alloc_discharge]</font>>, fillcolor="#ffffff"];
+		mrule -> force [label=" FORCE"];
+		mrule -> amount [label=" CHARGE"];
+		caps -> amount [style=dashed];
+		caps -> alloc [style=dashed];
+		caps -> force [style=dashed];
+		amount -> alloc;
+	}
 
-	amount [label=<<b>amount</b> (chain_charge, one formula)<br/>want = max(0, own_charge + KP 1.01 x (z2 + Bat1_eff - SOYO_TARGET))<br/>at most the sum of chg_cap over the charging phases<br/><font point-size="9">[CBMC h_charge]</font>>];
-	caps [label=<<b>chg_cap</b> per phase (one per stack)<br/>min(CHARGER_A 70 A x U / CHARGE_EFF 0.93, CHARGE_MAX_PHASE 4900, BMS CCL)<br/>~4.0-4.2 kW per phase -&gt; ~12 kW for the three Multis>];
-	alloc [label=<<b>alloc_charge</b><br/>stacks in CHARGE_PRIORITY order (Stack1, Stack2), the lead stack (SoC ahead) last,<br/>each up to its chg_cap; a rest up to CHARGE_MAX_PHASE on all charging phases alike>];
+	do4 [label=<<b>D5 DO4 pulse</b> -&gt; MQTT <b>pv_relay/DO4</b> (FoxESS shedding)<br/>fresh PCC (&lt; 15 s) &gt; 20 kW -&gt; "1", after 3 s "0", at most every 5 min<br/><font point-size="9">[make check]</font>>, fillcolor="#ffd09a"];
 
 	out [label=<<b>setpoints</b> per phase (+ = charge) -&gt; Multis<br/>rule text: CHARGE WP:.. SRC:.. BAL/EQ [CCL] | LADESPERRE(h) | FULL | FORCE(soc)>, fillcolor="#ffffff"];
 
@@ -59,28 +73,19 @@ digraph charge {
 		<tr><td colspan="4"><b>clear summer day: how the window keeps the PCC below 20 kW</b></td></tr>
 		<tr><td><b>time</b></td><td><b>PV / PCC</b></td><td><b>batmonitor</b></td><td><b>stacks</b></td></tr>
 		<tr><td>05:00 .. peak</td><td>PV rising, export &lt; 20 kW</td><td bgcolor="#ffd09a">LADESPERRE (block)</td><td>0 W, stay empty</td></tr>
-		<tr><td>export would pass 20 kW</td><td>PCC &gt; 20 kW once</td><td>peak_today -&gt; window ends -&gt; CHARGE;<br/>DO4 pulse curtails WR2</td><td>take up to ~12 kW</td></tr>
+		<tr><td>export would pass 20 kW</td><td>PCC &gt; 20 kW once</td><td>peak_today -&gt; window ends -&gt; CHARGE;<br/>DO4 pulse sheds the FoxESS</td><td>take up to ~12 kW</td></tr>
 		<tr><td>peak hour / solar noon</td><td>highest PV</td><td>window over anyway -&gt; CHARGE</td><td>export - ~12 kW</td></tr>
 		<tr><td>afternoon</td><td>PV falling</td><td>CHARGE until FULL</td><td>-&gt; 100 %</td></tr>
-		<tr><td>cloudy morning</td><td>shortfall &ge; 20 %</td><td>badweather_today -&gt; no block</td><td>charge at once</td></tr>
+		<tr><td>cloudy morning</td><td>shortfall &ge; 20 %</td><td>badweather -&gt; no block</td><td>charge at once</td></tr>
 		</table>>];
 
-	in -> surplus -> cmode -> d2;
+	in -> surplus -> d2;
 	in -> model;
-	in -> ratio [style=dashed, label=" PCC, Multis, Bat1"];
-	in -> peak [style=dashed, label=" PCC"];
 	in -> do4 [style=dashed, label=" PCC", color="#d9822b"];
-	block -> d2 [color="#d9822b", penwidth=2, label=" block"];
-	d2 -> force [label=" FORCE"];
-	d2 -> lsout [label=" LADESPERRE", color="#d9822b"];
-	d2 -> amount [label=" CHARGE"];
-	d2 -> full [label=" FULL"];
-	force -> force_note [style=dotted, arrowhead=none];
-	caps -> amount [style=dashed];
-	caps -> alloc [style=dashed];
-	amount -> alloc -> out;
+	d4 -> d2 [color="#d9822b", penwidth=2, label=" block"];
+	d2 -> mrule [label=" mode per stack"];
 	force -> out;
-	lsout -> out;
-	full -> out;
-	lsout -> timeline [style=invis];
+	alloc -> out;
+	mrule -> out [label=" 0 W rows", style=dashed];
+	out -> timeline [style=invis];
 }

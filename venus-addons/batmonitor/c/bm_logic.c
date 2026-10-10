@@ -211,10 +211,8 @@ static int ladesperre(const struct bm_cfg *cfg, const struct bm_in *in, struct b
 	struct tm loc, mid;
 	localtime_r(&now, &loc);
 	int month = loc.tm_mon + 1;
-	if (loc.tm_yday != st->ls_yday) {      /* midnight reset */
-		st->ls_yday = loc.tm_yday;
-		st->peak_today = st->ls_latched = st->badweather_today = 0;
-	}
+	int new_day = loc.tm_yday != st->ls_yday;      /* midnight reset (in bm_d4) */
+	st->ls_yday = loc.tm_yday;
 	double dc = bm_dc_now(now, month);
 	if (dc > 0 && in->aussen_time > 0 && in->now - in->aussen_time < AUSSEN_MAX_AGE) {
 		double elev, az;
@@ -237,30 +235,21 @@ static int ladesperre(const struct bm_cfg *cfg, const struct bm_in *in, struct b
 			win_end = h;
 	}
 	time_t noon = solar_noon_utc(now);
-	if (in->have_pcc && !stale && in->pcc > PCC_PEAK_TH)
-		st->peak_today = 1;
 	/* measured PV minus house load: export + Sofar Bat1 + what the Multis take (ESP: + EBox charger) */
 	double ratio = -1.0, ratio_now = -1.0;
 	if (dc > DC_RATIO_MIN && !stale && in->have_pcc) {
 		ratio = (dc - (in->pcc_avg5 + multis + in->bat1_avg5)) / dc;
 		ratio_now = (dc - (in->pcc + multis + in->bat1)) / dc;
 	}
-	int block = 0;
-	if (cfg->ladesperre) {
-		int in_window = month >= LADESPERRE_FROM && month <= LADESPERRE_TO && best_w > PCC_PEAK_TH && win_end >= 0
-						&& !st->peak_today && loc.tm_hour <= peak_h && now < noon;
-		if (in_window && ratio_now >= LADESPERRE_NOW_RATIO)
-			st->badweather_today = 1;
-		if (!in_window)
-			st->ls_latched = 0;
-		else if (ratio >= 0.0) {
-			if (!st->ls_latched && ratio <= LADESPERRE_RATIO)
-				st->ls_latched = 1;
-			else if (st->ls_latched && ratio >= LADESPERRE_RATIO + LADESPERRE_HYST)
-				st->ls_latched = 0;
-		}
-		block = in_window && st->ls_latched && !st->badweather_today;
-	}
+	struct bm_d4_in d = {new_day, cfg->ladesperre, in->have_pcc && !stale && in->pcc > PCC_PEAK_TH,
+						 month >= LADESPERRE_FROM && month <= LADESPERRE_TO, best_w > PCC_PEAK_TH && win_end >= 0,
+						 loc.tm_hour <= peak_h && now < noon, ratio >= 0.0, ratio <= LADESPERRE_RATIO,
+						 ratio >= LADESPERRE_RATIO + LADESPERRE_HYST, ratio_now >= LADESPERRE_NOW_RATIO};
+	struct bm_d4_state s0 = {st->peak_today, st->ls_latched, st->badweather_today}, s1;
+	int block = bm_d4(&d, &s0, &s1);
+	st->peak_today = s1.peak_today;
+	st->ls_latched = s1.latched;
+	st->badweather_today = s1.badweather;
 	out->ls.active = block;
 	out->ls.dc = dc;
 	out->ls.ratio = ratio;
@@ -280,25 +269,17 @@ static int bank_of(int p)
 	return -1;
 }
 
-/* S5 split (0.45-c, one routine, whole watts): w over the discharging phases in up to two levels. With a lead (SoC
-   ahead) the lead bank is level 0 and gets w first (BAL); the other bank is level 1 and gets only what the lead
-   cannot give (SPILL, else WAIT). Without a lead (0.26, user 2026-10-08) one level: every discharging bank the same
-   share, so the two 300 Ah stacks drain alike (Stack1 alone on L1 gives as much as Stack2 on L2+L3). Within a level
-   a bank's share is split over its phases; what a phase cannot give above its cap goes to the level's other phases
-   alike. Never above a cap, never charging, the total never above w */
-static void alloc_discharge(int lead, int w, const int *dis, const int *dcap, const char *rule, int *sp,
-							char why[][WHY_LEN])
+/* S5 split core (0.48-c, both directions, whole watts): w over the phases with lvl[p] >= 0, level by level. Within a
+   level every bank the same share, split over its phases; what a phase cannot take above cap[p] goes to the level's
+   other phases alike (water filling, at most NPH rounds). Only what the caps cut goes on to the next level, not the
+   division remainder; returns what the caps cut in the last level. give[p] in 0..cap[p], the total never above w */
+static int alloc_levels(int w, const int *lvl, int n_lvl, const int *cap, int *give)
 {
-	int lvl[NPH], n_lead = 0, rest = w;
-	for (int p = 0; p < NPH; p++) {
-		lvl[p] = dis[p] ? 0 : -1;
-		n_lead += dis[p] && bank_of(p) == lead;
-	}
+	int rest = w;
 	for (int p = 0; p < NPH; p++)
-		if (n_lead && dis[p] && bank_of(p) != lead)
-			lvl[p] = 1;
-	for (int l = 0; l < 2; l++) {
-		int nb[NBANK] = {0}, n_banks = 0, want[NPH] = {0}, given = 0;
+		give[p] = 0;
+	for (int l = 0; l < n_lvl; l++) {
+		int nb[NBANK] = {0}, n_banks = 0, want[NPH] = {0}, cut = 0;
 		for (int p = 0; p < NPH; p++)
 			if (lvl[p] == l && !nb[bank_of(p)]++)
 				n_banks++;
@@ -307,32 +288,55 @@ static void alloc_discharge(int lead, int w, const int *dis, const int *dcap, co
 		for (int p = 0; p < NPH; p++)
 			if (lvl[p] == l) {
 				want[p] = rest / n_banks / nb[bank_of(p)];
-				given += want[p];
+				cut += want[p];
 			}
 		for (int k = 0; k < NPH; k++) {                    /* water filling, at most NPH rounds */
 			int over = 0, n_free = 0;
 			for (int p = 0; p < NPH; p++)
 				if (lvl[p] == l) {
-					if (want[p] > dcap[p]) {
-						over += want[p] - dcap[p];
-						want[p] = dcap[p];
-					} else if (want[p] < dcap[p])
+					if (want[p] > cap[p]) {
+						over += want[p] - cap[p];
+						want[p] = cap[p];
+					} else if (want[p] < cap[p])
 						n_free++;
 				}
 			if (!over || !n_free)
 				break;
 			for (int p = 0; p < NPH; p++)
-				if (lvl[p] == l && want[p] < dcap[p])
+				if (lvl[p] == l && want[p] < cap[p])
 					want[p] += over / n_free;
 		}
 		for (int p = 0; p < NPH; p++)
 			if (lvl[p] == l) {
-				sp[p] = -(want[p] < dcap[p] ? want[p] : dcap[p]);
-				given += sp[p];
-				snprintf(why[p], WHY_LEN, "%s%s", rule, !n_lead ? " EQ" : !l ? " BAL" : sp[p] ? " SPILL" : " WAIT");
+				give[p] = want[p] < cap[p] ? want[p] : cap[p];
+				cut -= give[p];
 			}
-		rest = given;                                   /* what the caps cut goes on, not the division remainder */
+		rest = cut;                                     /* what the caps cut goes on, not the division remainder */
 	}
+	return rest;
+}
+
+/* S5 discharge split: with a lead (SoC ahead) the lead bank is level 0 and gives first (BAL); the other bank is level
+   1 and gives only what the lead cannot (SPILL, else WAIT). Without a lead (0.26, user 2026-10-08) one level: every
+   discharging bank the same share, so the two 300 Ah stacks drain alike (Stack1 alone on L1 gives as much as Stack2
+   on L2+L3) */
+static void alloc_discharge(int lead, int w, const int *dis, const int *dcap, const char *rule, int *sp,
+							char why[][WHY_LEN])
+{
+	int lvl[NPH], give[NPH], n_lead = 0;
+	for (int p = 0; p < NPH; p++) {
+		lvl[p] = dis[p] ? 0 : -1;
+		n_lead += dis[p] && bank_of(p) == lead;
+	}
+	for (int p = 0; p < NPH; p++)
+		if (n_lead && dis[p] && bank_of(p) != lead)
+			lvl[p] = 1;
+	alloc_levels(w, lvl, 2, dcap, give);
+	for (int p = 0; p < NPH; p++)
+		if (dis[p]) {
+			sp[p] = -give[p];
+			snprintf(why[p], WHY_LEN, "%s%s", rule, !n_lead ? " EQ" : !lvl[p] ? " BAL" : sp[p] ? " SPILL" : " WAIT");
+		}
 }
 
 /* whole watts from a measurement or ceiling: NaN -> 0, clamped to +-1 MW */
@@ -375,32 +379,33 @@ static int charge_order(int lead, int *order)
 	return k;
 }
 
-/* charge rest (W) over the phases in chg[]: the banks in CHARGE_PRIORITY order up to their real charger capacity,
-   the stack behind first; what is left up to CHARGE_MAX_PHASE on all phases alike. cap[] (0.29-c): the real ceiling
-   per phase (charger 70 A x BMS voltage); with a measured voltage nothing spills above it */
-static void alloc_charge(const struct bm_cfg *cfg, int lead, double rest, const int *chg, int n_chg, const double *cap,
+/* S5 charge split (0.48-c, the same core, whole watts): one level per bank in CHARGE_PRIORITY order, the lead bank
+   (SoC ahead) last, each up to its real charger capacity (CHARGER_CAP_PHASE, 0.29-c: cap[] = charger 70 A x BMS
+   voltage, BMS CCL); what the caps cut goes up to CHARGE_MAX_PHASE on all charging phases alike */
+static void alloc_charge(const struct bm_cfg *cfg, int lead, int rest, const int *chg, int n_chg, const int *cap,
 						 int *sp)
 {
-	int order[NBANK], k = charge_order(lead, order);
-	for (int i = 0; i < k; i++) {
-		int b = order[i], ph[NPH], n = 0;
-		for (int j = 0; j < BM_BANKS[b].nph; j++)
-			if (chg[BM_BANKS[b].ph[j]])
-				ph[n++] = BM_BANKS[b].ph[j];
-		if (!n)
-			continue;
-		double bank_cap = 0;
-		for (int j = 0; j < n; j++)
-			bank_cap += fmin(cfg->charger_cap_phase, cap[ph[j]]);
-		double share = fmin(rest, bank_cap);
-		for (int j = 0; j < n; j++)
-			sp[ph[j]] = (int)(share / n);
-		rest -= share;
+	int order[NBANK], k = charge_order(lead, order), lvl[NPH], cap1[NPH], give[NPH];
+	for (int p = 0; p < NPH; p++) {
+		lvl[p] = -1;
+		cap1[p] = cap[p] < (int)cfg->charger_cap_phase ? cap[p] : (int)cfg->charger_cap_phase;
+		for (int i = 0; i < k && chg[p]; i++)
+			if (order[i] == bank_of(p))
+				lvl[p] = i;
 	}
-	if (rest > 0)
-		for (int p = 0; p < NPH; p++)
-			if (chg[p])
-				sp[p] += (int)fmax(0.0, fmin(rest / n_chg, fmin(cfg->charge_max_phase, cap[p]) - sp[p]));
+	rest = alloc_levels(rest, lvl, k, cap1, give);
+	for (int p = 0; p < NPH; p++)
+		if (chg[p]) {
+			int head = (cap[p] < (int)cfg->charge_max_phase ? cap[p] : (int)cfg->charge_max_phase) - give[p];
+			int more = rest > 0 ? rest / n_chg : 0;
+			sp[p] = give[p] + (more < head ? more : head > 0 ? head : 0);
+		}
+}
+
+static void chg_caps(const struct bm_out *out, int *cap)
+{
+	for (int p = 0; p < NPH; p++)
+		cap[p] = out->chg_cap[p] > 0 ? (int)out->chg_cap[p] : 0;
 }
 
 /* ---- decision layer (0.43-c): pure functions of bits + state, see bm_logic.h -------------------------------- */
@@ -421,6 +426,19 @@ const struct bm_src_rule BM_SRC_RULE[BM_SRC_N] = {
 	[BM_SRC_B1]  = {0,        0,      B_DAY_IDLE, 0},
 	[BM_SRC_STK] = {1,        1,      0,          1},
 	[BM_SRC_B1W] = {0,        0,      B_DAY_IDLE, 0},
+};
+/* the mode matrix rows (bm_logic.h) */
+const struct bm_mode_rule BM_MODE_RULE[BM_M_N] = {
+	/*                      action          capped  why */
+	[BM_M_BMS_MISSING] = {BM_A_ZERO,      0,      BM_W_NAME},
+	[BM_M_FORCE]       = {BM_A_FORCE,     1,      BM_W_SOC},   /* capped since 0.48-c (was 0: CCL 0 still got 500 W) */
+	[BM_M_STALE]       = {BM_A_ZERO,      0,      BM_W_NAME},
+	[BM_M_LADESPERRE]  = {BM_A_ZERO,      0,      BM_W_PEAK_H},
+	[BM_M_CHARGE]      = {BM_A_CHARGE,    1,      BM_W_CHAIN},
+	[BM_M_FULL]        = {BM_A_ZERO,      0,      BM_W_NAME},
+	[BM_M_PROT]        = {BM_A_ZERO,      0,      BM_W_SOC},
+	[BM_M_CHARGING]    = {BM_A_ZERO,      0,      BM_W_POWER},
+	[BM_M_DIS]         = {BM_A_DISCHARGE, 1,      BM_W_NONE},
 };
 const char *BM_WPK_NAME[BM_WPK_N] = {"NONE", "CAP", "ALL", "BAD"};
 
@@ -511,6 +529,32 @@ int bm_d3(const struct bm_d3_in *b, int prop_prev, int *prop_next)
 	int prop = b->any_dis && (b->house_import || ((prop_prev || b->prop_hold) && b->deficit_gt_hold));
 	*prop_next = prop;
 	return prop;
+}
+
+/* D4. Reset at midnight; the PCC peak ends the window for the day; bad weather (ratio_now) releases it for the day;
+   the latch follows the 5 min ratio with hysteresis inside the window and drops outside. Disabled: only the reset and
+   peak_today run (as before 0.48-c) */
+int bm_d4(const struct bm_d4_in *b, const struct bm_d4_state *s, struct bm_d4_state *next)
+{
+	*next = *s;
+	if (b->new_day)
+		next->peak_today = next->latched = next->badweather = 0;
+	if (b->pcc_peak)
+		next->peak_today = 1;
+	if (!b->enabled)
+		return 0;
+	int in_window = b->season && b->day_can_peak && !next->peak_today && b->before_peak;
+	if (in_window && b->now_bad)
+		next->badweather = 1;
+	if (!in_window)
+		next->latched = 0;
+	else if (b->ratio_valid) {
+		if (!next->latched && b->ratio_le_on)
+			next->latched = 1;
+		else if (next->latched && b->ratio_ge_off)
+			next->latched = 0;
+	}
+	return in_window && next->latched && !next->badweather;
 }
 
 /* D5. A fresh PCC above PCC_PEAK_TH and no pulse within DO4_LOCKOUT -> pulse */
@@ -738,32 +782,33 @@ static void chain_mode(const struct bm_cfg *cfg, const struct bm_in *in, struct 
 	for (int b = 0; b < NBANK; b++)
 		for (int i = 0; i < BM_BANKS[b].nph; i++) {
 			int p = BM_BANKS[b].ph[i];
-			sp[p] = 0;
-			switch (o.mode[b]) {
-			case BM_M_FORCE:
-				sp[p] = (int)cfg->force_charge_w;
-				snprintf(why[p], WHY_LEN, "FORCE(%.1f%%)", st->soc[b]);
-				break;
-			case BM_M_LADESPERRE:
-				snprintf(why[p], WHY_LEN, "LADESPERRE(%dh)", out->ls.peak_h);
-				break;
-			case BM_M_CHARGE:
-				snprintf(why[p], WHY_LEN, "CHARGE WP:%s SRC:%s", out->wp_why, out->src_why);
+			const struct bm_mode_rule *r = &BM_MODE_RULE[o.mode[b]];
+			const char *name = BM_MODE_NAME[o.mode[b]];
+			sp[p] = r->action == BM_A_FORCE ? (int)(r->capped ? fmin(cfg->force_charge_w, out->chg_cap[p])
+															 : cfg->force_charge_w) : 0;
+			if (r->action == BM_A_CHARGE) {
 				c->charge[p] = 1;
 				c->n_chg++;
-				break;
-			case BM_M_PROT:
-				snprintf(why[p], WHY_LEN, "PROT(%.1f%%)", st->soc[b]);
-				break;
-			case BM_M_CHARGING:
-				snprintf(why[p], WHY_LEN, "CHARGING(%.0fW)", in->power[b]);
-				break;
-			case BM_M_DIS:
+			} else if (r->action == BM_A_DISCHARGE) {
 				c->discharge[p] = 1;
 				c->n_dis++;
+			}
+			switch (r->why) {
+			case BM_W_NAME:
+				snprintf(why[p], WHY_LEN, "%s", name);
 				break;
-			default:                                     /* BMS_MISSING, STALE, FULL */
-				snprintf(why[p], WHY_LEN, "%s", BM_MODE_NAME[o.mode[b]]);
+			case BM_W_SOC:
+				snprintf(why[p], WHY_LEN, "%s(%.1f%%)", name, st->soc[b]);
+				break;
+			case BM_W_PEAK_H:
+				snprintf(why[p], WHY_LEN, "%s(%dh)", name, out->ls.peak_h);
+				break;
+			case BM_W_POWER:
+				snprintf(why[p], WHY_LEN, "%s(%.0fW)", name, in->power[b]);
+				break;
+			case BM_W_CHAIN:
+				snprintf(why[p], WHY_LEN, "%s WP:%s SRC:%s", name, out->wp_why, out->src_why);
+				break;
 			}
 		}
 }
@@ -826,13 +871,16 @@ static void chain_discharge(const struct bm_cfg *cfg, const struct bm_in *in, st
    discharge of up to 1 % of the own charge, e.g. PCC -4175 W, own charge 4200 W -> -16 W on a CHARGE phase) */
 static void chain_charge(const struct bm_cfg *cfg, const struct bm_state *st, struct bm_out *out, const struct chain *c)
 {
-	double cap_sum = 0;
+	int cap[NPH], cap_sum = 0;
+	chg_caps(out, cap);
 	for (int p = 0; p < NPH; p++)
 		if (c->charge[p])
-			cap_sum += out->chg_cap[p];
-	double want = fmax(0.0, (int)(c->own_charge + KP * (c->chg_ref + c->bat1_eff - cfg->soyo_target)));
-	alloc_charge(cfg, st->lead, fmin(want, cap_sum),
-				 c->charge, c->n_chg, out->chg_cap, out->sp);
+			cap_sum += cap[p];
+	int want = watt(c->own_charge)
+			   + (int)((long)KP_PM * (watt(c->chg_ref + c->bat1_eff) - watt(cfg->soyo_target)) / 1000);
+	if (want < 0)
+		want = 0;
+	alloc_charge(cfg, st->lead, want < cap_sum ? want : cap_sum, c->charge, c->n_chg, cap, out->sp);
 	for (int p = 0; p < NPH; p++)                       /* CHARGE_PRIORITY order; with a lead the other stack first */
 		if (c->charge[p])
 			strncat(out->why[p], st->lead >= 0 ? " BAL" : " EQ", WHY_LEN - 1 - strlen(out->why[p]));
@@ -890,9 +938,11 @@ static void chain_pi(const struct bm_cfg *cfg, const struct bm_in *in, struct bm
 	for (int p = 0; p < NPH; p++)
 		if (pi_ok[p])
 			snprintf(pwhy[p], WHY_LEN, "PI(%+.0f)", u);
-	if (u > 0)
-		alloc_charge(cfg, st->lead, u, pi_chg, n_pichg, out->chg_cap, psp);
-	else if (u < 0) {
+	if (u > 0) {
+		int cap[NPH];
+		chg_caps(out, cap);
+		alloc_charge(cfg, st->lead, (int)u, pi_chg, n_pichg, cap, psp);
+	} else if (u < 0) {
 		char rule[32];
 		snprintf(rule, sizeof(rule), "PI(%+.0f)", u);
 		int dcap[NPH];

@@ -75,9 +75,9 @@
 #include <time.h>
 #include <unistd.h>
 #include "bm_logic.h"
-#include "bm_wire.h"
+#include "bm_parse.h"
 
-#define VERSION "0.47-c"
+#define VERSION "0.48-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
@@ -86,8 +86,6 @@
 #define FORECAST_TOPIC "batmonitor/forecast"   /* forecast.py on .218, hourly: {"target_soc", ..., "ts"} */
 #define PEAK_MODEL_TOPIC "batmonitor/peak_model"   /* out, retained, every PEAK_MODEL_SECONDS: for r290_boost.py */
 #define PEAK_MODEL_SECONDS 60.0
-#define SHADOW_IN_TOPIC "batmonitor/shadow_in"     /* out, every cycle: bm_in + venus_sp for the ESP32 shadow (0.47-c) */
-#define SHADOW_CFG_TOPIC "batmonitor/shadow_cfg"   /* out, retained, every PEAK_MODEL_SECONDS: the parameters */
 #define DO4_TOPIC "pv_relay/DO4"      /* out, not retained: "1" for DO4_PULSE_S, then "0" (relay: curtail WR2, 0.46-c) */
 #define STATE_FILE_DEFAULT "/data/batmonitor/state.json"
 #define TZ_BERLIN "CET-1CEST,M3.5.0,M10.5.0/3"   /* Europe/Berlin without a zoneinfo file */
@@ -263,12 +261,12 @@ static const char *vebus(void)
 
 /* ---- MQTT (mosquitto thread) -------------------------------------------------------------------- */
 
-static double jnum(const cJSON *o, const char *k, double dflt, int *is_null)
+/* o[k] as a number, else dflt. Only where dflt means "none / stale" (forecast target_soc -1, ts 0); measured values go
+   through bm_parse (0.48-c: a missing key there was a valid 0 W, cJSON_IsNull(NULL) is false) */
+static double jnum(const cJSON *o, const char *k, double dflt)
 {
 	const cJSON *x = cJSON_GetObjectItemCaseSensitive(o, k);
-	if (is_null)
-		*is_null = cJSON_IsNull(x);
-	return cJSON_IsNumber(x) ? x->valuedouble : dflt;
+	return cJSON_IsNumber(x) && isfinite(x->valuedouble) ? x->valuedouble : dflt;
 }
 
 static void on_connect(struct mosquitto *m, void *ud, int rc)
@@ -293,9 +291,8 @@ static void on_message(struct mosquitto *m, void *ud, const struct mosquitto_mes
 	memcpy(buf, msg->payload, n);
 	buf[n] = 0;
 	if (strcmp(msg->topic, WP_TOPIC) == 0) {
-		char *end;
-		double v = strtod(buf, &end);
-		if (end != buf && v > -1000.0 && v < 30000.0) {
+		double v;
+		if (bm_parse_number(buf, -1000.0, 30000.0, &v)) {
 			pthread_mutex_lock(&mq_lock);
 			mq.wp = v;
 			mq.wp_time = mono();
@@ -304,12 +301,47 @@ static void on_message(struct mosquitto *m, void *ud, const struct mosquitto_mes
 		return;
 	}
 	if (strcmp(msg->topic, AUSSEN_TOPIC) == 0) {
-		char *end;
-		double v = strtod(buf, &end);
-		if (end != buf && v > -40.0 && v < 55.0) {
+		double v;
+		if (bm_parse_number(buf, -40.0, 55.0, &v)) {
 			pthread_mutex_lock(&mq_lock);
 			mq.aussen = v;
 			mq.aussen_time = mono();
+			pthread_mutex_unlock(&mq_lock);
+		}
+		return;
+	}
+	/* 0.48-c: a sample counts only with valid numbers (bm_parse); a rejected one does not refresh the timestamp, so
+	   the stale logic takes over instead of a missing key becoming 0 W */
+	if (strcmp(msg->topic, INVERTER_TOPIC) == 0) {
+		static double last_err;
+		struct bm_inv_sample s;
+		if (!bm_parse_inverter(buf, &s)) {
+			if (mono() - last_err > 300.0) {
+				LOGE("inverter sample rejected (PCC / Power_Bat1 missing or invalid): %.200s", buf);
+				last_err = mono();
+			}
+			return;
+		}
+		pthread_mutex_lock(&mq_lock);
+		mq.pcc = s.pcc;
+		mq.bat1 = s.bat1;
+		mq.pcc_avg5 = s.pcc_avg5;
+		mq.bat1_avg5 = s.bat1_avg5;
+		mq.pv = s.pv;
+		mq.have_pv = s.have_pv;
+		mq.have_soc_bat1 = s.have_soc_bat1;
+		mq.soc_bat1 = s.soc_bat1;
+		mq.have_pcc = 1;
+		mq.inv_time = mono();
+		pthread_mutex_unlock(&mq_lock);
+		return;
+	}
+	if (strcmp(msg->topic, R290_TOPIC) == 0) {
+		int hz;
+		if (bm_parse_r290(buf, &hz)) {
+			pthread_mutex_lock(&mq_lock);
+			mq.r290_hz = hz;
+			mq.r290_time = mono();
 			pthread_mutex_unlock(&mq_lock);
 		}
 		return;
@@ -320,33 +352,11 @@ static void on_message(struct mosquitto *m, void *ud, const struct mosquitto_mes
 		cJSON_Delete(d);
 		return;
 	}
-	if (strcmp(msg->topic, INVERTER_TOPIC) == 0) {
-		int pcc_null, p5_null, b5_null;
-		double pcc = jnum(d, "ActivePower_PCC_Total", 0, &pcc_null);
-		if (!pcc_null) {
-			double pcc5 = jnum(d, "ActivePower_PCC_Total_avg5", 0, &p5_null);
-			double bat1 = jnum(d, "Power_Bat1", 0, NULL), bat5 = jnum(d, "Power_Bat1_avg5", 0, &b5_null);
-			int have5 = cJSON_GetObjectItemCaseSensitive(d, "ActivePower_PCC_Total_avg5") && !p5_null;
-			int haveb5 = cJSON_GetObjectItemCaseSensitive(d, "Power_Bat1_avg5") && !b5_null;
-			pthread_mutex_lock(&mq_lock);
-			mq.pcc = pcc * 1000.0;
-			mq.bat1 = bat1 * 1000.0;
-			mq.pv = (jnum(d, "Power_PV1", 0, NULL) + jnum(d, "Power_PV2", 0, NULL)) * 1000.0;
-			mq.pcc_avg5 = (have5 ? pcc5 : pcc) * 1000.0;
-			mq.bat1_avg5 = (haveb5 ? bat5 : bat1) * 1000.0;
-			int soc_null;
-			double soc1 = jnum(d, "SOC_Bat1", -1, &soc_null);
-			mq.have_soc_bat1 = !soc_null && soc1 >= 0 && soc1 <= 100;
-			mq.soc_bat1 = soc1;
-			mq.have_pcc = mq.have_pv = 1;
-			mq.inv_time = mono();
-			pthread_mutex_unlock(&mq_lock);
-		}
-	} else if (strcmp(msg->topic, FORECAST_TOPIC) == 0) {
+	if (strcmp(msg->topic, FORECAST_TOPIC) == 0) {
 		pthread_mutex_lock(&mq_lock);
-		mq.fc_target = jnum(d, "target_soc", -1, NULL);
-		mq.fc_ts = jnum(d, "ts", 0, NULL);
-		mq.fc_corr = jnum(d, "correction", 0, NULL);
+		mq.fc_target = jnum(d, "target_soc", -1);
+		mq.fc_ts = jnum(d, "ts", 0);
+		mq.fc_corr = jnum(d, "correction", 0);
 		mq.fc_n = 0;
 		const cJSON *sl, *slots = cJSON_GetObjectItemCaseSensitive(d, "kt_slots");
 		cJSON_ArrayForEach(sl, slots) {
@@ -365,15 +375,10 @@ static void on_message(struct mosquitto *m, void *ud, const struct mosquitto_mes
 										   : strcmp(mo->valuestring, "transition") == 0 ? BM_TRANSITION : 0) : 0;
 		pthread_mutex_lock(&mq_lock);
 		mq.season = season;
-		mq.season_ts = jnum(d, "ts", 0, NULL);
+		mq.season_ts = jnum(d, "ts", 0);
 		pthread_mutex_unlock(&mq_lock);
 		LOG("season: %s (%s)", season == BM_SUMMER ? "summer" : season == BM_WINTER ? "winter"
 			: season == BM_TRANSITION ? "transition" : "?", buf);
-	} else if (strcmp(msg->topic, R290_TOPIC) == 0) {
-		pthread_mutex_lock(&mq_lock);
-		mq.r290_hz = (int)jnum(d, "comp_freq_actual", 0, NULL);
-		mq.r290_time = mono();
-		pthread_mutex_unlock(&mq_lock);
 	}
 	cJSON_Delete(d);
 }
@@ -608,28 +613,6 @@ static void do4_publish(const char *v)
 		LOGE("DO4=%s publish failed", v);
 }
 
-/* ESP32 shadow (0.47-c): the inputs of this cycle and our setpoints, so the shadow runs bm_step on the same data and
-   compares; the parameters retained once a minute */
-static void publish_shadow(const struct bm_in *in, double now)
-{
-	static double last_cfg;
-	char buf[2560];
-	if (!mosq_g)
-		return;
-	int n = bm_wire_in_encode(in, buf, sizeof(buf) - 96);
-	if (n < 0) {
-		LOGE("shadow: bm_in does not fit");
-		return;
-	}
-	n += snprintf(buf + n, sizeof(buf) - n, ";venus_sp=%d,%d,%d;venus_v=%s", o_.sp[0], o_.sp[1], o_.sp[2], VERSION);
-	mosquitto_publish(mosq_g, NULL, SHADOW_IN_TOPIC, n, buf, 0, false);
-	if (last_cfg > 0 && now - last_cfg < PEAK_MODEL_SECONDS)
-		return;
-	n = bm_wire_cfg_encode(&cfg, buf, sizeof(buf));
-	if (n > 0 && mosquitto_publish(mosq_g, NULL, SHADOW_CFG_TOPIC, n, buf, 1, true) == MOSQ_ERR_SUCCESS)
-		last_cfg = now;
-}
-
 /* the charge block's clear-sky peak model, retained, once a minute (same fields as the ESP's sofar/state model) */
 static void publish_peak_model(double now)
 {
@@ -697,7 +680,6 @@ static void calc(void)
 	}
 
 	bm_step(&cfg, &in, &st, &o_);
-	publish_shadow(&in, in.now);
 	in_last = in;
 	run_full_forecast(&in);
 

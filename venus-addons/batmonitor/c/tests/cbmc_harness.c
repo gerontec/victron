@@ -10,8 +10,8 @@
  *   h_alloc_discharge each phase within its cap, total never above the request, other phases untouched, the lead
  *                     bank first, without a lead both banks the same power (integer split, 0.45-c)
  *   h_dis_amount      the one amount formula: 0..W_MAX, WP_CAP while armed, IDLE never above the row's idle power
- *   h_charge          a CHARGE phase gets 0..its ceiling, never a discharge (0.44-c finding); assumes L2 + L3
- *                     share one cap (chain_gates computes it per bank, unequal caps give a counterexample)
+ *   h_charge          a CHARGE phase gets 0..its ceiling, never a discharge (0.44-c finding); since 0.48-c (one
+ *                     split core with water filling) without the assumption that L2 + L3 share one cap
  *   h_discharge       discharge phases within their caps, total within W_MAX / WP_CAP, IDLE at night = 0
  *
  * usage: make cbmc / make cbmc-full (apt install cbmc cadical; not on Venus), make cbmc-remote (see Makefile)
@@ -178,7 +178,6 @@ void h_charge(void)
 		c.n_chg += c.charge[p];
 		out.chg_cap[p] = in_range(0, 5000);
 	}
-	__CPROVER_assume(c.charge[1] == c.charge[2] && out.chg_cap[1] == out.chg_cap[2]);   /* L2 + L3 = one bank, one CCL */
 	__CPROVER_assume(c.n_chg > 0);
 	chain_charge(&cfg, &st, &out, &c);
 	for (int p = 0; p < NPH; p++) {

@@ -2,7 +2,7 @@
 // render: dot -Tpdf decision_flow.dot -o decision_flow.pdf   (or -Tpng)
 digraph batmonitor {
 	graph [rankdir=TB, fontname="Helvetica", fontsize=11, nodesep=0.35, ranksep=0.35, newrank=true,
-		   label="batmonitor 0.45-c: one cycle (bm_step, every 5 s)   |   blue = pure decision function (bits + state, enumerated by make check)   |   green = discharge matrix   |   [CBMC] = proved for all inputs",
+		   label="batmonitor 0.48-c: one cycle (bm_step, every 5 s)   |   blue = pure decision function (bits + state, enumerated by make check)   |   green = discharge matrix   |   [CBMC] = proved for all inputs",
 		   labelloc=t];
 	node [shape=box, style="rounded,filled", fillcolor="#f4f4f4", fontname="Helvetica", fontsize=10];
 	edge [fontname="Helvetica", fontsize=9];
@@ -40,7 +40,7 @@ digraph batmonitor {
 		deficit [label=<<b>deficit</b> (int W)<br/>b1 = b1_signed ? Bat1 : max(Bat1 charge, 0)<br/>target = SOYO_TARGET + (trickle ? SOFAR_TRICKLE : 0)<br/>deficit = own_discharge - b1 - KP_PM x (z2 + own_charge - target) / 1000>, fillcolor="#ffffff"];
 		d3 [label=<<b>D3</b> bm_d3   state: prop_prev<br/>PROP = import (&lt; -100 W) or<br/>((prop_prev or prop_hold) and deficit &gt; 20 W)>, fillcolor="#dbe8fb"];
 		amount [label=<<b>dis_amount</b>: w = min(PROP ? max(deficit, 0) : idle_w, W_MAX, WP_CAP if armed)<br/><font point-size="9">[CBMC h_dis_amount]</font>>, fillcolor="#ffffff"];
-		alloc [label=<<b>alloc_discharge</b> (one routine)<br/>lead: level 0 = lead stack (BAL), level 1 = only what its caps cut (SPILL / WAIT)<br/>no lead: one level, every stack the same share (EQ)<br/>within a level: water filling up to dis_cap<br/><font point-size="9">[CBMC h_alloc_discharge: within caps, total &le; w, lead first, equal per stack]</font>>, fillcolor="#ffffff"];
+		alloc [label=<<b>alloc_discharge</b> on <b>alloc_levels</b> (0.48-c: one split core for charge and discharge)<br/>lead: level 0 = lead stack (BAL), level 1 = only what its caps cut (SPILL / WAIT)<br/>no lead: one level, every stack the same share (EQ)<br/>within a level: water filling up to dis_cap<br/><font point-size="9">[CBMC h_alloc_discharge: within caps, total &le; w, lead first, equal per stack]</font>>, fillcolor="#ffffff"];
 		rule -> deficit -> d3 -> amount -> alloc;
 	}
 

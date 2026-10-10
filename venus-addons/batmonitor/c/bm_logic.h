@@ -148,6 +148,17 @@ struct bm_src_rule {
 	int prop_hold;              /* IDLE -> PROPORTIONAL already above SOYO_HOLD_TH, not only on import */
 };
 extern const struct bm_src_rule BM_SRC_RULE[BM_SRC_N];
+
+/* Mode matrix (0.48-c): what the S1 mode of a bank (D2) means for its phases' setpoint, one row per mode */
+enum bm_action { BM_A_ZERO, BM_A_FORCE, BM_A_CHARGE, BM_A_DISCHARGE };
+enum bm_why { BM_W_NONE, BM_W_NAME, BM_W_SOC, BM_W_PEAK_H, BM_W_POWER, BM_W_CHAIN };
+struct bm_mode_rule {
+	int action;                 /* enum bm_action: 0 W, FORCE_CHARGE_W, the charge amount, the discharge amount */
+	int capped;                 /* the setpoint is limited by the phase ceiling (chg_cap / dis_cap) */
+	int why;                    /* enum bm_why: rule text NAME, NAME(soc %), NAME(peak h), NAME(BMS W), NAME WP: SRC:,
+								   none (the discharge stage writes it) */
+};
+extern const struct bm_mode_rule BM_MODE_RULE[];
 extern const char *BM_WPK_NAME[BM_WPK_N];
 
 /* D1: forecast rule, S3 source, S2 scope. State: fc_active, bat1_first */
@@ -211,6 +222,23 @@ struct bm_d3_in {
 	int prop_hold;                               /* BM_SRC_RULE[src].prop_hold */
 };
 int bm_d3(const struct bm_d3_in *b, int prop_prev, int *prop_next);   /* 1 = PROPORTIONAL, 0 = IDLE */
+
+/* D4 (0.48-c): the summer charge block LADESPERRE (peak window). State: peak_today, latched, badweather (reset at
+   local midnight). block = in the window, latched (sunny: little of the clear-sky power missing), no bad weather today */
+struct bm_d4_in {
+	int new_day;                                 /* local day changed since the last cycle: reset the state */
+	int enabled;                                 /* BATMONITOR_LADESPERRE */
+	int pcc_peak;                                /* PCC fresh and > PCC_PEAK_TH: the peak is here */
+	int season;                                  /* LADESPERRE_FROM..TO (May..August) */
+	int day_can_peak;                            /* clear-sky maximum today > PCC_PEAK_TH and a window end exists */
+	int before_peak;                             /* hour <= peak hour and before solar noon */
+	int ratio_valid;                             /* dc > DC_RATIO_MIN, data fresh: ratio computed */
+	int ratio_le_on;                             /* 5 min ratio <= LADESPERRE_RATIO */
+	int ratio_ge_off;                            /* 5 min ratio >= LADESPERRE_RATIO + LADESPERRE_HYST */
+	int now_bad;                                 /* ratio_now >= LADESPERRE_NOW_RATIO (invalid ratio_now: 0) */
+};
+struct bm_d4_state { int peak_today, latched, badweather; };
+int bm_d4(const struct bm_d4_in *b, const struct bm_d4_state *s, struct bm_d4_state *next);   /* 1 = block */
 
 /* D5 (0.46-c): DO4 pulse "curtail WR2" (MQTT pv_relay/DO4) when the PCC export passes PCC_PEAK_TH 20 kW, at most one
    pulse per DO4_LOCKOUT. State: the time of the last pulse, reduced to the bit lockout_over */
