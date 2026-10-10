@@ -1,5 +1,5 @@
 // batmonitor 0.45-c: decision flow of one cycle (bm_step), the discharge matrix highlighted.
-// render: dot -Tpdf decision_flow.dot -o decision_flow.pdf   (or -Tpng)
+// render: dot -Tpdf discharge_flow.dot -o discharge_flow.pdf   (or -Tpng)
 digraph batmonitor {
 	graph [rankdir=TB, fontname="Helvetica", fontsize=11, nodesep=0.35, ranksep=0.35, newrank=true,
 		   label="batmonitor 0.48-c: one cycle (bm_step, every 5 s)   |   blue = pure decision function (bits + state, enumerated by make check)   |   green = discharge matrix   |   [CBMC] = proved for all inputs",

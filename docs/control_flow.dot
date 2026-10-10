@@ -1,9 +1,9 @@
 // batmonitor 0.48-c: overview of one cycle - a common trunk, then one charge path and one discharge branch.
-// Details: charge_flow.pdf (charge path, peak window) and decision_flow.pdf (discharge matrix, CBMC coverage).
+// Details: charge_flow.pdf (charge path, peak window) and discharge_flow.pdf (discharge matrix, CBMC coverage).
 // render: dot -Tpdf control_flow.dot -o control_flow.pdf   (or -Tpng)
 digraph control {
 	graph [rankdir=TB, fontname="Helvetica", fontsize=11, nodesep=0.5, ranksep=0.4, newrank=true,
-		   label="batmonitor 0.48-c: one cycle every 5 s   |   blue = decision (bits + state, make check)   |   green = matrix / amount   |   details: charge_flow.pdf, decision_flow.pdf",
+		   label="batmonitor 0.48-c: one cycle every 5 s   |   blue = decision (bits + state, make check)   |   green = matrix / amount   |   details: charge_flow.pdf, discharge_flow.pdf",
 		   labelloc=t];
 	node [shape=box, style="rounded,filled", fillcolor="#f4f4f4", fontname="Helvetica", fontsize=10];
 	edge [fontname="Helvetica", fontsize=9];

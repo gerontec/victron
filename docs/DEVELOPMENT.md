@@ -2,7 +2,8 @@
 
 How decision code in this repo (batmonitor first of all) is changed. The model is the batmonitor 0.45-c
 discharge matrix (`BM_SRC_RULE` in `venus-addons/batmonitor/c/bm_logic.c`); see
-[decision_flow.pdf](decision_flow.pdf) for the resulting cycle.
+[discharge_flow.pdf](discharge_flow.pdf) for the discharge path, [charge_flow.pdf](charge_flow.pdf) for the charge path and
+[control_flow.pdf](control_flow.pdf) for the overview.
 
 The goal is robustness through simplicity: every decision has a name, every rule has a table row, every table has an
 automatic check.
