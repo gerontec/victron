@@ -15,7 +15,27 @@ digraph charge {
 	subgraph cluster_d4 {
 		label=<<b>D4 peak window LADESPERRE</b> (0.48-c: pure function bm_d4)<br/>goal: stacks stay empty in the morning, at midday they take the PV above the 20 kW export limit>;
 		style="rounded,filled"; fillcolor="#fdf0e0"; color="#d9822b"; fontsize=11;
-		model [label=<<b>model part</b> (ladesperre wrapper, not a decision)<br/>clear-sky dc(t): 4 PV arrays x sun position x temperature factor<br/>peak_h (hour with max dc), win_end (last hour &gt; 20 kW), solar noon<br/>ratio = (dc - (PCC + Multis + Bat1)) / dc (5 min mean and now; dc &gt; 5 kW)>, fillcolor="#ffffff"];
+		subgraph cluster_sky {
+			label=<<b>clear-sky model</b> dc(t) (bm_logic.c calc_arrays_kt, from fox2db_logic.h / clearsky.tex)>;
+			style="rounded,filled"; fillcolor="#fffaf0"; color="#b8860b"; fontsize=10;
+			sky [shape=plain, label=<
+				<table border="0" cellborder="1" cellspacing="0" cellpadding="3" bgcolor="#ffffff">
+				<tr><td colspan="2"><b>inputs</b></td></tr>
+				<tr><td>time</td><td>unix clock (NTP, Fritzbox)</td></tr>
+				<tr><td>site</td><td>latitude / longitude (LAT, LON)</td></tr>
+				<tr><td>outdoor temperature</td><td>aussen/temp (MQTT, &lt; 15 min old)</td></tr>
+				<tr><td colspan="2"><b>steps</b></td></tr>
+				<tr><td>sun</td><td>NOAA: elevation, azimuth from time + site</td></tr>
+				<tr><td>atmosphere</td><td>air mass AM = 1 / sin(elev) (&le; 37), Meinel T = 0.7^(AM^0.678)</td></tr>
+				<tr><td>4 PV strings</td><td>tilt / azimuth / power fitted per string (gen_pv_strings.py, 14 clear days):<br/>Sofar PV1 west, PV2 south; FoxESS pv2 east, pv1 west</td></tr>
+				<tr><td>horizon</td><td>trees east: below 23 deg (south-east 15 deg) only 25 % diffuse</td></tr>
+				<tr><td>month</td><td>KT_MONTH empirical: Dec 0.13 ... May 0.91</td></tr>
+				<tr><td>temperature</td><td>cell = outdoor + NOCT 45 x sun; -0.30 %/K above 25 deg C (0.85..1.0)</td></tr>
+				<tr><td colspan="2">dc(t) = &Sigma; power x T x kt x cos(incidence) x shade x temperature factor</td></tr>
+				</table>>];
+		}
+		model [label=<<b>model part</b> (ladesperre wrapper, not a decision)<br/>dc now; peak_h (hour 5..20 with max dc), win_end (last hour &gt; 20 kW), solar noon<br/>ratio = (dc - (PCC + Multis + Bat1)) / dc (5 min mean and now; dc &gt; 5 kW)>, fillcolor="#ffffff"];
+		sky -> model [label=" dc(t)"];
 		d4bits [shape=plain, label=<
 			<table border="0" cellborder="1" cellspacing="0" cellpadding="3" bgcolor="#ffffff">
 			<tr><td colspan="2"><b>bm_d4 bits</b></td></tr>
