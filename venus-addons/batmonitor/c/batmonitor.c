@@ -76,7 +76,7 @@
 #include <unistd.h>
 #include "bm_logic.h"
 
-#define VERSION "0.37-c"
+#define VERSION "0.39-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
@@ -108,6 +108,8 @@ static pthread_mutex_t mq_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct {
 	int have_pcc, have_pv;
 	double pcc, pv, bat1, pcc_avg5, bat1_avg5, inv_time;
+	int have_soc_bat1;
+	double soc_bat1;
 	int r290_hz;
 	double r290_time;
 	double aussen, aussen_time;
@@ -327,6 +329,10 @@ static void on_message(struct mosquitto *m, void *ud, const struct mosquitto_mes
 			mq.pv = (jnum(d, "Power_PV1", 0, NULL) + jnum(d, "Power_PV2", 0, NULL)) * 1000.0;
 			mq.pcc_avg5 = (have5 ? pcc5 : pcc) * 1000.0;
 			mq.bat1_avg5 = (haveb5 ? bat5 : bat1) * 1000.0;
+			int soc_null;
+			double soc1 = jnum(d, "SOC_Bat1", -1, &soc_null);
+			mq.have_soc_bat1 = !soc_null && soc1 >= 0 && soc1 <= 100;
+			mq.soc_bat1 = soc1;
 			mq.have_pcc = mq.have_pv = 1;
 			mq.inv_time = mono();
 			pthread_mutex_unlock(&mq_lock);
@@ -547,6 +553,7 @@ static void write_state(const int *sp, char why[][WHY_LEN], double surplus)
 	o = cJSON_AddObjectToObject(js, "forecast_rule");
 	cJSON_AddNumberToObject(o, "active", o_.fc_active);
 	cJSON_AddNumberToObject(o, "bad", o_.fc_bad);
+	cJSON_AddNumberToObject(js, "bat1_first", o_.bat1_first);
 	cJSON_AddNumberToObject(o, "target_soc", o_.fc_target);
 	cJSON_AddNumberToObject(o, "min_soc", o_.fc_min_soc);
 	o = cJSON_AddObjectToObject(js, "pi");
@@ -618,6 +625,8 @@ static void calc(void)
 	in.pcc = mq.pcc;
 	in.pv = mq.pv;
 	in.bat1 = mq.bat1;
+	in.have_soc_bat1 = mq.have_soc_bat1;
+	in.soc_bat1 = mq.soc_bat1;
 	in.pcc_avg5 = mq.pcc_avg5;
 	in.bat1_avg5 = mq.bat1_avg5;
 	in.inv_time = mq.inv_time;

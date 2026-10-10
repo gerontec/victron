@@ -28,6 +28,7 @@ struct plant {
 	int season, season_age_h;      /* batmonitor/season: 0 none, BM_SUMMER, BM_WINTER; age of its ts */
 	double fc_target;              /* batmonitor/forecast target SoC, 0 = none */
 	int fc_age_h;
+	double bat1_soc;               /* Sofar Bat1 SoC %, 0 = not sent */
 	double aussen;
 	double volt[NBANK];            /* BMS voltage, 0 = none; given: the Multis saturate at 70 A x U / 0.93 (real) */
 	int lim[NBANK];                /* 1 = the BMS sends CCL / DCL */
@@ -84,6 +85,8 @@ static void simulate(struct run *r, const struct plant *pl, time_t t0, int n)
 		in->have_pcc = in->have_pv = 1;
 		in->pcc = in->pcc_avg5 = r->pcc;
 		in->bat1 = in->bat1_avg5 = b1;
+		in->have_soc_bat1 = pl->bat1_soc > 0;
+		in->soc_bat1 = pl->bat1_soc;
 		in->pv = pl->pv;
 		in->inv_time = pl->stale_inv ? 1.0 : now;
 		in->r290_hz = pl->r290_hz;
@@ -567,6 +570,46 @@ static void test_forecast_bad_caps_wp(void)
 	CHECK(!r.out.fc_bad && abs(sum_sp(&r) + 3500) <= 60, "target 90 %%: house + whole WP, sp sum %d", sum_sp(&r));
 }
 
+static void test_bat1_first(void)
+{
+	struct run r;
+	struct plant pl = BASE(.house = 500, .wp = 1600, .r290_hz = 60, .season = BM_TRANSITION, .season_age_h = 1,
+						   .sofar_dis = 1, .sofar_chg = 1, .bat1_soc = 36, .soc = {50, 50});
+	simulate(&r, &pl, local_time(2026, 10, 10, 2, 0), 60);       /* Sofar 36 %: it covers house + WP alone */
+	print_state("night, Sofar 36 %, WP 1.6 kW", &r);
+	CHECK(r.out.bat1_first && rule_has(&r, "|B1FIRST"), "Sofar first flagged");
+	CHECK(sum_sp(&r) >= -30, "stacks idle, sp sum %d", sum_sp(&r));
+	CHECK(fabs(r.bat1 + 2100) <= 60 && fabs(r.pcc) <= 60, "Bat1 2.1 kW, no import, bat1 %.0f pcc %.0f", r.bat1, r.pcc);
+
+	pl.house = 1500;                                             /* 4.5 kW > Sofar 2.5 kW: 1.1 kW (WP above 1900 W) from the grid, */
+	pl.wp = 3000;                                                /* the stacks the remaining 0.9 kW */
+	simulate(&r, &pl, local_time(2026, 10, 10, 2, 0), 60);
+	print_state("night, Sofar 36 %, house 1.5 + WP 3 kW", &r);
+	CHECK(fabs(r.bat1 + 2500) <= 60, "Sofar at its 2.5 kW limit, bat1 %.0f", r.bat1);
+	CHECK(abs(sum_sp(&r) + 900) <= 80 && fabs(r.pcc + 1100) <= 80, "stacks 0.9 kW, grid 1.1 kW, sp sum %d pcc %.0f",
+		  sum_sp(&r), r.pcc);
+
+	pl.house = 500;
+	pl.wp = 1600;
+	pl.bat1_soc = 5;                                             /* Sofar empty (DOD 95 %): the stacks take over as before */
+	simulate(&r, &pl, local_time(2026, 10, 10, 2, 0), 60);
+	print_state("night, Sofar 5 %, WP 1.6 kW", &r);
+	CHECK(!r.out.bat1_first && abs(sum_sp(&r) + 2130) <= 60, "stacks house + WP + trickle, sp sum %d", sum_sp(&r));
+
+	pl.bat1_soc = 36;                                            /* heat pump off: the normal rule (stacks take over the Sofar) */
+	pl.wp = 0;
+	pl.r290_hz = 0;
+	simulate(&r, &pl, local_time(2026, 10, 10, 2, 0), 60);
+	print_state("night, Sofar 36 %, WP off", &r);
+	CHECK(!r.out.bat1_first && abs(sum_sp(&r) + 530) <= 30, "stacks house + trickle, sp sum %d", sum_sp(&r));
+
+	pl.wp = 1600;
+	pl.r290_hz = 60;
+	pl.bat1_soc = 6;                                             /* inside the hysteresis: stays off */
+	simulate(&r, &pl, local_time(2026, 10, 10, 2, 0), 10);
+	CHECK(!r.out.bat1_first, "6 %% < 5 + 2: Sofar-first stays off");
+}
+
 static void test_pi_shadow_not_armed(void)
 {
 	struct run r;
@@ -757,6 +800,7 @@ int main(void)
 	test_param_override();
 	test_forecast_overrides_winter();
 	test_forecast_bad_caps_wp();
+	test_bat1_first();
 	test_pi_shadow_not_armed();
 	test_fc_sunset_limits();
 	test_fc_clouds_later();

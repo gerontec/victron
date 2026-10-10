@@ -26,6 +26,7 @@
 #define WP_ON_TH 300.0          /* W: heat pump counts as running (no night floor) */
 #define SEASON_MAX_AGE (2 * 86400)   /* s: older batmonitor/season -> month rule */
 #define FC_MAX_AGE (3 * 3600)        /* s: older batmonitor/forecast is ignored */
+#define BAT1_FIRST_HYST 2.0          /* %: Sofar-first back on above BAT1_SOC_MIN + this */
 /* batmonitor */
 #define BAT1_CHARGE_FACTOR 0.5
 /* charge block, 1:1 from waveshare/fox2db_logic.h (fox2db v2.9) and sofar_waveshare.yaml */
@@ -95,6 +96,7 @@ const struct bm_param BM_PARAMS[] = {
 	{"SOFAR_TRICKLE",         P(sofar_trickle),             30,      0,       500,     "W", "night: stacks give this much more than the house needs, the Sofar battery charges gently instead of swinging"},
 	{"CHARGER_A",             P(charger_a),                 70,      0,       70,      "A", "MultiPlus-II 48/5000 charger current per unit (DC), ceiling = this x BMS voltage"},
 	{"CHARGE_EFF",            P(charge_eff),                0.93,    0.7,     1.0,     "",  "AC-in per DC at the charger limit (measured 2026-10-09: 4050 W AC at 70 A x 53.7 V)"},
+	{"BAT1_SOC_MIN",          P(bat1_soc_min),              5,       0,       101,     "%", "night: the Sofar Bat1 serves house + heat pump first down to this SoC, only then the stacks (Sofar DOD 95 %); 101 = off (stacks take over the Sofar as 0.25)"},
 	{"FC_BAD_TARGET",         P(fc_bad_target),             100,     0,       101,     "%", "bad forecast when target_soc >= this (100 = the day's PV does not exceed the day load, free_kwh 0); 101 = off"},
 	{"WP_BAT_SHARE_BAD",      P(wp_bat_share_bad),          50,      0,       100,     "%", "bad forecast: the stacks cover at most this share of the heat pump (summer/transition, winter stays 0)"},
 	{"CHARGER_DC_W",          P(charger_dc_w),              3600,    500,     5000,    "W", "full_at forecast: DC at the BMS per MultiPlus at its limit (measured 2026-10-09: ~3.6 kW, 65-67 A, flat over 53.6-54.6 V)"},
@@ -468,6 +470,16 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 		if (st->fc_active)
 			season = BM_SUMMER;        /* serve the heat pump like in summer */
 	}
+	/* Sofar first (0.38-c, user 2026-10-10): while the Sofar Bat1 is above BAT1_SOC_MIN it covers the night load
+	   (heat pump included) by its own PCC regulation; the stacks only take the import it leaves (its 2.5 kW limit)
+	   and take over completely once it is down at BAT1_SOC_MIN (the Sofar stops there by its DOD).
+	   Only while the heat pump runs (user: WP off -> the normal rule) */
+	if (!in->have_soc_bat1 || in->soc_bat1 <= cfg->bat1_soc_min)
+		st->bat1_first = 0;
+	else if (!st->bat1_first && in->soc_bat1 >= cfg->bat1_soc_min + BAT1_FIRST_HYST)
+		st->bat1_first = 1;
+	int b1_first = st->bat1_first && wp_fresh && in->wp >= WP_ON_TH;
+	out->bat1_first = b1_first;
 	int winter = season != BM_SUMMER;          /* transition counts as winter for the WP_CAP fallback */
 	/* the heat pump power the batteries must NOT cover: all of it in winter, the part above 1900 W in the
 	   transition (0.22), none in summer */
@@ -592,7 +604,7 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 		/* the own charging (force charge of the other stack) is no house load: it comes from the grid (0.20) */
 		double house = z2 + own_charge;
 		/* winter: the night base load would flow into the heat pump */
-		int night_floor = night && (season != BM_WINTER || !wp_fresh || in->wp < WP_ON_TH);
+		int night_floor = night && !b1_first && (season != BM_WINTER || !wp_fresh || in->wp < WP_ON_TH);
 		/* night (0.25, user 2026-10-08: PCC near 0): the Sofar Bat1 counts signed instead of the fixed B_NIGHT floor.
 		   Its discharge is house load the stacks take over, its charge is our own overshoot (the 936 W floor charged
 		   the Sofar battery with ~600 W at a 300 W house). pcc + bat1 is the load behind the Sofar however the Sofar
@@ -619,6 +631,8 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 			strcat(rule, season == BM_TRANSITION ? "|WP1900" : "|Z2");
 		if (st->fc_active)
 			strcat(rule, "|FC");
+		if (night && b1_first)
+			strcat(rule, "|B1FIRST");
 		if (out->fc_bad && wp_fresh && in->wp >= WP_ON_TH)
 			strcat(rule, "|FCBAD");
 		if (!wp_fresh && winter && wp_running && w > (int)cfg->wp_cap) {
@@ -654,7 +668,7 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 			if (pi_ok[p])
 				applied += st->setpoints[p];
 		double b1 = bat1 > 0 ? bat1 * BAT1_CHARGE_FACTOR
-					: (applied > 0 || (night && (season != BM_WINTER || !wp_fresh || in->wp < WP_ON_TH))) ? bat1 : 0.0;
+					: (applied > 0 || (night && !b1_first && (season != BM_WINTER || !wp_fresh || in->wp < WP_ON_TH))) ? bat1 : 0.0;
 		/* both sides on the Z2 point (discharge 0.19, charge 0.30-c), as soyo */
 		double y = (have_pcc ? z2 : 0.0) + b1, e = y - PI_TARGET;
 		if (fabs(e) < PI_DEADBAND)

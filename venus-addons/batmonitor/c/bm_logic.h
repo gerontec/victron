@@ -39,6 +39,7 @@ struct bm_cfg {
 	double sofar_trickle;
 	double charger_a, charge_eff;   /* real charge ceiling per phase = charger_a x BMS voltage / charge_eff (0.29-c) */
 	double charger_dc_w;            /* measured DC at the BMS per MultiPlus at its limit, full_at forecast (0.31-c) */
+	double bat1_soc_min;            /* night: the Sofar battery serves house + WP first while above this % (0.38-c) */
 	double fc_bad_target, wp_bat_share_bad;   /* bad forecast (target_soc >= this): stacks cover at most this % of the WP (0.37-c) */
 };
 
@@ -61,6 +62,8 @@ struct bm_in {
 	time_t t;                /* unix time; local month/hour via TZ (Europe/Berlin) */
 	int have_pcc, have_pv;
 	double pcc, pv, bat1, pcc_avg5, bat1_avg5, inv_time;   /* W, PCC + = export, Bat1 + = charge */
+	int have_soc_bat1;
+	double soc_bat1;                                        /* % Sofar Bat1 (SOC_Bat1), 0.38-c */
 	int r290_hz;
 	double r290_time;
 	double aussen, aussen_time;                             /* degC */
@@ -95,6 +98,7 @@ struct bm_state {
 	int soyo_chg_prev, soyo_prop_prev;
 	int ls_yday, peak_today, ls_latched, badweather_today;
 	int fc_active;                               /* forecast: stacks above the target SoC -> serve everything */
+	int bat1_first;                              /* Sofar Bat1 above BAT1_SOC_MIN: it discharges first (0.38-c) */
 	double pi_e_prev, pi_t_prev;
 	int setpoints[NPH];                          /* sent last cycle (the PI's u_applied) */
 };
@@ -106,6 +110,7 @@ struct bm_out {
 	int season, season_measured;                 /* BM_SUMMER/WINTER/TRANSITION used; 1 = from batmonitor/season */
 	int fc_active;
 	int fc_bad;                                  /* forecast fresh and target_soc >= FC_BAD_TARGET: WP share capped */
+	int bat1_first;
 	double fc_target, fc_min_soc;
 	struct bm_ls ls;
 	struct bm_pi pi;
