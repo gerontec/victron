@@ -1,2 +1,3 @@
 batmonitor
 tests/test_logic
+tests/check_matrix
