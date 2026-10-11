@@ -167,8 +167,10 @@ Without data for 120 s the service exits and only registers again with fresh dat
   | `CHARGE_MAX_PHASE` / `CHARGER_CAP_PHASE` | 4900 / 4200 W | PV charge per phase / real charger capacity |
   | `WP_BAT_MAX_TRANSITION` | 1900 W | heat pump share from the batteries in spring/autumn |
   | `WP_CAP` | 1000 W | discharge cap with the heat pump running when its meter is silent (winter) |
-  | `SOC_MIN` / `SOC_MIN_RELEASE` | 5 / 7 % | discharge protection |
+  | `SOC_MIN` / `SOC_MIN_RELEASE` | 5 / 7 % | discharge protection (Lenggries env since 2026-10-11: 8 / 10 %) |
   | `SOC_FORCE` / `SOC_FORCE_RELEASE` / `FORCE_CHARGE_W` | 3 / 5 % / 500 W | grid force charge per phase |
+  | `DCL_FORCE_A` | 1 A | LOW force charge while the BMS discharge limit is below this, no discharge (0 = off; 0.52-c) |
+  | `CELL_FORCE_V` / `CELL_FORCE_RELEASE_V` | 3.00 / 3.25 V | LOW force charge while the lowest cell is below this; ends when DCL is back and the cell has reached the release value (0.52-c) |
   | `SOC_BALANCE_ON` / `SOC_BALANCE_OFF` | 3 / 1 % | SoC balancing between the stacks |
   | `SOYO_TARGET` | 0 W | PCC target |
   | `B_NIGHT` | 936 W | night base discharge |
