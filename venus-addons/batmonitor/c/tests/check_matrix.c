@@ -179,9 +179,35 @@ static int bank_ok(const struct bm_d2_bank *x)
 	return 1;
 }
 
+/* the bank invariants of one D2 result (bank k, its input state prot / force / low) */
+static void d2_bank_inv(const struct bm_d2_in *b, int k, int prot, int force, int low, const struct bm_d2_out *o)
+{
+	const struct bm_d2_bank *x = &b->bank[k];
+	int m = o->mode[k];
+	INV(m != BM_M_DIS || (x->bms_ok && !o->prot[k] && !o->force[k] && !o->low[k] && !b->stale && !o->charge_mode
+						   && !x->charging), "DIS only with BMS, unprotected, fresh data, no surplus");
+	INV(!(x->bms_ok && x->soc_lt_min) || m != BM_M_DIS, "never discharge below SOC_MIN");
+	INV(!(x->bms_ok && x->soc_lt_force) || m == BM_M_FORCE, "below SOC_FORCE always force charge");
+	INV(m != BM_M_CHARGE || (x->soc_lt_100 && o->charge_mode && !b->block && !o->force[k] && !o->low[k] && !b->stale),
+		"CHARGE only below 100 %%, with surplus, no charge block, no force, fresh data");
+	INV(!b->stale || (m != BM_M_DIS && m != BM_M_CHARGE), "stale data: neither charge nor discharge");
+	INV(x->bms_ok || (m == BM_M_BMS_MISSING && o->prot[k] == prot && o->force[k] == force && o->low[k] == low),
+		"without BMS: BMS_MISSING, protection state kept");
+	INV(!o->force[k] || !x->bms_ok || m == BM_M_FORCE, "force charge has priority");
+	INV(!(x->bms_ok && x->low_on) || m == BM_M_FORCE, "DCL 0 / cell low: always force charge");
+	INV(!o->low[k] || !x->bms_ok || m == BM_M_FORCE, "LOW latched: force charge, no discharge");
+	INV(!(x->bms_ok && low && !x->low_off) || o->low[k], "LOW holds until DCL back and cell recovered");
+}
+
+/* D2 per stack (0.53-c): bm_d2 decides each bank alone; the banks are coupled only through the global bits
+   (charge_mode from the surplus and chg_prev) and the output chg_prev = some bank in CHARGE. So every consistent
+   bank bit set x global bits x own state (prot, force, low, chg_prev) is enumerated for one bank, in both positions,
+   the other bank BMS_MISSING (inert: it changes neither charge_mode nor chg_prev). Before 0.53-c both banks were
+   enumerated jointly (84^2 x 12 x 128 = 10.8 million). The coupling is checked separately: on random joint inputs
+   each bank's result equals its single-bank result, and chg_prev = OR(mode == CHARGE) */
 static void check_d2(void)
 {
-	struct bm_d2_bank banks[512];
+	struct bm_d2_bank banks[512], inert;
 	int nb = 0;
 	for (unsigned v = 0; v < 512; v++) {
 		struct bm_d2_bank x = {BIT(v, 0), BIT(v, 1), BIT(v, 2), BIT(v, 3), BIT(v, 4), BIT(v, 5), BIT(v, 6), BIT(v, 7),
@@ -189,45 +215,68 @@ static void check_d2(void)
 		if (bank_ok(&x))
 			banks[nb++] = x;
 	}
+	memset(&inert, 0, sizeof(inert));                   /* bms_ok 0 */
 	long combos = 0, modes[BM_M_N] = {0};
-	for (int i0 = 0; i0 < nb; i0++)
-		for (int i1 = 0; i1 < nb; i1++)
+	for (int k = 0; k < NBANK; k++)
+		for (int i = 0; i < nb; i++)
 			for (unsigned g = 0; g < 16; g++)
-				for (unsigned s = 0; s < 128; s++) {
-					struct bm_d2_in b = {BIT(g, 0), BIT(g, 1), BIT(g, 2), BIT(g, 3), {banks[i0], banks[i1]}};
+				for (unsigned s = 0; s < 16; s++) {
+					struct bm_d2_in b = {BIT(g, 0), BIT(g, 1), BIT(g, 2), BIT(g, 3), {inert, inert}};
 					if (b.surplus_gt_on && !b.surplus_gt_hold)   /* PCC_SURPLUS_TH > SOYO_HOLD_TH */
 						continue;
-					int prot[NBANK] = {BIT(s, 0), BIT(s, 1)}, force[NBANK] = {BIT(s, 2), BIT(s, 3)}, cp = BIT(s, 4);
-					int low[NBANK] = {BIT(s, 5), BIT(s, 6)};
+					b.bank[k] = banks[i];
+					int prot[NBANK] = {0}, force[NBANK] = {0}, low[NBANK] = {0}, cp = BIT(s, 3);
+					prot[k] = BIT(s, 0);
+					force[k] = BIT(s, 1);
+					low[k] = BIT(s, 2);
 					struct bm_d2_out o, o2;
 					bm_d2(&b, prot, force, low, cp, &o);
-					combos++;
-					for (int k = 0; k < NBANK; k++) {
-						const struct bm_d2_bank *x = &b.bank[k];
-						int m = o.mode[k];
-						modes[m]++;
-						INV(m != BM_M_DIS || (x->bms_ok && !o.prot[k] && !o.force[k] && !o.low[k] && !b.stale && !o.charge_mode
-											   && !x->charging), "DIS only with BMS, unprotected, fresh data, no surplus");
-						INV(!(x->bms_ok && x->soc_lt_min) || m != BM_M_DIS, "never discharge below SOC_MIN");
-						INV(!(x->bms_ok && x->soc_lt_force) || m == BM_M_FORCE, "below SOC_FORCE always force charge");
-						INV(m != BM_M_CHARGE || (x->soc_lt_100 && o.charge_mode && !b.block && !o.force[k] && !b.stale),
-							"CHARGE only below 100 %%, with surplus, no charge block, fresh data");
-						INV(!b.stale || (m != BM_M_DIS && m != BM_M_CHARGE), "stale data: neither charge nor discharge");
-						INV(x->bms_ok || (m == BM_M_BMS_MISSING && o.prot[k] == prot[k] && o.force[k] == force[k]
-										  && o.low[k] == low[k]), "without BMS: BMS_MISSING, protection state kept");
-						INV(!o.force[k] || !x->bms_ok || m == BM_M_FORCE, "force charge has priority");
-						INV(!(x->bms_ok && x->low_on) || m == BM_M_FORCE, "DCL 0 / cell low: always force charge");
-						INV(!o.low[k] || !x->bms_ok || m == BM_M_FORCE, "LOW latched: force charge, no discharge");
-						INV(!(x->bms_ok && low[k] && !x->low_off) || o.low[k], "LOW holds until DCL back and cell recovered");
+					if (k == 0) {
+						combos++;
+						modes[o.mode[0]]++;
 					}
+					d2_bank_inv(&b, k, prot[k], force[k], low[k], &o);
+					INV(o.mode[!k] == BM_M_BMS_MISSING, "the inert bank stays BMS_MISSING");
+					INV(o.chg_prev == (o.mode[k] == BM_M_CHARGE), "chg_prev = this bank charges");
 					bm_d2(&b, o.prot, o.force, o.low, o.chg_prev, &o2);
 					INV(!memcmp(o2.prot, o.prot, sizeof(o.prot)) && !memcmp(o2.force, o.force, sizeof(o.force))
-						&& !memcmp(o2.low, o.low, sizeof(o.low))
-						&& o2.chg_prev == o.chg_prev, "D2 state fixed after one step");
+						&& !memcmp(o2.low, o.low, sizeof(o.low)) && o2.chg_prev == o.chg_prev,
+						"D2 state fixed after one step");
 				}
-	printf("\nD2 protection / mode: %ld consistent combinations (%d bank bit sets of 512, ^2 x 4 global bits x 128 states)\n",
-		   combos, nb);
-	printf("  mode reached (bank-cycles):");
+	/* coupling: random joint inputs, each bank as if alone */
+	srand(7);
+	long joint = 0;
+	for (int n = 0; n < 200000; n++) {
+		unsigned g;
+		do
+			g = rand() % 16;
+		while (BIT(g, 2) && !BIT(g, 3));
+		struct bm_d2_in b = {BIT(g, 0), BIT(g, 1), BIT(g, 2), BIT(g, 3), {banks[rand() % nb], banks[rand() % nb]}};
+		int prot[NBANK] = {rand() % 2, rand() % 2}, force[NBANK] = {rand() % 2, rand() % 2};
+		int low[NBANK] = {rand() % 2, rand() % 2}, cp = rand() % 2;
+		struct bm_d2_out o;
+		bm_d2(&b, prot, force, low, cp, &o);
+		joint++;
+		int any = 0;
+		for (int k = 0; k < NBANK; k++) {
+			struct bm_d2_in a = b;
+			int p1[NBANK] = {0}, f1[NBANK] = {0}, l1[NBANK] = {0};
+			struct bm_d2_out o1;
+			memset(&a.bank[!k], 0, sizeof(a.bank[!k]));
+			p1[k] = prot[k];
+			f1[k] = force[k];
+			l1[k] = low[k];
+			bm_d2(&a, p1, f1, l1, cp, &o1);
+			INV(o.mode[k] == o1.mode[k] && o.prot[k] == o1.prot[k] && o.force[k] == o1.force[k] && o.low[k] == o1.low[k]
+				&& o.charge_mode == o1.charge_mode, "a bank decides alone (no coupling but charge_mode / chg_prev)");
+			d2_bank_inv(&b, k, prot[k], force[k], low[k], &o);
+			any |= o.mode[k] == BM_M_CHARGE;
+		}
+		INV(o.chg_prev == any, "chg_prev = OR(mode == CHARGE)");
+	}
+	printf("\nD2 protection / mode per stack: %ld consistent combinations (%d bank bit sets of 512 x 12 global bits x 16"
+		   " states), both positions; coupling: %ld random joint inputs\n", combos, nb, joint);
+	printf("  mode reached (per stack):");
 	for (int m = 0; m < BM_M_N; m++)
 		printf(" %s %ld", BM_MODE_NAME[m], modes[m]);
 	putchar('\n');
