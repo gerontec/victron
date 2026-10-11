@@ -36,7 +36,7 @@ from gi.repository import GLib
 sys.path.insert(1, '/opt/victronenergy/dbus-systemcalc-py/ext/velib_python')
 from vedbus import VeDbusService  # noqa: E402
 
-VERSION = '1.2'
+VERSION = '1.3'
 # can-bus-bms (Speicher A on can0) registers as battery instance 512; 513 keeps the MQTT topics
 # N/<portal>/battery/<instance>/... of the two batteries apart
 DEVICE_INSTANCE = 513
@@ -71,8 +71,10 @@ class EboxBattery:
 
 	def register(self):
 		s = VeDbusService('com.victronenergy.battery.ebox', dbus.SystemBus(), register=False)
+		# productid 0xB004 = LG RESU: systemcalc's LgCircuitBreakerDetect then switched the VE.Bus to Mode 4 (off)
+		# whenever the EBox current was 0 and the Multi DC voltage differed > 10 % (2026-10-11 04:05:57). 0xBA77 = generic
 		s.add_mandatory_paths(__file__, VERSION, 'MQTT ' + MQTT_TOPIC, deviceinstance=DEVICE_INSTANCE,
-			productid=0xB004, productname='EBox LFP (via ebox_mqtt)', firmwareversion=VERSION,
+			productid=0xBA77, productname='EBox LFP (via ebox_mqtt)', firmwareversion=VERSION,
 			hardwareversion=None, connected=1)
 		s.add_path('/CustomName', 'EBox', writeable=True)
 		s.add_path('/Soc', None)
