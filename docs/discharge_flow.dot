@@ -19,7 +19,7 @@ digraph batmonitor {
 
 	gates [label=<<b>S0 gates</b> per bank (chain_gates)<br/>SoC from the BMS; caps per phase, one per bank:<br/>chg_cap = min(charger x U, BMS CCL)   dis_cap = min(DISCHARGE_MAX_PHASE, BMS DCL)>];
 
-	d2 [label=<<b>D2</b> bm_d2 per bank   state: prot, force, low, chg_prev<br/>first match: BMS_MISSING &gt; FORCE (force or low) &gt; STALE &gt; LADESPERRE &gt;<br/>CHARGE / FULL &gt; PROT &gt; CHARGING &gt; <b>DIS</b><br/><b>LOW</b> (0.52-c, state low): on at DCL &lt; DCL_FORCE_A 1 A or lowest cell &lt; CELL_FORCE_V 3.00 V,<br/>off when DCL is back and the cell &ge; CELL_FORCE_RELEASE_V 3.25 V; LOW -&gt; FORCE (charge, no discharge)<br/><font point-size="9">[CBMC h_d2_bits; threshold order needed: h_d2_bits_any_order]</font>>, fillcolor="#dbe8fb"];
+	d2 [label=<<b>D2</b> bm_d2 per bank   state: prot, force, low, chg_prev<br/>first match: BMS_MISSING &gt; FORCE (force or low) &gt; STALE &gt; LADESPERRE &gt;<br/>CHARGE / FULL &gt; PROT &gt; CHARGING &gt; <b>DIS</b><br/><b>LOW</b> (0.52-c, state low): on at DCL &lt; DCL_FORCE_A 1 A or lowest cell &lt; CELL_FORCE_V 3.00 V,<br/>off when DCL is back and the cell &ge; CELL_FORCE_RELEASE_V 3.25 V; LOW -&gt; FORCE (charge, no discharge)<br/><font point-size="9">make check: 16128 combinations per stack (84 bit sets x 12 global x 16 states) -&gt; mode:<br/>BMS_MISSING 8064 · FORCE 5184 · STALE 1440 · LADESPERRE 360 · PROT 324 ·<br/>CHARGE 288 · CHARGING 198 · DIS 198 · FULL 72</font><br/><font point-size="9">[CBMC h_d2_bits; threshold order needed: h_d2_bits_any_order]</font>>, fillcolor="#dbe8fb"];
 
 	lead [label=<<b>D-lead</b> bm_dlead   state: lead<br/>|SoC1 - SoC2| &gt; SOC_BALANCE_ON -&gt; the stack ahead leads<br/>&lt; SOC_BALANCE_OFF -&gt; no lead>, fillcolor="#dbe8fb"];
 

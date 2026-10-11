@@ -11,7 +11,7 @@ digraph control {
 	in [label=<<b>inputs</b> (bm_parse: only valid numbers, else stale)<br/>PCC, Sofar Bat1, PV, heat pump W, R290 Hz, BMS SoC / U / CCL / DCL / lowest cell, season, forecast>, fillcolor="#ffffff"];
 	d1 [label=<<b>D1</b> forecast, B1FIRST<br/>-&gt; S2 heat pump part (z2 = PCC + WP not covered)<br/>-&gt; S3 source DAY / B1 / STK / B1W>, fillcolor="#dbe8fb"];
 	gates [label=<<b>S0 caps</b> per stack: chg_cap, dis_cap (charger, BMS CCL / DCL)>];
-	d2 [label=<<b>D2 mode</b> per stack, first match:<br/>BMS_MISSING &gt; FORCE &gt; STALE &gt; LADESPERRE &gt; CHARGE / FULL &gt; PROT &gt; CHARGING &gt; DIS<br/>FORCE = SoC &lt; SOC_FORCE or LOW (DCL 0 / cell &lt; 3.00 V, 0.52-c)>, fillcolor="#dbe8fb"];
+	d2 [label=<<b>D2 mode</b> per stack, first match:<br/>BMS_MISSING &gt; FORCE &gt; STALE &gt; LADESPERRE &gt; CHARGE / FULL &gt; PROT &gt; CHARGING &gt; DIS<br/>FORCE = SoC &lt; SOC_FORCE or LOW (DCL 0 / cell &lt; 3.00 V, 0.52-c)<br/><font point-size="9">make check: 16128 combinations per stack (84 bit sets x 12 global x 16 states) -&gt; mode:<br/>BMS_MISSING 8064 · FORCE 5184 · STALE 1440 · LADESPERRE 360 · PROT 324 ·<br/>CHARGE 288 · CHARGING 198 · DIS 198 · FULL 72</font>>, fillcolor="#dbe8fb"];
 	lead [label=<<b>D-lead</b>: stack more than SOC_BALANCE_ON ahead>, fillcolor="#dbe8fb"];
 	mode [label=<<b>mode matrix</b> BM_MODE_RULE<br/>0 W | FORCE | charge | discharge>, fillcolor="#eaf6e6", shape=box];
 

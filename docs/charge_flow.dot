@@ -52,7 +52,7 @@ digraph charge {
 		d4 -> note_ls [style=dotted, arrowhead=none];
 	}
 
-	d2 [label=<<b>D2</b> bm_d2 per stack   state: prot, force, low, chg_prev<br/>charge_mode: surplus &gt; 200 W on, held while &gt; 20 W<br/>first match: BMS_MISSING &gt; FORCE (force or low) &gt; STALE &gt; LADESPERRE (charge_mode and block) &gt;<br/>CHARGE (SoC &lt; 100) / FULL &gt; PROT &gt; CHARGING &gt; DIS<br/><b>LOW</b> (0.52-c, state low): on at DCL &lt; DCL_FORCE_A 1 A or lowest cell &lt; CELL_FORCE_V 3.00 V,<br/>off when DCL is back and the cell &ge; CELL_FORCE_RELEASE_V 3.25 V; LOW -&gt; FORCE (charge, no discharge)<br/><font point-size="9">[make check, CBMC h_d2_bits]</font>>, fillcolor="#dbe8fb"];
+	d2 [label=<<b>D2</b> bm_d2 per stack   state: prot, force, low, chg_prev<br/>charge_mode: surplus &gt; 200 W on, held while &gt; 20 W<br/>first match: BMS_MISSING &gt; FORCE (force or low) &gt; STALE &gt; LADESPERRE (charge_mode and block) &gt;<br/>CHARGE (SoC &lt; 100) / FULL &gt; PROT &gt; CHARGING &gt; DIS<br/><b>LOW</b> (0.52-c, state low): on at DCL &lt; DCL_FORCE_A 1 A or lowest cell &lt; CELL_FORCE_V 3.00 V,<br/>off when DCL is back and the cell &ge; CELL_FORCE_RELEASE_V 3.25 V; LOW -&gt; FORCE (charge, no discharge)<br/><font point-size="9">[make check, CBMC h_d2_bits]</font><br/><font point-size="9">make check: 16128 combinations per stack (84 bit sets x 12 global x 16 states) -&gt; mode:<br/>BMS_MISSING 8064 · FORCE 5184 · STALE 1440 · LADESPERRE 360 · PROT 324 ·<br/>CHARGE 288 · CHARGING 198 · DIS 198 · FULL 72</font>>, fillcolor="#dbe8fb"];
 
 	subgraph cluster_mode {
 		label=<<b>mode matrix</b> BM_MODE_RULE[mode] (0.48-c): what each mode means for the setpoint>;
