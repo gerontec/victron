@@ -3,15 +3,15 @@
 // render: dot -Tpdf control_flow.dot -o control_flow.pdf   (or -Tpng)
 digraph control {
 	graph [rankdir=TB, fontname="Helvetica", fontsize=11, nodesep=0.5, ranksep=0.4, newrank=true,
-		   label="batmonitor 0.51-c: one cycle every 5 s   |   blue = decision (bits + state, make check)   |   green = matrix / amount   |   details: charge_flow.pdf, discharge_flow.pdf",
+		   label="batmonitor 0.52-c: one cycle every 5 s   |   blue = decision (bits + state, make check)   |   green = matrix / amount   |   details: charge_flow.pdf, discharge_flow.pdf",
 		   labelloc=t];
 	node [shape=box, style="rounded,filled", fillcolor="#f4f4f4", fontname="Helvetica", fontsize=10];
 	edge [fontname="Helvetica", fontsize=9];
 
-	in [label=<<b>inputs</b> (bm_parse: only valid numbers, else stale)<br/>PCC, Sofar Bat1, PV, heat pump W, R290 Hz, BMS SoC / U / CCL / DCL, season, forecast>, fillcolor="#ffffff"];
+	in [label=<<b>inputs</b> (bm_parse: only valid numbers, else stale)<br/>PCC, Sofar Bat1, PV, heat pump W, R290 Hz, BMS SoC / U / CCL / DCL / lowest cell, season, forecast>, fillcolor="#ffffff"];
 	d1 [label=<<b>D1</b> forecast, B1FIRST<br/>-&gt; S2 heat pump part (z2 = PCC + WP not covered)<br/>-&gt; S3 source DAY / B1 / STK / B1W>, fillcolor="#dbe8fb"];
 	gates [label=<<b>S0 caps</b> per stack: chg_cap, dis_cap (charger, BMS CCL / DCL)>];
-	d2 [label=<<b>D2 mode</b> per stack, first match:<br/>BMS_MISSING &gt; FORCE &gt; STALE &gt; LADESPERRE &gt; CHARGE / FULL &gt; PROT &gt; CHARGING &gt; DIS>, fillcolor="#dbe8fb"];
+	d2 [label=<<b>D2 mode</b> per stack, first match:<br/>BMS_MISSING &gt; FORCE &gt; STALE &gt; LADESPERRE &gt; CHARGE / FULL &gt; PROT &gt; CHARGING &gt; DIS<br/>FORCE = SoC &lt; SOC_FORCE or LOW (DCL 0 / cell &lt; 3.00 V, 0.52-c)>, fillcolor="#dbe8fb"];
 	lead [label=<<b>D-lead</b>: stack more than SOC_BALANCE_ON ahead>, fillcolor="#dbe8fb"];
 	mode [label=<<b>mode matrix</b> BM_MODE_RULE<br/>0 W | FORCE | charge | discharge>, fillcolor="#eaf6e6", shape=box];
 

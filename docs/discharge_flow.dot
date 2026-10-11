@@ -2,12 +2,12 @@
 // render: dot -Tpdf discharge_flow.dot -o discharge_flow.pdf   (or -Tpng)
 digraph batmonitor {
 	graph [rankdir=TB, fontname="Helvetica", fontsize=11, nodesep=0.35, ranksep=0.35, newrank=true,
-		   label="batmonitor 0.48-c: one cycle (bm_step, every 5 s)   |   blue = pure decision function (bits + state, enumerated by make check)   |   green = discharge matrix   |   [CBMC] = proved for all inputs",
+		   label="batmonitor 0.52-c: one cycle (bm_step, every 5 s)   |   blue = pure decision function (bits + state, enumerated by make check)   |   green = discharge matrix   |   [CBMC] = proved for all inputs",
 		   labelloc=t];
 	node [shape=box, style="rounded,filled", fillcolor="#f4f4f4", fontname="Helvetica", fontsize=10];
 	edge [fontname="Helvetica", fontsize=9];
 
-	in [label=<<b>inputs</b> (chain_inputs)<br/>PCC, Sofar Bat1 W + SoC, em0 WP W, R290 Hz, PV,<br/>BMS SoC / U / CCL / DCL, season, forecast<br/>-&gt; stale, wp_fresh, wp_on (&ge; WP_ON_TH), night (PV &lt; NIGHT_PV_TH)>, fillcolor="#ffffff"];
+	in [label=<<b>inputs</b> (chain_inputs)<br/>PCC, Sofar Bat1 W + SoC, em0 WP W, R290 Hz, PV,<br/>BMS SoC / U / CCL / DCL / lowest cell (0.52-c), season, forecast<br/>-&gt; stale, wp_fresh, wp_on (&ge; WP_ON_TH), night (PV &lt; NIGHT_PV_TH)>, fillcolor="#ffffff"];
 
 	d1 [label=<<b>D1</b> bm_d1   state: fc_active, bat1_first<br/>FC_ACTIVE: lowest SoC &gt; target + FC_HYST (off &lt; target)<br/>FC_BAD: target &ge; FC_BAD_TARGET<br/>B1FIRST: Bat1 SoC &gt; BAT1_SOC_MIN (on from +2 %) and WP on<br/><font point-size="9">[CBMC h_d1_bits]</font>>, fillcolor="#dbe8fb"];
 
@@ -19,12 +19,12 @@ digraph batmonitor {
 
 	gates [label=<<b>S0 gates</b> per bank (chain_gates)<br/>SoC from the BMS; caps per phase, one per bank:<br/>chg_cap = min(charger x U, BMS CCL)   dis_cap = min(DISCHARGE_MAX_PHASE, BMS DCL)>];
 
-	d2 [label=<<b>D2</b> bm_d2 per bank   state: prot, force, chg_prev<br/>first match: BMS_MISSING &gt; FORCE &gt; STALE &gt; LADESPERRE &gt;<br/>CHARGE / FULL &gt; PROT &gt; CHARGING &gt; <b>DIS</b><br/><font point-size="9">[CBMC h_d2_bits; threshold order needed: h_d2_bits_any_order]</font>>, fillcolor="#dbe8fb"];
+	d2 [label=<<b>D2</b> bm_d2 per bank   state: prot, force, low, chg_prev<br/>first match: BMS_MISSING &gt; FORCE (force or low) &gt; STALE &gt; LADESPERRE &gt;<br/>CHARGE / FULL &gt; PROT &gt; CHARGING &gt; <b>DIS</b><br/><b>LOW</b> (0.52-c, state low): on at DCL &lt; DCL_FORCE_A 1 A or lowest cell &lt; CELL_FORCE_V 3.00 V,<br/>off when DCL is back and the cell &ge; CELL_FORCE_RELEASE_V 3.25 V; LOW -&gt; FORCE (charge, no discharge)<br/><font point-size="9">[CBMC h_d2_bits; threshold order needed: h_d2_bits_any_order]</font>>, fillcolor="#dbe8fb"];
 
 	lead [label=<<b>D-lead</b> bm_dlead   state: lead<br/>|SoC1 - SoC2| &gt; SOC_BALANCE_ON -&gt; the stack ahead leads<br/>&lt; SOC_BALANCE_OFF -&gt; no lead>, fillcolor="#dbe8fb"];
 
 	modesplit [label="mode per phase", shape=diamond, fillcolor="#ffffff"];
-	other [label=<BMS_MISSING / FORCE / STALE / LADESPERRE /<br/>FULL / PROT / CHARGING<br/>-&gt; fixed setpoint (0, force charge, ...)>];
+	other [label=<BMS_MISSING / FORCE / STALE / LADESPERRE /<br/>FULL / PROT / CHARGING<br/>-&gt; fixed setpoint (0, force charge incl. LOW, ...)>];
 
 	subgraph cluster_dis {
 		label=<<b>discharge matrix</b> (0.45-c, whole watts)>; style="rounded,filled"; fillcolor="#eaf6e6"; color="#5a9e4b"; fontsize=11;

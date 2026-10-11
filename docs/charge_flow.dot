@@ -1,9 +1,9 @@
-// batmonitor 0.51-c: charge path of one cycle as decision matrices, with the summer peak window (D4 LADESPERRE)
+// batmonitor 0.52-c: charge path of one cycle as decision matrices, with the summer peak window (D4 LADESPERRE)
 // that keeps the stacks free in the morning so they take the midday PV and the PCC export stays below 20 kW.
 // render: dot -Tpdf charge_flow.dot -o charge_flow.pdf   (or -Tpng)
 digraph charge {
 	graph [rankdir=TB, fontname="Helvetica", fontsize=11, nodesep=0.35, ranksep=0.35, newrank=true,
-		   label="batmonitor 0.51-c: charge path (every 5 s)   |   blue = pure decision function (bits + state, enumerated by make check)   |   green = matrix / amounts   |   [CBMC] = proved for all inputs",
+		   label="batmonitor 0.52-c: charge path (every 5 s)   |   blue = pure decision function (bits + state, enumerated by make check)   |   green = matrix / amounts   |   [CBMC] = proved for all inputs",
 		   labelloc=t];
 	node [shape=box, style="rounded,filled", fillcolor="#f4f4f4", fontname="Helvetica", fontsize=10];
 	edge [fontname="Helvetica", fontsize=9];
@@ -52,7 +52,7 @@ digraph charge {
 		d4 -> note_ls [style=dotted, arrowhead=none];
 	}
 
-	d2 [label=<<b>D2</b> bm_d2 per stack   state: prot, force, chg_prev<br/>charge_mode: surplus &gt; 200 W on, held while &gt; 20 W<br/>first match: BMS_MISSING &gt; FORCE &gt; STALE &gt; LADESPERRE (charge_mode and block) &gt;<br/>CHARGE (SoC &lt; 100) / FULL &gt; PROT &gt; CHARGING &gt; DIS<br/><font point-size="9">[make check, CBMC h_d2_bits]</font>>, fillcolor="#dbe8fb"];
+	d2 [label=<<b>D2</b> bm_d2 per stack   state: prot, force, low, chg_prev<br/>charge_mode: surplus &gt; 200 W on, held while &gt; 20 W<br/>first match: BMS_MISSING &gt; FORCE (force or low) &gt; STALE &gt; LADESPERRE (charge_mode and block) &gt;<br/>CHARGE (SoC &lt; 100) / FULL &gt; PROT &gt; CHARGING &gt; DIS<br/><b>LOW</b> (0.52-c, state low): on at DCL &lt; DCL_FORCE_A 1 A or lowest cell &lt; CELL_FORCE_V 3.00 V,<br/>off when DCL is back and the cell &ge; CELL_FORCE_RELEASE_V 3.25 V; LOW -&gt; FORCE (charge, no discharge)<br/><font point-size="9">[make check, CBMC h_d2_bits]</font>>, fillcolor="#dbe8fb"];
 
 	subgraph cluster_mode {
 		label=<<b>mode matrix</b> BM_MODE_RULE[mode] (0.48-c): what each mode means for the setpoint>;
@@ -61,7 +61,7 @@ digraph charge {
 			<table border="0" cellborder="1" cellspacing="0" cellpadding="3" bgcolor="#ffffff">
 			<tr><td><b>mode</b></td><td><b>action</b></td><td><b>capped</b></td><td><b>rule text</b></td></tr>
 			<tr><td>BMS_MISSING</td><td>0 W</td><td>-</td><td>NAME</td></tr>
-			<tr><td bgcolor="#cfe8c6">FORCE</td><td bgcolor="#cfe8c6">FORCE_CHARGE_W 500</td><td bgcolor="#cfe8c6"><b>1</b> (0.48-c)</td><td bgcolor="#cfe8c6">FORCE(soc %)</td></tr>
+			<tr><td bgcolor="#cfe8c6">FORCE</td><td bgcolor="#cfe8c6">FORCE_CHARGE_W 500</td><td bgcolor="#cfe8c6"><b>1</b> (0.48-c)</td><td bgcolor="#cfe8c6">FORCE(soc %) [LOW]</td></tr>
 			<tr><td>STALE</td><td>0 W</td><td>-</td><td>NAME</td></tr>
 			<tr><td bgcolor="#ffd09a">LADESPERRE</td><td bgcolor="#ffd09a">0 W</td><td bgcolor="#ffd09a">-</td><td bgcolor="#ffd09a">LADESPERRE(peak h)</td></tr>
 			<tr><td bgcolor="#cfe8c6">CHARGE</td><td bgcolor="#cfe8c6">charge amount</td><td bgcolor="#cfe8c6">1</td><td bgcolor="#cfe8c6">CHARGE WP: SRC:</td></tr>
@@ -97,7 +97,7 @@ digraph charge {
 			</table>>];
 	}
 
-	out [label=<<b>setpoints</b> per phase (+ = charge) -&gt; Multis<br/>rule text: CHARGE WP:.. SRC:.. BAL/EQ [CCL] | LADESPERRE(h) | FULL | FORCE(soc)>, fillcolor="#ffffff"];
+	out [label=<<b>setpoints</b> per phase (+ = charge) -&gt; Multis<br/>rule text: CHARGE WP:.. SRC:.. BAL/EQ [CCL] | LADESPERRE(h) | FULL | FORCE(soc) [LOW]>, fillcolor="#ffffff"];
 
 	timeline [shape=plain, label=<
 		<table border="0" cellborder="1" cellspacing="0" cellpadding="4" bgcolor="#ffffff">
