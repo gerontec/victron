@@ -16,7 +16,7 @@ Wall, left to right (serial of the middle unit checked on its type plate 2026-10
 - AC-in of the three units comes from a motorised 3-phase ATS; AC-out1 (UPS output) feeds the house
   sub-distribution busbar, one phase per unit.
 - VE.Bus battery monitor off on all units (2026-10-08); SoC comes only from the BMS (Stack1 CAN, Stack2 ebox reader).
-- ESS Hub4Mode 3 (external control by batmonitor; it sets 1 again when it stops), BatteryLife state 3.
+- ESS Hub4Mode 3 (external control by batmonitor; since 0.53-c it stays 3 when batmonitor stops: setpoints 0 only), BatteryLife state 3.
 - AC input current limit 35 A (L1 read back from the device; L2/L3 not read back yet).
 - Per-unit settings: private repo gerontec/victron-backup, `dev0.conf` .. `dev2.conf`.
 

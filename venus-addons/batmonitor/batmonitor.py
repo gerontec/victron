@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bm_logic as L  # noqa: E402
 import bm_parse  # noqa: E402
 
-VERSION = "0.52-py"
+VERSION = "0.53-py"
 INVERTER_TOPIC = "inverter/power_grid_exchange/json"
 R290_TOPIC = "r290/heatpump/all"
 AUSSEN_TOPIC = "aussen/temp"
@@ -487,8 +487,8 @@ class Batmonitor:
         if vb:
             for p in range(L.NPH):
                 self.set_int(vb, "/Hub4/%s/AcPowerSetpoint" % L.BM_PH[p], 0)
-        self.set_int("com.victronenergy.settings", "/Settings/CGwacs/Hub4Mode", 1)
-        log("stopped%s" % (", back to Hub4Mode 1" if self.live else ""))
+        # stays in Hub4Mode 3 (0.53): Hub4Mode 1 on stop handed every restart to Victron's ESS (2026-10-11 08:26:35)
+        log("stopped, setpoints 0, Hub4Mode stays 3")
 
     def run(self):
         log("batmonitor %s %s, cycle %d s, banks STACK1_MUST=L1, STACK2_PYTES=L2+L3, charge block %s, PI %s" % (

@@ -77,7 +77,7 @@
 #include "bm_logic.h"
 #include "bm_parse.h"
 
-#define VERSION "0.52-c"
+#define VERSION "0.53-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
@@ -796,8 +796,10 @@ static void stop_control(void)
 			snprintf(path, sizeof(path), "/Hub4/%s/AcPowerSetpoint", BM_PH[p]);
 			set_int(vb, path, 0);
 		}
-	set_int("com.victronenergy.settings", "/Settings/CGwacs/Hub4Mode", 1);
-	LOG("stopped%s", LIVE ? ", back to Hub4Mode 1" : "");
+	/* stays in Hub4Mode 3 (0.53-c): until 0.52-c it wrote Hub4Mode 1 here, so every restart handed the system to
+	   Victron's own ESS for seconds; 2026-10-11 08:26:35 (Pytes 5.3 % < BatteryLife 10 %) the Multis then charged
+	   at their maximum and ignored the Hub4 setpoints. Setpoints 0 = the Multis pass through, nothing else */
+	LOG("stopped, setpoints 0, Hub4Mode stays 3");
 }
 
 static void on_signal(int sig)
