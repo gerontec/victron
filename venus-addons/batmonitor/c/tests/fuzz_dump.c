@@ -61,6 +61,11 @@ int main(int argc, char **argv)
 				in.power_ok[b] = ri(10) != 0; in.power[b] = r(-6000, 6000);
 				in.volt_ok[b] = ri(5) != 0; in.volt[b] = r(48, 57);
 				in.lim_ok[b] = ri(2); in.ccl[b] = r(0, 150); in.dcl[b] = r(0, 250);
+				/* 0.52-c: lowest cell and DCL 0 for LOW (deterministic, no rand: older revisions see the same inputs) */
+				in.cell_ok[b] = (run + k + b) % 4 != 0;
+				in.cell_min[b] = 2.9 + 0.05 * ((run * 7 + k / 3 + b) % 9);
+				if ((run + b) % 6 == 2 && k >= 40 && k < 70)
+					in.dcl[b] = 0;
 			}
 			if (io) {
 				printf("IN %d %d %d %d %.17g %lld %d %d %.17g %.17g %.17g %.17g %.17g %.17g %d %.17g %d %.17g %.17g %.17g "
@@ -71,8 +76,9 @@ int main(int argc, char **argv)
 				for (int p = 0; p < NPH; p++)
 					printf(" %d %.17g", in.ac_ok[p], in.ac_in[p]);
 				for (int b = 0; b < NBANK; b++)
-					printf(" %d %.17g %d %.17g %d %.17g %d %.17g %.17g", in.bms_ok[b], in.soc[b], in.power_ok[b],
-						   in.power[b], in.volt_ok[b], in.volt[b], in.lim_ok[b], in.ccl[b], in.dcl[b]);
+					printf(" %d %.17g %d %.17g %d %.17g %d %.17g %.17g %d %.17g", in.bms_ok[b], in.soc[b], in.power_ok[b],
+						   in.power[b], in.volt_ok[b], in.volt[b], in.lim_ok[b], in.ccl[b], in.dcl[b], in.cell_ok[b],
+						   in.cell_min[b]);
 				printf(" %d", in.grid_ok);
 				for (int p = 0; p < NPH; p++)
 					printf(" %d %.17g", in.ac_out_ok[p], in.ac_out[p]);

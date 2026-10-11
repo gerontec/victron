@@ -89,6 +89,9 @@ const struct bm_param BM_PARAMS[] = {
 	{"SOC_FORCE",             P(soc_force),                 3,       0,       30,      "%", "grid force charge below"},
 	{"SOC_FORCE_RELEASE",     P(soc_force_release),         5,       0,       40,      "%", "force charge until"},
 	{"FORCE_CHARGE_W",        P(force_charge_w),            500,     0,       4000,    "W", "force charge per phase"},
+	{"DCL_FORCE_A",           P(dcl_force_a),               1,       0,       50,      "A", "force charge (LOW) while the BMS discharge limit is below this, no discharge (0 = off)"},
+	{"CELL_FORCE_V",          P(cell_force_v),              3.0,     0,       3.4,     "V", "force charge (LOW) while the lowest cell is below this, no discharge (0 = off)"},
+	{"CELL_FORCE_RELEASE_V",  P(cell_force_release_v),      3.25,    0,       3.5,     "V", "LOW ends once the lowest cell is at least this and DCL is back"},
 	{"SOC_BALANCE_ON",        P(soc_balance_on),            3,       0.5,     50,      "%", "SoC difference that starts balancing"},
 	{"SOC_BALANCE_OFF",       P(soc_balance_off),           1,       0,       50,      "%", "balancing ends below"},
 	{"SOYO_TARGET",           P(soyo_target),               0,       -500,    500,     "W", "PCC target (+ = export)"},
@@ -505,8 +508,11 @@ void bm_d1(const struct bm_d1_in *b, int fc_active, int bat1_first, struct bm_d1
 
 /* D2. Per bank: SoC protection and force charge with hysteresis (only while the BMS reports), then the mode, first
    match: BMS_MISSING > FORCE > STALE > LADESPERRE > CHARGE / FULL > PROT > CHARGING > DIS. Charge mode on the Z2
-   surplus, held down to SOYO_HOLD_TH once charging */
-void bm_d2(const struct bm_d2_in *b, const int *prot, const int *force, int chg_prev, struct bm_d2_out *o)
+   surplus, held down to SOYO_HOLD_TH once charging. LOW (0.52-c, after 2026-10-11 04:07: the MUST BMS sent DCL 0 at
+   10 % SoC / 3.0 V and switched itself off, the SoC force charge never started): DCL 0 or the lowest cell below
+   CELL_FORCE_V force charge too and stop the discharge at once, until DCL is back and the cell has recovered */
+void bm_d2(const struct bm_d2_in *b, const int *prot, const int *force, const int *low, int chg_prev,
+		   struct bm_d2_out *o)
 {
 	memset(o, 0, sizeof(*o));
 	o->charge_mode = b->surplus_gt_on || (chg_prev && b->surplus_gt_hold);
@@ -514,6 +520,7 @@ void bm_d2(const struct bm_d2_in *b, const int *prot, const int *force, int chg_
 		const struct bm_d2_bank *x = &b->bank[k];
 		o->prot[k] = prot[k];
 		o->force[k] = force[k];
+		o->low[k] = low[k];
 		if (x->bms_ok) {
 			if (x->soc_lt_min)
 				o->prot[k] = 1;
@@ -523,8 +530,12 @@ void bm_d2(const struct bm_d2_in *b, const int *prot, const int *force, int chg_
 				o->force[k] = 1;
 			else if (x->soc_ge_force_release)
 				o->force[k] = 0;
+			if (x->low_on)
+				o->low[k] = 1;
+			else if (x->low_off)
+				o->low[k] = 0;
 		}
-		o->mode[k] = !x->bms_ok ? BM_M_BMS_MISSING : o->force[k] ? BM_M_FORCE : b->stale ? BM_M_STALE
+		o->mode[k] = !x->bms_ok ? BM_M_BMS_MISSING : o->force[k] || o->low[k] ? BM_M_FORCE : b->stale ? BM_M_STALE
 					 : o->charge_mode && b->block ? BM_M_LADESPERRE
 					 : o->charge_mode ? (x->soc_lt_100 ? BM_M_CHARGE : BM_M_FULL)
 					 : o->prot[k] ? BM_M_PROT : x->charging ? BM_M_CHARGING : BM_M_DIS;
@@ -758,9 +769,10 @@ static void chain_gates(const struct bm_cfg *cfg, const struct bm_in *in, struct
 }
 
 /* the per-bank predicates of bm_d2 (tests/cbmc_harness.c proves the constraints check_matrix assumes) */
-static void d2_bank_bits(const struct bm_cfg *cfg, int soc_ok, double soc, int power_ok, double power,
-						 struct bm_d2_bank *x)
+static void d2_bank_bits(const struct bm_cfg *cfg, int soc_ok, double soc, int power_ok, double power, int lim_ok,
+						 double dcl, int cell_ok, double cell_min, struct bm_d2_bank *x)
 {
+	int dcl_zero = lim_ok && dcl < cfg->dcl_force_a;
 	x->bms_ok = soc_ok;
 	x->soc_lt_min = soc < cfg->soc_min;
 	x->soc_ge_release = soc >= cfg->soc_min_release;
@@ -768,6 +780,8 @@ static void d2_bank_bits(const struct bm_cfg *cfg, int soc_ok, double soc, int p
 	x->soc_ge_force_release = soc >= cfg->soc_force_release;
 	x->soc_lt_100 = soc < 100.0;
 	x->charging = power_ok && power > CHARGING_TH;
+	x->low_on = dcl_zero || (cell_ok && cell_min < cfg->cell_force_v);
+	x->low_off = !dcl_zero && (!cell_ok || cell_min >= cfg->cell_force_release_v);
 }
 
 /* S1: charge or discharge, then per phase the first matching state */
@@ -794,10 +808,12 @@ static void chain_mode(const struct bm_cfg *cfg, const struct bm_in *in, struct 
 	d.surplus_gt_on = c->surplus > PCC_SURPLUS_TH;
 	d.surplus_gt_hold = c->surplus > SOYO_HOLD_TH;
 	for (int b = 0; b < NBANK; b++)
-		d2_bank_bits(cfg, st->soc_ok[b], st->soc[b], in->power_ok[b], in->power[b], &d.bank[b]);
-	bm_d2(&d, st->prot, st->force, st->soyo_chg_prev, &o);
+		d2_bank_bits(cfg, st->soc_ok[b], st->soc[b], in->power_ok[b], in->power[b], in->lim_ok[b], in->dcl[b],
+					 in->cell_ok[b], in->cell_min[b], &d.bank[b]);
+	bm_d2(&d, st->prot, st->force, st->low, st->soyo_chg_prev, &o);
 	memcpy(st->prot, o.prot, sizeof(st->prot));
 	memcpy(st->force, o.force, sizeof(st->force));
+	memcpy(st->low, o.low, sizeof(st->low));
 	c->charge_mode = o.charge_mode;
 	for (int b = 0; b < NBANK; b++)
 		for (int i = 0; i < BM_BANKS[b].nph; i++) {
@@ -830,6 +846,8 @@ static void chain_mode(const struct bm_cfg *cfg, const struct bm_in *in, struct 
 				snprintf(why[p], WHY_LEN, "%s WP:%s SRC:%s", name, out->wp_why, out->src_why);
 				break;
 			}
+			if (o.mode[b] == BM_M_FORCE && st->low[b])
+				strncat(why[p], " LOW", WHY_LEN - 1 - strlen(why[p]));
 		}
 }
 
@@ -921,7 +939,7 @@ static void chain_pi(const struct bm_cfg *cfg, const struct bm_in *in, struct bm
 	for (int b = 0; b < NBANK; b++)                    /* own gates (the soyo ones depend on its fixed thresholds) */
 		for (int i = 0; i < BM_BANKS[b].nph; i++) {
 			int p = BM_BANKS[b].ph[i];
-			if (!st->soc_ok[b] || st->force[b] || c->stale)
+			if (!st->soc_ok[b] || st->force[b] || st->low[b] || c->stale)
 				continue;
 			pi_ok[p] = 1;
 			if (!c->block && st->soc[b] < 100.0) {

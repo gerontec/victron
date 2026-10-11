@@ -77,7 +77,7 @@
 #include "bm_logic.h"
 #include "bm_parse.h"
 
-#define VERSION "0.51-c"
+#define VERSION "0.52-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
@@ -500,6 +500,9 @@ static void write_state(const int *sp, char why[][WHY_LEN], double surplus)
 	o = cJSON_AddObjectToObject(js, "force");
 	for (int b = 0; b < NBANK; b++)
 		cJSON_AddNumberToObject(o, BM_BANKS[b].name, st.force[b]);
+	o = cJSON_AddObjectToObject(js, "low");                    /* 0.52-c: LOW force charge (DCL 0 / cell low) */
+	for (int b = 0; b < NBANK; b++)
+		cJSON_AddNumberToObject(o, BM_BANKS[b].name, st.low[b]);
 	o = cJSON_AddObjectToObject(js, "forecast");
 	for (int b = 0; b < NBANK; b++) {
 		int has;
@@ -687,6 +690,8 @@ static void calc(void)
 		in.volt_ok[b] = get(s, "/Dc/0/Voltage", &in.volt[b]) == 0;
 		in.lim_ok[b] = get(s, "/Info/MaxChargeCurrent", &in.ccl[b]) == 0 && in.ccl[b] >= 0 &&
 					   get(s, "/Info/MaxDischargeCurrent", &in.dcl[b]) == 0 && in.dcl[b] >= 0;
+		in.cell_ok[b] = get(s, "/System/MinCellVoltage", &in.cell_min[b]) == 0 && in.cell_min[b] > 1.5 &&
+						in.cell_min[b] < 4.5;     /* 0.52-c: LOW force charge */
 	}
 
 	bm_step(&cfg, &in, &st, &o_);

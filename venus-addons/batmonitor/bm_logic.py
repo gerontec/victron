@@ -170,6 +170,9 @@ BM_PARAMS = [
     Param("SOC_FORCE", "soc_force", 3, 0, 30, "%", "grid force charge below"),
     Param("SOC_FORCE_RELEASE", "soc_force_release", 5, 0, 40, "%", "force charge until"),
     Param("FORCE_CHARGE_W", "force_charge_w", 500, 0, 4000, "W", "force charge per phase"),
+    Param("DCL_FORCE_A", "dcl_force_a", 1, 0, 50, "A", "force charge (LOW) while the BMS discharge limit is below this, no discharge (0 = off)"),
+    Param("CELL_FORCE_V", "cell_force_v", 3.0, 0, 3.4, "V", "force charge (LOW) while the lowest cell is below this, no discharge (0 = off)"),
+    Param("CELL_FORCE_RELEASE_V", "cell_force_release_v", 3.25, 0, 3.5, "V", "LOW ends once the lowest cell is at least this and DCL is back"),
     Param("SOC_BALANCE_ON", "soc_balance_on", 3, 0.5, 50, "%", "SoC difference that starts balancing"),
     Param("SOC_BALANCE_OFF", "soc_balance_off", 1, 0, 50, "%", "balancing ends below"),
     Param("SOYO_TARGET", "soyo_target", 0, -500, 500, "W", "PCC target (+ = export)"),
@@ -250,6 +253,8 @@ class In:
     lim_ok: list = field(default_factory=lambda: [0] * NBANK)    # the BMS sends CCL / DCL
     ccl: list = field(default_factory=lambda: [0.0] * NBANK)     # A DC
     dcl: list = field(default_factory=lambda: [0.0] * NBANK)
+    cell_ok: list = field(default_factory=lambda: [0] * NBANK)
+    cell_min: list = field(default_factory=lambda: [0.0] * NBANK)  # BMS /System/MinCellVoltage V (0.52-c)
 
 
 @dataclass
@@ -257,6 +262,7 @@ class State:
     """bm_state: what survives from cycle to cycle"""
     prot: list = field(default_factory=lambda: [0] * NBANK)
     force: list = field(default_factory=lambda: [0] * NBANK)
+    low: list = field(default_factory=lambda: [0] * NBANK)       # LOW force charge latched (0.52-c)
     soc_ok: list = field(default_factory=lambda: [0] * NBANK)
     soc: list = field(default_factory=lambda: [0.0] * NBANK)
     lead: int = -1                              # bank more than SOC_BALANCE_ON ahead, -1 = none
@@ -593,12 +599,14 @@ def bm_d1(b, fc_active, bat1_first):
     return o
 
 
-def bm_d2(b, prot, force, chg_prev):
+def bm_d2(b, prot, force, low, chg_prev):
     """D2. Per bank: SoC protection and force charge with hysteresis (only while the BMS reports), then the mode, first
     match: BMS_MISSING > FORCE > STALE > LADESPERRE > CHARGE / FULL > PROT > CHARGING > DIS. Charge mode on the Z2
-    surplus, held down to SOYO_HOLD_TH once charging. Returns (prot, force, chg_prev, charge_mode, mode per bank)."""
+    surplus, held down to SOYO_HOLD_TH once charging. LOW (0.52-c): DCL 0 or the lowest cell below CELL_FORCE_V force
+    charge too and stop the discharge, until DCL is back and the cell has recovered.
+    Returns (prot, force, low, chg_prev, charge_mode, mode per bank)."""
     charge_mode = bool(b["surplus_gt_on"] or (chg_prev and b["surplus_gt_hold"]))
-    prot, force, mode, chg_next = list(prot), list(force), [0] * NBANK, 0
+    prot, force, low, mode, chg_next = list(prot), list(force), list(low), [0] * NBANK, 0
     for k in range(NBANK):
         x = b["bank"][k]
         if x["bms_ok"]:
@@ -610,9 +618,13 @@ def bm_d2(b, prot, force, chg_prev):
                 force[k] = 1
             elif x["soc_ge_force_release"]:
                 force[k] = 0
+            if x["low_on"]:
+                low[k] = 1
+            elif x["low_off"]:
+                low[k] = 0
         if not x["bms_ok"]:
             mode[k] = BM_M_BMS_MISSING
-        elif force[k]:
+        elif force[k] or low[k]:
             mode[k] = BM_M_FORCE
         elif b["stale"]:
             mode[k] = BM_M_STALE
@@ -628,7 +640,7 @@ def bm_d2(b, prot, force, chg_prev):
             mode[k] = BM_M_DIS
         if mode[k] == BM_M_CHARGE:
             chg_next = 1
-    return prot, force, chg_next, charge_mode, mode
+    return prot, force, low, chg_next, charge_mode, mode
 
 
 def bm_dlead(both_ok, diff_gt_on, diff_lt_off, first_ahead, lead):
@@ -802,7 +814,8 @@ def chain_gates(cfg, inp, st, out):
             out.dis_cap[p] = d
 
 
-def d2_bank_bits(cfg, soc_ok, soc, power_ok, power):
+def d2_bank_bits(cfg, soc_ok, soc, power_ok, power, lim_ok, dcl, cell_ok, cell_min):
+    dcl_zero = bool(lim_ok and dcl < cfg.dcl_force_a)
     return {
         "bms_ok": soc_ok,
         "soc_lt_min": soc < cfg.soc_min,
@@ -811,6 +824,8 @@ def d2_bank_bits(cfg, soc_ok, soc, power_ok, power):
         "soc_ge_force_release": soc >= cfg.soc_force_release,
         "soc_lt_100": soc < 100.0,
         "charging": bool(power_ok and power > CHARGING_TH),
+        "low_on": bool(dcl_zero or (cell_ok and cell_min < cfg.cell_force_v)),
+        "low_off": bool(not dcl_zero and (not cell_ok or cell_min >= cfg.cell_force_release_v)),
     }
 
 
@@ -885,9 +900,10 @@ def chain_mode(cfg, inp, st, out, c):
         "block": c.block,
         "surplus_gt_on": c.surplus > PCC_SURPLUS_TH,
         "surplus_gt_hold": c.surplus > SOYO_HOLD_TH,
-        "bank": [d2_bank_bits(cfg, st.soc_ok[b], st.soc[b], inp.power_ok[b], inp.power[b]) for b in range(NBANK)],
+        "bank": [d2_bank_bits(cfg, st.soc_ok[b], st.soc[b], inp.power_ok[b], inp.power[b], inp.lim_ok[b], inp.dcl[b],
+                              inp.cell_ok[b], inp.cell_min[b]) for b in range(NBANK)],
     }
-    st.prot, st.force, _, c.charge_mode, mode = bm_d2(d, st.prot, st.force, st.soyo_chg_prev)
+    st.prot, st.force, st.low, _, c.charge_mode, mode = bm_d2(d, st.prot, st.force, st.low, st.soyo_chg_prev)
     for b, bank in enumerate(BM_BANKS):
         r = BM_MODE_RULE[mode[b]]
         name = BM_MODE_NAME[mode[b]]
@@ -912,6 +928,8 @@ def chain_mode(cfg, inp, st, out, c):
                 out.why[p] = "%s(%.0fW)" % (name, inp.power[b])
             elif r.why == BM_W_CHAIN:
                 out.why[p] = "%s WP:%s SRC:%s" % (name, out.wp_why, out.src_why)
+            if mode[b] == BM_M_FORCE and st.low[b]:
+                out.why[p] += " LOW"
 
 
 def chain_lead(cfg, st, out):
@@ -978,7 +996,7 @@ def chain_pi(cfg, inp, st, out, c):
     n_pichg = n_pidis = 0
     for b, bank in enumerate(BM_BANKS):
         for p in bank.phases:
-            if not st.soc_ok[b] or st.force[b] or c.stale:
+            if not st.soc_ok[b] or st.force[b] or st.low[b] or c.stale:
                 continue
             pi_ok[p] = 1
             if not c.block and st.soc[b] < 100.0:

@@ -66,13 +66,20 @@ static void d2_bits_props(int valid_order)
 	struct bm_cfg c;
 	struct bm_d2_bank x;
 	soc_thresholds(&c, valid_order);
-	d2_bank_bits(&c, 1, in_range(0, 100), bit(), in_range(-20000, 20000), &x);
+	c.dcl_force_a = in_range(0, 50);
+	c.cell_force_v = in_range(0, 3.4);
+	c.cell_force_release_v = in_range(0, 3.5);
+	if (valid_order)
+		__CPROVER_assume(c.cell_force_v <= c.cell_force_release_v);
+	d2_bank_bits(&c, 1, in_range(0, 100), bit(), in_range(-20000, 20000), bit(), in_range(0, 600), bit(),
+				 in_range(0, 4.5), &x);
 	assert(!x.soc_lt_force || x.soc_lt_min);
 	assert(!(x.soc_lt_min && x.soc_ge_release));
 	assert(!(x.soc_lt_force && x.soc_ge_force_release));
 	assert(!x.soc_ge_release || x.soc_ge_force_release);
 	assert(!x.soc_lt_min || x.soc_lt_100);
 	assert(x.soc_lt_100 || x.soc_ge_release);
+	assert(!(x.low_on && x.low_off));
 }
 
 void h_d2_bits(void) { d2_bits_props(1); }

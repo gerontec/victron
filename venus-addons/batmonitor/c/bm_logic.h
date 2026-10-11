@@ -37,6 +37,7 @@ struct bm_cfg {
 	double w_max, discharge_max_phase, charge_max_phase, charger_cap_phase;
 	double wp_bat_max_transition, wp_cap;
 	double soc_min, soc_min_release, soc_force, soc_force_release, force_charge_w;
+	double dcl_force_a, cell_force_v, cell_force_release_v;   /* LOW force charge: BMS DCL / lowest cell (0.52-c) */
 	double soc_balance_on, soc_balance_off;
 	double soyo_target;
 	double fc_hyst;
@@ -98,6 +99,8 @@ struct bm_in {
 	double volt[NBANK];                                     /* BMS /Dc/0/Voltage */
 	int lim_ok[NBANK];                                      /* the BMS sends /Info/MaxCharge/DischargeCurrent */
 	double ccl[NBANK], dcl[NBANK];                          /* A DC (CAN 0x351 of the MUST: 100 A, tapering to 0 near full) */
+	int cell_ok[NBANK];
+	double cell_min[NBANK];                                 /* BMS /System/MinCellVoltage V (0.52-c) */
 };
 
 struct bm_ls { int active, cap, peak_h, win_end_h; double dc, ratio, ratio_now, noon_h; };   /* active = waiting below the cap */
@@ -106,6 +109,7 @@ struct bm_pi { double y, e, applied, u, u_min, u_max; int sp[NPH]; };
 /* what survives from cycle to cycle */
 struct bm_state {
 	int prot[NBANK], force[NBANK], soc_ok[NBANK];
+	int low[NBANK];                              /* LOW force charge latched: DCL 0 or lowest cell low (0.52-c) */
 	double soc[NBANK];
 	int lead;                                    /* bank more than SOC_BALANCE_ON ahead, -1 = none */
 	int soyo_chg_prev, soyo_prop_prev;
@@ -198,13 +202,16 @@ struct bm_d1_out {
 };
 void bm_d1(const struct bm_d1_in *b, int fc_active, int bat1_first, struct bm_d1_out *o);
 
-/* D2: S0 SoC protection / force charge per bank and the S1 mode per bank. State: prot[], force[], chg_prev */
+/* D2: S0 SoC protection / force charge per bank and the S1 mode per bank. State: prot[], force[], low[], chg_prev */
 struct bm_d2_bank {
 	int bms_ok;
 	int soc_lt_min, soc_ge_release;              /* SoC < SOC_MIN / >= SOC_MIN_RELEASE */
 	int soc_lt_force, soc_ge_force_release;      /* SoC < SOC_FORCE / >= SOC_FORCE_RELEASE */
 	int soc_lt_100;
 	int charging;                                /* BMS power present and > CHARGING_TH */
+	int low_on;                                  /* DCL < DCL_FORCE_A or lowest cell < CELL_FORCE_V (0.52-c) */
+	int low_off;                                 /* DCL >= DCL_FORCE_A (or not sent) and the lowest cell >=
+	                                                CELL_FORCE_RELEASE_V (or not sent) */
 };
 struct bm_d2_in {
 	int stale;                                   /* inverter data older than STALE_SECONDS */
@@ -213,11 +220,12 @@ struct bm_d2_in {
 	struct bm_d2_bank bank[NBANK];
 };
 struct bm_d2_out {
-	int prot[NBANK], force[NBANK], chg_prev;     /* next state */
+	int prot[NBANK], force[NBANK], low[NBANK], chg_prev;   /* next state */
 	int charge_mode;
 	int mode[NBANK];                             /* enum bm_mode, the same for all phases of a bank */
 };
-void bm_d2(const struct bm_d2_in *b, const int *prot, const int *force, int chg_prev, struct bm_d2_out *o);
+void bm_d2(const struct bm_d2_in *b, const int *prot, const int *force, const int *low, int chg_prev,
+		   struct bm_d2_out *o);
 
 /* SoC balancing lead. State: lead (-1 none, 0, 1) */
 struct bm_dl_in {

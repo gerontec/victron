@@ -83,6 +83,8 @@ def main():
             i.lim_ok[b] = int(next(it))
             i.ccl[b] = float(next(it))
             i.dcl[b] = float(next(it))
+            i.cell_ok[b] = int(next(it))
+            i.cell_min[b] = float(next(it))
         i.grid_ok = int(next(it))
         for p in range(L.NPH):
             i.ac_out_ok[p] = int(next(it))

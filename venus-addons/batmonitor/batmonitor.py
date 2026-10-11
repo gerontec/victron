@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bm_logic as L  # noqa: E402
 import bm_parse  # noqa: E402
 
-VERSION = "0.51-py"
+VERSION = "0.52-py"
 INVERTER_TOPIC = "inverter/power_grid_exchange/json"
 R290_TOPIC = "r290/heatpump/all"
 AUSSEN_TOPIC = "aussen/temp"
@@ -334,6 +334,7 @@ class Batmonitor:
             "surplus_w": c_round(o.surplus),
             "prot": {bank.name: st.prot[b] for b, bank in enumerate(L.BM_BANKS)},
             "force": {bank.name: st.force[b] for b, bank in enumerate(L.BM_BANKS)},
+            "low": {bank.name: st.low[b] for b, bank in enumerate(L.BM_BANKS)},
             "forecast": forecast,
             "charge_cap_w": {L.BM_PH[p]: c_round(o.chg_cap[p]) for p in range(L.NPH)},
             "ac_out_w": {L.BM_PH[p]: (c_round(il.ac_out[p]) if il.ac_out_ok[p] else None) for p in range(L.NPH)},
@@ -421,6 +422,9 @@ class Batmonitor:
                 dcl = self.get(s, "/Info/MaxDischargeCurrent")
             i.lim_ok[b] = int(ccl is not None and ccl >= 0 and dcl is not None and dcl >= 0)
             i.ccl[b], i.dcl[b] = ccl or 0.0, dcl or 0.0
+            cell = self.get(s, "/System/MinCellVoltage")         # 0.52-c: LOW force charge
+            i.cell_ok[b] = int(cell is not None and 1.5 < cell < 4.5)
+            i.cell_min[b] = cell if i.cell_ok[b] else 0.0
 
         o = self.out = L.bm_step(self.cfg, i, self.st)
         self.in_last = i

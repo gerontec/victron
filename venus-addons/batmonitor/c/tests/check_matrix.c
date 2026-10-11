@@ -37,6 +37,7 @@ static void check_threshold_order(void)
 	INV(c.soc_min_release <= 100, "SOC_MIN_RELEASE <= 100");
 	INV(c.fc_hyst >= 0, "FC_HYST >= 0");
 	INV(c.soc_balance_off <= c.soc_balance_on, "SOC_BALANCE_OFF <= SOC_BALANCE_ON");
+	INV(c.cell_force_v <= c.cell_force_release_v, "CELL_FORCE_V <= CELL_FORCE_RELEASE_V (LOW on and off exclusive)");
 	printf("threshold order of the defaults: checked\n");
 }
 
@@ -173,15 +174,18 @@ static int bank_ok(const struct bm_d2_bank *x)
 		return 0;
 	if (!x->soc_lt_100 && !x->soc_ge_release)
 		return 0;
+	if (x->low_on && x->low_off)                    /* CELL_FORCE_V <= CELL_FORCE_RELEASE_V (0.52-c) */
+		return 0;
 	return 1;
 }
 
 static void check_d2(void)
 {
-	struct bm_d2_bank banks[128];
+	struct bm_d2_bank banks[512];
 	int nb = 0;
-	for (unsigned v = 0; v < 128; v++) {
-		struct bm_d2_bank x = {BIT(v, 0), BIT(v, 1), BIT(v, 2), BIT(v, 3), BIT(v, 4), BIT(v, 5), BIT(v, 6)};
+	for (unsigned v = 0; v < 512; v++) {
+		struct bm_d2_bank x = {BIT(v, 0), BIT(v, 1), BIT(v, 2), BIT(v, 3), BIT(v, 4), BIT(v, 5), BIT(v, 6), BIT(v, 7),
+							   BIT(v, 8)};
 		if (bank_ok(&x))
 			banks[nb++] = x;
 	}
@@ -189,34 +193,39 @@ static void check_d2(void)
 	for (int i0 = 0; i0 < nb; i0++)
 		for (int i1 = 0; i1 < nb; i1++)
 			for (unsigned g = 0; g < 16; g++)
-				for (unsigned s = 0; s < 32; s++) {
+				for (unsigned s = 0; s < 128; s++) {
 					struct bm_d2_in b = {BIT(g, 0), BIT(g, 1), BIT(g, 2), BIT(g, 3), {banks[i0], banks[i1]}};
 					if (b.surplus_gt_on && !b.surplus_gt_hold)   /* PCC_SURPLUS_TH > SOYO_HOLD_TH */
 						continue;
 					int prot[NBANK] = {BIT(s, 0), BIT(s, 1)}, force[NBANK] = {BIT(s, 2), BIT(s, 3)}, cp = BIT(s, 4);
+					int low[NBANK] = {BIT(s, 5), BIT(s, 6)};
 					struct bm_d2_out o, o2;
-					bm_d2(&b, prot, force, cp, &o);
+					bm_d2(&b, prot, force, low, cp, &o);
 					combos++;
 					for (int k = 0; k < NBANK; k++) {
 						const struct bm_d2_bank *x = &b.bank[k];
 						int m = o.mode[k];
 						modes[m]++;
-						INV(m != BM_M_DIS || (x->bms_ok && !o.prot[k] && !o.force[k] && !b.stale && !o.charge_mode
+						INV(m != BM_M_DIS || (x->bms_ok && !o.prot[k] && !o.force[k] && !o.low[k] && !b.stale && !o.charge_mode
 											   && !x->charging), "DIS only with BMS, unprotected, fresh data, no surplus");
 						INV(!(x->bms_ok && x->soc_lt_min) || m != BM_M_DIS, "never discharge below SOC_MIN");
 						INV(!(x->bms_ok && x->soc_lt_force) || m == BM_M_FORCE, "below SOC_FORCE always force charge");
 						INV(m != BM_M_CHARGE || (x->soc_lt_100 && o.charge_mode && !b.block && !o.force[k] && !b.stale),
 							"CHARGE only below 100 %%, with surplus, no charge block, fresh data");
 						INV(!b.stale || (m != BM_M_DIS && m != BM_M_CHARGE), "stale data: neither charge nor discharge");
-						INV(x->bms_ok || (m == BM_M_BMS_MISSING && o.prot[k] == prot[k] && o.force[k] == force[k]),
-							"without BMS: BMS_MISSING, protection state kept");
+						INV(x->bms_ok || (m == BM_M_BMS_MISSING && o.prot[k] == prot[k] && o.force[k] == force[k]
+										  && o.low[k] == low[k]), "without BMS: BMS_MISSING, protection state kept");
 						INV(!o.force[k] || !x->bms_ok || m == BM_M_FORCE, "force charge has priority");
+						INV(!(x->bms_ok && x->low_on) || m == BM_M_FORCE, "DCL 0 / cell low: always force charge");
+						INV(!o.low[k] || !x->bms_ok || m == BM_M_FORCE, "LOW latched: force charge, no discharge");
+						INV(!(x->bms_ok && low[k] && !x->low_off) || o.low[k], "LOW holds until DCL back and cell recovered");
 					}
-					bm_d2(&b, o.prot, o.force, o.chg_prev, &o2);
+					bm_d2(&b, o.prot, o.force, o.low, o.chg_prev, &o2);
 					INV(!memcmp(o2.prot, o.prot, sizeof(o.prot)) && !memcmp(o2.force, o.force, sizeof(o.force))
+						&& !memcmp(o2.low, o.low, sizeof(o.low))
 						&& o2.chg_prev == o.chg_prev, "D2 state fixed after one step");
 				}
-	printf("\nD2 protection / mode: %ld consistent combinations (%d bank bit sets of 128, ^2 x 4 global bits x 32 states)\n",
+	printf("\nD2 protection / mode: %ld consistent combinations (%d bank bit sets of 512, ^2 x 4 global bits x 128 states)\n",
 		   combos, nb);
 	printf("  mode reached (bank-cycles):");
 	for (int m = 0; m < BM_M_N; m++)
