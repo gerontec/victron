@@ -14,8 +14,8 @@ Behaviour:
   (CCL 0, AllowToCharge 0, HighVoltage alarm) until volt_st is back and the highest cell is below
   HIGH_RELEASE_MV, so the charger does not pulse against the pack limit
 - low SoC below FORCE_CHARGE_SOC: discharge blocked until FORCE_CHARGE_RELEASE_SOC; forced charge from the grid
-  (/Info/ChargeRequest = 1, hub4control goes to Recharge) only inside FORCE_CHARGE_WINDOW (local time),
-  PV surplus charges at any time
+  (/Info/ChargeRequest = 1, hub4control goes to Recharge) at any time (the 11-13 h window was removed in 1.4,
+  user 2026-10-11); PV surplus charges at any time
 - no data for STALE_SECONDS: exit; daemontools restarts it and the service only registers again with
   fresh data, so the MultiPlus fall back to their own charge settings meanwhile
 """
@@ -25,8 +25,6 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 import dbus
 import paho.mqtt.client as mqtt
@@ -36,7 +34,7 @@ from gi.repository import GLib
 sys.path.insert(1, '/opt/victronenergy/dbus-systemcalc-py/ext/velib_python')
 from vedbus import VeDbusService  # noqa: E402
 
-VERSION = '1.3'
+VERSION = '1.4'
 # can-bus-bms (Speicher A on can0) registers as battery instance 512; 513 keeps the MQTT topics
 # N/<portal>/battery/<instance>/... of the two batteries apart
 DEVICE_INSTANCE = 513
@@ -53,8 +51,6 @@ TAPER_CURRENT = 10.0            # A
 HIGH_RELEASE_MV = 3450          # highest cell: release the charge block after a "High" event
 FORCE_CHARGE_SOC = 5.0          # %
 FORCE_CHARGE_RELEASE_SOC = 8.0  # %
-FORCE_CHARGE_WINDOW = (11, 13)  # forced grid charge only from 11:00 to 13:00
-TIMEZONE = ZoneInfo('Europe/Berlin')
 STALE_SECONDS = 120
 CAPACITY_AH = 300               # 15 kWh at 51.2 V nominal (was 600 = both stacks, corrected 2026-10-08)
 
@@ -130,8 +126,7 @@ class EboxBattery:
 			self.low_soc = True
 		elif soc >= FORCE_CHARGE_RELEASE_SOC:
 			self.low_soc = False
-		start, end = FORCE_CHARGE_WINDOW
-		force_charge = self.low_soc and start <= datetime.now(TIMEZONE).hour < end
+		force_charge = self.low_soc
 
 		if self.service is None:
 			self.register()

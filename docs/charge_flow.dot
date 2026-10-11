@@ -70,7 +70,7 @@ digraph charge {
 			<tr><td>CHARGING</td><td>0 W</td><td>-</td><td>CHARGING(BMS W)</td></tr>
 			<tr><td>DIS</td><td>discharge amount</td><td>1</td><td>(S4: PROP / IDLE)</td></tr>
 			</table>>];
-		force [label=<<b>FORCE</b>: min(FORCE_CHARGE_W, chg_cap) per phase<br/>from the grid, obeys the BMS CCL (was: 500 W even at CCL 0)>, fillcolor="#ffffff"];
+		force [label=<<b>FORCE</b>: min(FORCE_CHARGE_W, chg_cap) per phase<br/>from the grid, obeys the BMS CCL (was: 500 W even at CCL 0)<br/>at any time of day: no TOU window (removed 2026-10-11)>, fillcolor="#ffffff"];
 		amount [label=<<b>charge amount</b> (chain_charge, whole watts since 0.48-c)<br/>want = max(0, own_charge + KP_PM 1010 x (z2 + Bat1_eff - target) / 1000)<br/>target = SOYO_TARGET, + EXPORT_CAP while D4 cap_active (0.49-c)<br/>at most the sum of chg_cap over the charging phases<br/><font point-size="9">[CBMC h_charge]</font>>, fillcolor="#ffffff"];
 		caps [label=<<b>chg_cap</b> per phase (one per stack)<br/>min(CHARGER_A 70 A x U / 0.93, CHARGE_MAX_PHASE 4900, BMS CCL)<br/>~4.0-4.2 kW per phase -&gt; ~12 kW for the three Multis>, fillcolor="#ffffff"];
 		alloc [label=<<b>alloc_levels</b> (0.48-c: one split core for charge and discharge)<br/>charge: one level per stack in CHARGE_PRIORITY order (Stack1, Stack2), the lead stack last,<br/>each up to min(chg_cap, CHARGER_CAP_PHASE); water filling within a level;<br/>only what the caps cut goes on; a rest up to CHARGE_MAX_PHASE on all charging phases<br/><font point-size="9">[CBMC h_charge without bank assumption, h_alloc_discharge]</font>>, fillcolor="#ffffff"];

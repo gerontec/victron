@@ -18,7 +18,7 @@ digraph control {
 	subgraph cluster_charge {
 		label=<<b>charge path</b>>; style="rounded,filled"; fillcolor="#eef4fb"; color="#4a7fb5"; fontsize=12;
 		d4 [label=<<b>D4 forecast export cap</b> (May-Aug)<br/>while the forecast expects export &gt; 18 kW:<br/>wait below the cap, charge only above it>, fillcolor="#dbe8fb"];
-		cforce [label=<<b>FORCE</b>: min(500 W, chg_cap)>, fillcolor="#eaf6e6"];
+		cforce [label=<<b>FORCE</b>: min(500 W, chg_cap)<br/>any time of day, no TOU window>, fillcolor="#eaf6e6"];
 		camount [label=<<b>charge amount</b><br/>max(0, own + KP x (z2 + Bat1_eff - target))<br/>target + EXPORT_CAP while D4 cap; &le; sum of chg_cap>, fillcolor="#eaf6e6"];
 		csplit [label=<<b>alloc_levels</b> up to chg_cap<br/>stack by stack in CHARGE_PRIORITY,<br/>lead stack last>, fillcolor="#eaf6e6"];
 		camount -> csplit;
