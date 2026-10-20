@@ -15,6 +15,9 @@ into the bm_* columns (setpoints, rules, SoC balancing lead, protection / forced
 NULL if the file is missing or older than BM_STATE_MAX_AGE.
 EBox pack counters (cycle count per Pytes pack) from the cache of ebox_mqtt.py (EBOX_STAT, `ebox stat <n>`, refreshed
 every 6 h) into ebox_p1..p3_cycles; NULL if missing or older than EBOX_STAT_MAX_AGE.
+Venus notification list (platform/0/Notifications, the last 20 alarms/warnings) into wagodb.pv_victron_notifications
+(python/create_pv_victron_notifications.py): upsert on portal + time + device + text, so each notification is stored once
+and only its active / acknowledged state follows (2026-10-20).
 """
 
 import json
@@ -89,6 +92,13 @@ for ph in (1, 2, 3):
 	COLUMNS[f'ac_out_l{ph}_i'] = ('vebus', f'/Ac/Out/L{ph}/I')
 	COLUMNS[f'grid_l{ph}_w'] = ('system', f'/Ac/Grid/L{ph}/Power')
 	COLUMNS[f'consumption_l{ph}_w'] = ('system', f'/Ac/Consumption/L{ph}/Power')
+	# NA-Schutz (grid code interface protection) of the unit on this phase: VE.Bus device ph-1 (0 = L1 master),
+	# its newest log entry (flags: dim_vebus_ip_flag) and the VE.Bus network quality counter (2026-10-20)
+	COLUMNS[f'ac_in_l{ph}_f_hz'] = ('vebus', f'/Ac/ActiveIn/L{ph}/F')
+	COLUMNS[f'na_l{ph}_flags'] = ('vebus', f'/Devices/{ph - 1}/InterfaceProtectionLog/0/ErrorFlags')
+	COLUMNS[f'na_l{ph}_at'] = ('vebus', f'/Devices/{ph - 1}/InterfaceProtectionLog/0/Time')
+	COLUMNS[f'vebus_nq_l{ph}'] = ('vebus', f'/Devices/{ph - 1}/ExtendStatus/VeBusNetworkQualityCounter')
+EPOCH_COLUMNS = {f'na_l{ph}_at' for ph in (1, 2, 3)}   # unix time -> DATETIME
 
 WANTED = {}  # (service, path) -> column
 for col, key in COLUMNS.items():
@@ -96,11 +106,19 @@ for col, key in COLUMNS.items():
 BATTERY_PATHS = {path for (service, path) in WANTED if service.startswith('battery')}
 
 
+NOTIFICATION_FIELDS = {	# platform/0/Notifications/<n>/<field> -> pv_victron_notifications column
+	'DateTime': 'notified_at', 'Type': 'type', 'DeviceName': 'device_name', 'Description': 'description',
+	'Value': 'value', 'AlarmValue': 'alarm_value', 'Service': 'service', 'Trigger': 'trigger',
+	'Active': 'active', 'Acknowledged': 'acknowledged', 'Silenced': 'silenced',
+}
+
+
 def collect():
-	"""Return (portal_id, {(service, path): value})."""
+	"""Return (portal_id, {(service, path): value}, {n: {field: value}} of the Venus notification list)."""
 	values = {}
 	instances = {}
 	batteries = {}  # instance -> {path: value}
+	notes = {}      # notification slot -> {field: value}
 	portal = {'id': None}
 
 	def on_connect(client, userdata, flags, reason_code, properties):
@@ -109,6 +127,7 @@ def collect():
 		client.subscribe('N/+/battery/#')
 		client.subscribe('N/+/system/0/#')
 		client.subscribe('N/+/settings/0/Settings/CGwacs/AcPowerSetPoint')
+		client.subscribe('N/+/platform/0/Notifications/+/+')
 		# Venus only publishes after a keepalive; its portal id is the eth0 MAC (the container shares
 		# the host network), so the keepalive can go out right away
 		client.publish(f'R/{fallback_portal_id()}/keepalive', '')
@@ -121,6 +140,14 @@ def collect():
 		path = '/' + path
 		if service == 'system' and path == '/Serial':
 			portal['id'] = pid
+			return
+		if service == 'platform':
+			p = path.split('/')                  # '', 'Notifications', <n>, <field>
+			if len(p) == 4 and p[2].isdigit() and p[3] in NOTIFICATION_FIELDS:
+				try:
+					notes.setdefault(int(p[2]), {})[p[3]] = json.loads(msg.payload).get('value')
+				except (ValueError, AttributeError):
+					pass
 			return
 		if service == 'battery':
 			if path != '/ProductName' and path not in BATTERY_PATHS:
@@ -155,7 +182,7 @@ def collect():
 				for path, v in bat.items():
 					values[(role, path)] = v
 				break
-	return portal['id'] or fallback_portal_id(), values
+	return portal['id'] or fallback_portal_id(), values, notes
 
 
 def fallback_portal_id():
@@ -172,6 +199,8 @@ def build_row(portal_id, values):
 		v = values.get(key)
 		if isinstance(v, (list, dict)) or v == '':
 			v = None
+		if col in EPOCH_COLUMNS and v is not None:
+			v = datetime.fromtimestamp(v)
 		row[col] = v
 	return row
 
@@ -230,8 +259,47 @@ def write(row):
 		conn.close()
 
 
+def notification_rows(portal_id, notes):
+	"""pv_victron_notifications rows of the slots that carry a notification (DateTime set)"""
+	rows = []
+	for n in sorted(notes):
+		f = notes[n]
+		if not f.get('DateTime'):
+			continue
+		row = {'portal_id': portal_id}
+		for field, col in NOTIFICATION_FIELDS.items():
+			v = f.get(field)
+			if col == 'notified_at':
+				v = datetime.fromtimestamp(v)
+			elif col in ('device_name', 'description'):
+				v = '' if v is None else str(v)
+			elif col in ('value', 'alarm_value', 'service', 'trigger') and v is not None:
+				v = str(v)
+			row[col] = v
+		rows.append(row)
+	return rows
+
+
+def write_notifications(rows):
+	"""upsert: a notification already stored only gets its active / acknowledged / silenced state updated"""
+	if not rows:
+		return
+	cols = list(rows[0])
+	sql = (f"INSERT INTO pv_victron_notifications ({', '.join(f'`{c}`' for c in cols)}) "
+		   f"VALUES ({', '.join(['%s'] * len(cols))}) ON DUPLICATE KEY UPDATE "
+		   f"{', '.join(f'`{c}`=VALUES(`{c}`)' for c in ('active', 'acknowledged', 'silenced', 'value'))}")
+	conn = pymysql.connect(read_default_file=DB_CNF, connect_timeout=10)
+	try:
+		with conn.cursor() as cur:
+			cur.executemany(sql, [[r[c] for c in cols] for r in rows])
+		conn.commit()
+	finally:
+		conn.close()
+
+
 def main():
-	portal_id, values = collect()
+	portal_id, values, notes = collect()
+	notifications = notification_rows(portal_id, notes)
 	row = build_row(portal_id, values)
 	filled = sum(1 for k, v in row.items() if v is not None and k not in ('ts', 'portal_id'))
 	row.update(batmonitor_columns())
@@ -240,13 +308,20 @@ def main():
 		for k, v in row.items():
 			print(f'{k:26} {v}')
 		print(f'{filled} of {len(WANTED)} values')
+		for r in notifications:
+			print(f"notification {r['notified_at']} type {r['type']} {r['device_name']}: {r['description']}")
 		return
 	if filled == 0:
 		print(f'{row["ts"]} {portal_id}: no Venus values received, nothing written')
 		sys.exit(1)
 	write(row)
+	try:
+		write_notifications(notifications)
+	except pymysql.MySQLError as e:
+		print(f'notifications not written: {e}')
 	print(f'{row["ts"]} {portal_id}: {filled} of {len(WANTED)} values written '
-		  f'(soc={row["soc"]} vebus_state={row["vebus_state"]} ac_in_l1_w={row["ac_in_l1_w"]})')
+		  f'(soc={row["soc"]} vebus_state={row["vebus_state"]} ac_in_l1_w={row["ac_in_l1_w"]}), '
+		  f'{len(notifications)} notifications')
 
 
 if __name__ == '__main__':
