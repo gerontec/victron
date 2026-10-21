@@ -12,6 +12,7 @@ three-phase system without moving the MK3 to a Windows PC.
 | `run.sh` | start a VE tool; `ttyUSB0`/`ttyUSB1` (M-Bus, EBox console) are bind-mounted to `/dev/null` so a COM scan cannot disturb them |
 | `ess.sh` | the recorded GUI steps (see below) |
 | `dlgshot.sh` | capture the newest Wine dialog to `/tmp/dlg.xwd` (some dialogs are not composited into the root image) |
+| `xwd2png.py` | convert an xwd screenshot to PNG with the Python standard library (no ImageMagick/PIL on the Pi), optional crop `x y w h` |
 | `../feedin.sh` | fixed feed-in per phase via `/Hub4/Lx/AcPowerSetpoint` (Hub4Mode 3) until a given time |
 
 ## Roll-out on a new three-phase system (3 units, same model and firmware)
@@ -46,6 +47,31 @@ Prerequisites and lessons from the first run (2026-10-07):
   VEConfigure Multi; Add assistant = ... Solar / Self-consumption > ESS (Energy Storage System) (0190)).
 - Never close VEConfig with Alt+F4 (Wine "Warten auf Programm" dialog); `close` uses File > Exit.
 - Over ssh, `pkill -f`/`pgrep -f` with the script name also match the ssh command line itself.
+
+## Changing one setting on one unit (AES off on L2, 2026-10-21)
+
+The firmware update to 568 (2026-10-07) left phase L2 (HQ2606Y2Y4U) with AES enabled while L1/L3 had it
+off; a three-phase system needs identical settings. Done step by step, a screenshot before every click:
+
+```sh
+cd ~/vec
+sh vebus-backup.sh pre_aes_20261021                        # backup through Venus first
+setsid nohup sh ess.sh release qc l2 get inverter >/tmp/ess_run.log 2>&1 </dev/null &   # ~6 min, wait for it
+python3 xwd2png.py /tmp/scr.xwd /tmp/scr.png               # check: title 'phase L2' + serial, AES ticked
+sh ess.sh aestoggle sendmod close restore
+sudo nsenter -t $(sudo machinectl show venus -p Leader --value) -a sh -c "svc -u /service/mk2-dbus.ttyUSB*"
+sh vebus-backup.sh post_aes_20261021                       # flags0 bit 8 (DisableAES) now set on all three
+python3 ~/python/rvms2db.py /data/vebus-backup/post_aes_20261021.rvms   # into wagodb.dim_config
+```
+
+- Start the long steps detached (`setsid nohup`): a dropped or cancelled ssh session otherwise leaves a
+  half-run step behind, and a second `qc` then starts a second Quick Configure over the first one.
+- `l1`/`l2`/`l3` end with a Return that cancels the assistant read; never send from that state (assistants
+  could be overwritten), run `get` first.
+- VEConfig's command line shows the opened unit: `/N01` selects entry 01 of the `/P` list of target ids
+  (`DE331F7A` = HQ2606Y2Y4U); the window title shows the serial as well.
+- After any mk2vsc or VEConfig access mk2-dbus lists the units one by one again, Venus needs up to about
+  a minute until all three `Devices/<n>/SerialNumber` are back.
 
 The coordinates in `ess.sh` are absolute on the 1280x800 Xvfb screen with the 1260x780 Wine virtual
 desktop; they hold as long as the window sizes do not change.

@@ -65,6 +65,19 @@ sendthis) # Send settings: modified settings -> this device (assistants only go 
   click 458 557 1 6; click 521 398 1 2; click 720 519 1 45
   ok Confirm y 50                                          # "send the assistant setup to the device?" -> Yes (unit switches off)
   ok Information Return 4 ;;                               # "Assistant setup succesfully written to target."
+get)      # after l1/l2/l3 the Return of that step cancels the assistant read ("Reading of the assistant setup is
+          # cancelled ... might differ"): dismiss it and read again with Get settings (incl. assistants) before sending
+  ok Warning Return 3
+  click 452 509 1 75
+  ok Warning Return 3 ;;
+inverter) # Inverter tab
+  click 624 229 ;;
+aestoggle) # Inverter tab: "enable AES" checkbox. It toggles: look at a screenshot first (shot, xwd2png.py)
+  click 542 430 1 3 ;;
+sendmod)  # Send settings: modified settings -> this device (the dialog defaults), OK clicked relative to the dialog.
+          # A plain setting (AES, 2026-10-21) goes out without assistant question and without reset prompt.
+  click 458 557 1 6
+  W=$(dlg 'Options for sending'); [ -n "$W" ] && xdotool mousemove --window "$W" 237 251 click 1; sleep 60 ;;
 close)    # close VEConfig: File menu -> Exit (last entry). Never Alt+F4: Wine then shows "Warten auf Programm".
   click 329 200 1 2; xdotool key Up Return; sleep 6 ;;
 *) echo "unknown step $step"; exit 1 ;;
