@@ -98,6 +98,10 @@ for ph in (1, 2, 3):
 	COLUMNS[f'na_l{ph}_flags'] = ('vebus', f'/Devices/{ph - 1}/InterfaceProtectionLog/0/ErrorFlags')
 	COLUMNS[f'na_l{ph}_at'] = ('vebus', f'/Devices/{ph - 1}/InterfaceProtectionLog/0/Time')
 	COLUMNS[f'vebus_nq_l{ph}'] = ('vebus', f'/Devices/{ph - 1}/ExtendStatus/VeBusNetworkQualityCounter')
+# front panel LEDs; Venus publishes them for the VE.Bus master only (dev0 = L1): 0 off, 1 on, 2 blink, 3 blink inverted
+for led, path in (('mains', 'Mains'), ('bulk', 'Bulk'), ('absorption', 'Absorption'), ('float', 'Float'),
+				  ('inverter', 'Inverter'), ('overload', 'Overload'), ('low_battery', 'LowBattery'), ('temperature', 'Temperature')):
+	COLUMNS[f'led_{led}'] = ('vebus', f'/Leds/{path}')
 EPOCH_COLUMNS = {f'na_l{ph}_at' for ph in (1, 2, 3)}   # unix time -> DATETIME
 
 WANTED = {}  # (service, path) -> column

@@ -97,6 +97,15 @@ if ($r) {
         'l3_ac_out_w' => v(num($r['ac_out_l3_w']), 'W', 'dev2 / L3: AC-out power', 'pv_victron.ac_out_l3_w'),
         'e_acin_to_inverter_kwh' => v(num($r['e_acin_to_inverter_kwh']), 'kWh', 'Energy counter AC-in -> battery (charged from the grid side)', 'pv_victron.e_acin_to_inverter_kwh'),
         'e_inverter_to_acin_kwh' => v(num($r['e_inverter_to_acin_kwh']), 'kWh', 'Energy counter battery -> AC-in (fed into the house)', 'pv_victron.e_inverter_to_acin_kwh'),
+        // front panel LEDs of the VE.Bus master (unit 2 middle, dev0 / L1); Venus has no LEDs of the slaves (2026-10-23)
+        'led_mains' => v(num($r['led_mains'] ?? null), '', 'LED "Mains on" (green) of the VE.Bus master dev0 / L1: 0 off, 1 on, 2 blinking, 3 blinking inverted', 'pv_victron.led_mains'),
+        'led_bulk' => v(num($r['led_bulk'] ?? null), '', 'LED "Bulk" (yellow) of the VE.Bus master dev0 / L1: 0 off, 1 on, 2 blinking, 3 blinking inverted', 'pv_victron.led_bulk'),
+        'led_absorption' => v(num($r['led_absorption'] ?? null), '', 'LED "Absorption" (yellow) of the VE.Bus master dev0 / L1: 0 off, 1 on, 2 blinking, 3 blinking inverted', 'pv_victron.led_absorption'),
+        'led_float' => v(num($r['led_float'] ?? null), '', 'LED "Float" (yellow) of the VE.Bus master dev0 / L1: 0 off, 1 on, 2 blinking, 3 blinking inverted', 'pv_victron.led_float'),
+        'led_inverter' => v(num($r['led_inverter'] ?? null), '', 'LED "Inverter on" (green) of the VE.Bus master dev0 / L1: 0 off, 1 on, 2 blinking, 3 blinking inverted', 'pv_victron.led_inverter'),
+        'led_overload' => v(num($r['led_overload'] ?? null), '', 'LED "Overload" (red) of the VE.Bus master dev0 / L1: 0 off, 1 on, 2 blinking, 3 blinking inverted', 'pv_victron.led_overload'),
+        'led_low_battery' => v(num($r['led_low_battery'] ?? null), '', 'LED "Low battery" (red) of the VE.Bus master dev0 / L1: 0 off, 1 on, 2 blinking, 3 blinking inverted', 'pv_victron.led_low_battery'),
+        'led_temperature' => v(num($r['led_temperature'] ?? null), '', 'LED "Temperature" (red) of the VE.Bus master dev0 / L1: 0 off, 1 on, 2 blinking, 3 blinking inverted', 'pv_victron.led_temperature'),
         // Stack2 = Pytes (EBox), active BMS for DVCC
         's2_soc' => v(num($r['soc']), '%', 'Stack2 (Pytes, EBox, 300 Ah) state of charge; active BMS for DVCC', 'pv_victron.soc'),
         's2_soc_min_24h' => v(num($ext['s2_min'] ?? null), '%', 'Stack2 lowest SoC in the last 24 h', 'pv_victron.soc'),

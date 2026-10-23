@@ -12,6 +12,9 @@ for ph in (1, 2, 3):
         ("na_l%d_at" % ph, "datetime NULL COMMENT 'NA-Schutz unit L%d newest log entry time'" % ph),
         ("vebus_nq_l%d" % ph, "smallint unsigned NULL COMMENT 'VE.Bus network quality counter unit L%d'" % ph),
     ]
+# front panel LEDs of the VE.Bus master (dev0 = L1), Venus /Leds/*: 0 off, 1 on, 2 blinking, 3 blinking inverted (2026-10-23)
+for led in ('mains', 'bulk', 'absorption', 'float', 'inverter', 'overload', 'low_battery', 'temperature'):
+    ADD.append(("led_%s" % led, "tinyint unsigned NULL COMMENT 'VE.Bus master LED %s: 0 off, 1 on, 2 blink, 3 blink inverted'" % led))
 conn = pymysql.connect(read_default_file=os.path.expanduser("~/.victron2db.cnf"))
 with conn.cursor() as cur:
     cur.execute("SHOW COLUMNS FROM pv_victron")

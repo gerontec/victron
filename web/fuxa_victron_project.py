@@ -230,6 +230,31 @@ for p, dev, ph, note, bat in MP:
     value(x + 300, 400, f'{p}_ac_out_w', 'W', 0, 14, anchor='end')
     text(x + 18, 428, f'DC: {bat}', 12, 'bold', fill=ORANGE if 'Pytes' in bat else BLUE)
 
+# ---- front panel LEDs of the VE.Bus master (unit 2 middle, L1), right of its box (2026-10-23) -------
+#      Venus has /Leds/* only for the master: 0 off, 1 on, 2 blinking, 3 blinking inverted (2 and 3 blink here)
+LED_OFF, LED_GREEN, LED_YELLOW, LED_RED = '#1f2937', '#22c55e', '#facc15', '#ef4444'
+
+
+def led(cx, cy, key, color, label):
+    sid = shape('circle', {'cx': cx, 'cy': cy, 'r': 5.5, 'fill': LED_OFF, 'stroke': STROKE, 'stroke-width': 0.8}, key,
+                [{'type': 2, 'min': -1, 'max': 0.5, 'color': LED_OFF, 'stroke': ''},
+                 {'type': 2, 'min': 0.5, 'max': 3.5, 'color': color, 'stroke': ''}])
+    items[sid]['property']['actions'] = [{'variableId': 't_' + key, 'bitmask': 0, 'range': {'min': 2, 'max': 3}, 'type': 'blink',
+                                          'options': {'fillA': color, 'fillB': LED_OFF, 'strokeA': STROKE, 'strokeB': STROKE,
+                                                      'interval': 500}}]
+    text(cx + 10, cy + 4, label, 10, fill=MUTED)
+
+
+lx, ly = CX['l1'] + 165, 326
+box(lx, ly, 170, 112, '#111827', 8)
+text(lx + 10, ly + 17, '◂ LEDs master L1', 11, 'bold')
+for i, (key, color, label) in enumerate((('led_mains', LED_GREEN, 'mains on'), ('led_bulk', LED_YELLOW, 'bulk'),
+                                         ('led_absorption', LED_YELLOW, 'absorption'), ('led_float', LED_YELLOW, 'float'))):
+    led(lx + 14, ly + 36 + i * 20, key, color, label)
+for i, (key, color, label) in enumerate((('led_inverter', LED_GREEN, 'inverter on'), ('led_overload', LED_RED, 'overload'),
+                                         ('led_low_battery', LED_RED, 'low battery'), ('led_temperature', LED_RED, 'temperature'))):
+    led(lx + 92, ly + 36 + i * 20, key, color, label)
+
 # ---- DC lines: L2 -> Stack1, L1 + L3 -> Stack2 ---------------------------------------------------
 line(f'M{CX["l1"]},440 L{CX["l1"]},480', 's1_bat_kw', 0.05, 9)
 line(f'M{CX["l2"]},440 L{CX["l2"]},612', 's2_bat_kw', 0.05, 9)
