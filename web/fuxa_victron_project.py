@@ -223,37 +223,46 @@ for p, dev, ph, note, bat in MP:
     text(x + 18, 302, f'{dev} · {ph}', 15, 'bold')
     text(x + 18, 322, f'MultiPlus-II 48/5000 · {note}', 11, fill=MUTED)
     text(x + 18, 352, 'AC-in', 13, fill=MUTED)
-    value(x + 300, 352, f'{p}_ac_in_w', 'W', 0, 22, anchor='end')
+    value(x + 165, 352, f'{p}_ac_in_w', 'W', 0, 22, anchor='end')
     text(x + 18, 378, 'AC-in voltage', 13, fill=MUTED)
-    value(x + 300, 378, f'{p}_ac_in_v', 'V', 1, 14, anchor='end')
+    value(x + 165, 378, f'{p}_ac_in_v', 'V', 1, 14, anchor='end')
     text(x + 18, 400, 'AC-out1', 13, fill=MUTED)
-    value(x + 300, 400, f'{p}_ac_out_w', 'W', 0, 14, anchor='end')
+    value(x + 165, 400, f'{p}_ac_out_w', 'W', 0, 14, anchor='end')
     text(x + 18, 428, f'DC: {bat}', 12, 'bold', fill=ORANGE if 'Pytes' in bat else BLUE)
 
-# ---- front panel LEDs of the VE.Bus master (unit 2 middle, L1), right of its box (2026-10-23) -------
-#      Venus has /Leds/* only for the master: 0 off, 1 on, 2 blinking, 3 blinking inverted (2 and 3 blink here)
+# ---- front panel LEDs in each unit, laid out like the MultiPlus-II front (2026-10-23) ----------------
+#      Venus has /Leds/* only for the VE.Bus master (unit 2, L1): 0 off, 1 on, 2 blinking, 3 blinking inverted (2 and 3
+#      blink here). L2 / L3 get the same LEDs as hollow outlines with "no data", nothing is made up for them.
 LED_OFF, LED_GREEN, LED_YELLOW, LED_RED = '#1f2937', '#22c55e', '#facc15', '#ef4444'
+LEDS = ((('led_mains', LED_GREEN, 'mains on'), ('led_bulk', LED_YELLOW, 'bulk'),
+         ('led_absorption', LED_YELLOW, 'absorption'), ('led_float', LED_YELLOW, 'float')),
+        (('led_inverter', LED_GREEN, 'inverter on'), ('led_overload', LED_RED, 'overload'),
+         ('led_low_battery', LED_RED, 'low battery'), ('led_temperature', LED_RED, 'temperature')))
 
 
 def led(cx, cy, key, color, label):
-    sid = shape('circle', {'cx': cx, 'cy': cy, 'r': 5.5, 'fill': LED_OFF, 'stroke': STROKE, 'stroke-width': 0.8}, key,
-                [{'type': 2, 'min': -1, 'max': 0.5, 'color': LED_OFF, 'stroke': ''},
-                 {'type': 2, 'min': 0.5, 'max': 3.5, 'color': color, 'stroke': ''}])
-    items[sid]['property']['actions'] = [{'variableId': 't_' + key, 'bitmask': 0, 'range': {'min': 2, 'max': 3}, 'type': 'blink',
-                                          'options': {'fillA': color, 'fillB': LED_OFF, 'strokeA': STROKE, 'strokeB': STROKE,
-                                                      'interval': 500}}]
-    text(cx + 10, cy + 4, label, 10, fill=MUTED)
+    """key None = unit without LED data: hollow outline"""
+    attrs = {'cx': cx, 'cy': cy, 'r': 5, 'fill': LED_OFF if key else 'none', 'stroke': STROKE if key else GREY, 'stroke-width': 0.8}
+    if key:
+        sid = shape('circle', attrs, key, [{'type': 2, 'min': -1, 'max': 0.5, 'color': LED_OFF, 'stroke': ''},
+                                           {'type': 2, 'min': 0.5, 'max': 3.5, 'color': color, 'stroke': ''}])
+        items[sid]['property']['actions'] = [{'variableId': 't_' + key, 'bitmask': 0, 'range': {'min': 2, 'max': 3}, 'type': 'blink',
+                                              'options': {'fillA': color, 'fillB': LED_OFF, 'strokeA': STROKE, 'strokeB': STROKE,
+                                                          'interval': 500}}]
+    else:
+        shape('circle', dict(attrs, **{'stroke-dasharray': '2 2'}))
+    text(cx + 8, cy + 3, label, 8.5, fill=MUTED if key else GREY)
 
 
-lx, ly = CX['l1'] + 165, 326
-box(lx, ly, 170, 112, '#111827', 8)
-text(lx + 10, ly + 17, '◂ LEDs master L1', 11, 'bold')
-for i, (key, color, label) in enumerate((('led_mains', LED_GREEN, 'mains on'), ('led_bulk', LED_YELLOW, 'bulk'),
-                                         ('led_absorption', LED_YELLOW, 'absorption'), ('led_float', LED_YELLOW, 'float'))):
-    led(lx + 14, ly + 36 + i * 20, key, color, label)
-for i, (key, color, label) in enumerate((('led_inverter', LED_GREEN, 'inverter on'), ('led_overload', LED_RED, 'overload'),
-                                         ('led_low_battery', LED_RED, 'low battery'), ('led_temperature', LED_RED, 'temperature'))):
-    led(lx + 92, ly + 36 + i * 20, key, color, label)
+for p, *_ in MP:
+    x = CX[p] - 160
+    master = p == 'l1'
+    box(x + 172, 336, 140, 90, '#0b1220', 6)
+    for col, leds in enumerate(LEDS):
+        for row, (key, color, label) in enumerate(leds):
+            led(x + 181 + col * 68, 349 + row * 20, key if master else None, color, label)
+    if not master:
+        text(x + 242, 436, 'LEDs: no data (Venus: master only)', 8, anchor='middle', fill=GREY)
 
 # ---- DC lines: L2 -> Stack1, L1 + L3 -> Stack2 ---------------------------------------------------
 line(f'M{CX["l1"]},440 L{CX["l1"]},480', 's1_bat_kw', 0.05, 9)
