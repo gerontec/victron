@@ -172,7 +172,7 @@ Without data for 120 s the service exits and only registers again with fresh dat
   | `SOC_FORCE` / `SOC_FORCE_RELEASE` / `FORCE_CHARGE_W` | 3 / 5 % / 500 W | grid force charge per phase (Lenggries env since 2026-10-24: `SOC_FORCE=0` = off, see below) |
   | `DCL_FORCE_A` | 1 A | LOW force charge while the BMS discharge limit is below this, no discharge (0 = off; 0.52-c) |
   | `CELL_FORCE_V` / `CELL_FORCE_RELEASE_V` | 3.00 / 3.25 V | LOW force charge while the lowest cell is below this; ends when DCL is back and the cell has reached the release value (0.52-c; since 0.55-c LOW also waits for `SOC_MIN_RELEASE`, otherwise the cell recovers within minutes under the force charge current and LOW and discharge take turns; Lenggries env since 2026-10-24: `CELL_FORCE_V=3.05`, so batmonitor stops before the 49 V ESS cut-off, where the weakest MUST cell was already at 2.997 V) |
-  | `WP_SOC_MIN` | 15 % | no heat pump support from the stacks while the lowest stack is below this, also with a good forecast (`WP:LOWSOC`); back from + 2 %; 0 = off (0.54-c) |
+  | `WP_SOC_MIN` | 15 % | no heat pump support from the stacks while the lowest stack is below this, also with a good forecast (`WP:LOWSOC`); back from + 2 %; 0 = off (0.54-c; Lenggries env since 2026-10-24: 21 %) |
   | `SOC_BALANCE_ON` / `SOC_BALANCE_OFF` | 3 / 1 % | SoC balancing between the stacks |
   | `SOYO_TARGET` | 0 W | PCC target |
   | `B_NIGHT` | 936 W | night base discharge |
