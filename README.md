@@ -176,6 +176,18 @@ Without data for 120 s the service exits and only registers again with fresh dat
   | `SOYO_TARGET` | 0 W | PCC target |
   | `B_NIGHT` | 936 W | night base discharge |
 - Season (summer / transition / winter) from `readers/season.py` on the Sofar host: 7-day export vs. heat pump energy.
+- Several days without sun (Lenggries settings, 2026-10-24): there is no time-based force charge (the TOU window was
+  removed on 2026-10-11), so the stacks are simply parked:
+  1. The stacks discharge down to `SOC_MIN` (8 %) and then stop; from there the house runs on the grid.
+  2. At 8 % the SoC only falls by standby consumption and self-discharge. Reaching `SOC_FORCE` (3 %) takes very long,
+     so the SoC force charge practically never starts within a few days.
+  3. The LOW stage comes earlier:
+     - Pytes (EBox): the BMS discharge limit (DCL) drops to 0 below 5 % SoC, which starts the LOW force charge.
+     - MUST (CAN BMS): on 2026-10-11 the BMS sent DCL 0 already at 10 % SoC and a 3.0 V cell; the `CELL_FORCE_V`
+       limit (3.00 V) now protects against that.
+  4. Victron as the last stage: if L1 falls to the ESS dynamic cut-off (49 V), the ESS assistant then keeps the
+     battery at the sustain voltage (51 V) and charges from the grid with a small current to do so
+     (see `tools/vec-wine/README.md`, "Pytes values in the ESS assistant").
 
 **PI prototype (not armed).** A velocity-form PI controller that drives PCC + Sofar Bat1 to 0 W is built in but only runs in shadow mode: every cycle it logs to `/data/batmonitor/pi_shadow.csv` what soyo sent and what the PI would have sent. `tools/compare.py` replays the PI in closed loop on the recorded disturbance and compares it with the measured soyo result (MAE/RMS, import/export Wh). `BATMONITOR_PI=1` would arm it; this is deliberately not done until enough sunny-day data shows it is better.
 
