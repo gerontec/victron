@@ -110,3 +110,8 @@ ALTER TABLE pv_victron
   ADD COLUMN ac_out_l1_i DECIMAL(6,2) NULL COMMENT 'AC-out1 L1 current (A)',
   ADD COLUMN ac_out_l2_i DECIMAL(6,2) NULL COMMENT 'AC-out1 L2 current (A)',
   ADD COLUMN ac_out_l3_i DECIMAL(6,2) NULL COMMENT 'AC-out1 L3 current (A)';
+
+-- 2026-10-24: batmonitor 0.60-c D1 cell as one byte (state.json d1_id, bm_d1_id in bm_logic.c); INSTANT, no table copy
+ALTER TABLE pv_victron
+  ADD COLUMN bm_d1_id TINYINT UNSIGNED NULL COMMENT 'batmonitor D1 cell (0.60-c): bit0 night, 1 wp_on, 2 Bat1 > BAT1_SOC_MIN, 3 Bat1 >= release, 4 stack < WP_SOC_MIN, 5 stack >= WP_SOC_MIN+2, 6 bat1_first, 7 wp_low (state before the cycle)' AFTER bm_surplus_w,
+  ALGORITHM=INSTANT;

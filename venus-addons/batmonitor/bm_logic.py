@@ -308,6 +308,7 @@ class Out:
     season_measured: int = 0
     bat1_first: int = 0
     wp_low: int = 0                             # WP_SOC_MIN latch: the discharge leaves the heat pump to the grid
+    d1_id: int = 0                              # bm_d1_id: the D1 cell of this cycle, 0..255 (0.60-c)
     src_why: str = ""
     ls: Ls = field(default_factory=Ls)
     pi: Pi = field(default_factory=Pi)
@@ -559,6 +560,14 @@ def bm_d1(b, bat1_first, wp_low):
     return o
 
 
+def bm_d1_id(b, bat1_first, wp_low):
+    """D1 cell as one byte (0.60-c): bit 0 night, 1 wp_on, 2 b1_above_min, 3 b1_ge_release, 4 wp_soc_low_on,
+    5 wp_soc_low_off, 6 bat1_first, 7 wp_low (the state before the cycle); state.json d1_id, pv_victron.bm_d1_id"""
+    bits = (b["night"], b["wp_on"], b["b1_above_min"], b["b1_ge_release"], b["wp_soc_low_on"], b["wp_soc_low_off"],
+            bat1_first, wp_low)
+    return sum(1 << i for i, x in enumerate(bits) if x)
+
+
 def bm_d2(b, prot, force, low, chg_prev):
     """D2. Per bank: SoC protection and force charge with hysteresis (only while the BMS reports), then the mode, first
     match: BMS_MISSING > FORCE > STALE > LADESPERRE > CHARGE / FULL > PROT > CHARGING > DIS. Charge mode on the Z2
@@ -694,14 +703,16 @@ def lowest_soc(inp):
 def chain_d1(cfg, inp, st, out, c):
     """S3 source and WP_SOC_MIN"""
     min_soc = lowest_soc(inp)
-    o = bm_d1({
+    b = {
         "night": c.night,
         "wp_on": c.wp_on,
         "b1_above_min": bool(inp.have_soc_bat1 and inp.soc_bat1 > cfg.bat1_soc_min),
         "b1_ge_release": inp.soc_bat1 >= cfg.bat1_soc_min + BAT1_FIRST_HYST,
         "wp_soc_low_on": min_soc < cfg.wp_soc_min,
         "wp_soc_low_off": min_soc >= cfg.wp_soc_min + WP_SOC_HYST,
-    }, st.bat1_first, st.wp_low)
+    }
+    out.d1_id = bm_d1_id(b, st.bat1_first, st.wp_low)
+    o = bm_d1(b, st.bat1_first, st.wp_low)
     st.bat1_first = o["bat1_first"]
     st.wp_low = o["wp_low"]
     out.wp_low = o["wp_low"]

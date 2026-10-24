@@ -127,6 +127,7 @@ struct bm_out {
 	int season, season_measured;                 /* BM_SUMMER/WINTER/TRANSITION used; 1 = from batmonitor/season */
 	int bat1_first;
 	int wp_low;                                  /* WP_SOC_MIN latch: the heat pump is left to the grid (discharge) */
+	int d1_id;                                   /* bm_d1_id: the D1 cell of this cycle, 0..255 (0.60-c) */
 	char src_why[8];                             /* S3 reason (0.42-c), see the rule text in bm_logic.c */
 	struct bm_ls ls;
 	struct bm_pi pi;
@@ -190,6 +191,10 @@ struct bm_d1_out {
 	int src_reason;
 };
 void bm_d1(const struct bm_d1_in *b, int bat1_first, int wp_low, struct bm_d1_out *o);
+/* D1 cell as one byte (0.60-c, user 2026-10-24): bit 0 night, 1 wp_on, 2 b1_above_min, 3 b1_ge_release,
+   4 wp_soc_low_on, 5 wp_soc_low_off (the inputs in struct order), bit 6 bat1_first, bit 7 wp_low (the state before the
+   cycle). Exactly the combination make check enumerates; written to state.json d1_id and pv_victron.bm_d1_id */
+int bm_d1_id(const struct bm_d1_in *b, int bat1_first, int wp_low);
 
 /* D2: S0 SoC protection / force charge per bank and the S1 mode per bank. State: prot[], force[], low[], chg_prev */
 struct bm_d2_bank {

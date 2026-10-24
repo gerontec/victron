@@ -212,7 +212,7 @@ def build_row(portal_id, values):
 def batmonitor_columns():
 	"""bm_* columns from the batmonitor state file, all None if it is missing or stale"""
 	cols = {f'bm_l{ph}_{k}': None for ph in (1, 2, 3) for k in ('sp_w', 'rule')}
-	cols.update({'bm_balance_lead': None, 'bm_surplus_w': None})
+	cols.update({'bm_balance_lead': None, 'bm_surplus_w': None, 'bm_d1_id': None})
 	cols.update({f'bm_{s}_{k}': None for s, _ in BM_STACKS for k in ('prot', 'force', 'chg_avg5_w', 'full_at')})
 	try:
 		with open(BM_STATE) as f:
@@ -226,6 +226,7 @@ def batmonitor_columns():
 		cols[f'bm_l{ph}_rule'] = st.get('rule', {}).get(f'L{ph}')
 	cols['bm_balance_lead'] = st.get('balance_lead')
 	cols['bm_surplus_w'] = st.get('surplus_w')
+	cols['bm_d1_id'] = st.get('d1_id')                          # batmonitor >= 0.60-c: D1 cell as a bit mask
 	for s, name in BM_STACKS:
 		cols[f'bm_{s}_prot'] = st.get('prot', {}).get(name)
 		cols[f'bm_{s}_force'] = st.get('force', {}).get(name)

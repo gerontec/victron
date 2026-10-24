@@ -96,7 +96,7 @@ def main():
         out_lines.append("%d %d %d %d %d\t%s\t%s\t%s\t%.3f %.3f %.3f %d %d %d %d\n" % (
             run, k, o.sp[0], o.sp[1], o.sp[2], o.why[0], o.why[1], o.why[2], o.surplus, o.pi.u, o.pi.y,
             o.pi.sp[0], o.pi.sp[1], o.pi.sp[2], o.bat1_first))
-        out_lines.append("D5 %d %d %d\n" % (run, k, o.do4_pulse))
+        out_lines.append("D5 %d %d %d %d\n" % (run, k, o.do4_pulse, o.d1_id))
     sys.stdout.writelines(out_lines)
 
 

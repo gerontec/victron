@@ -487,6 +487,12 @@ void bm_d1(const struct bm_d1_in *b, int bat1_first, int wp_low, struct bm_d1_ou
 	o->src_reason = !b->night ? BM_SRC_DAY : o->b1_first ? BM_SRC_B1 : o->night_floor ? BM_SRC_STK : BM_SRC_WPG;
 }
 
+int bm_d1_id(const struct bm_d1_in *b, int bat1_first, int wp_low)
+{
+	return (b->night != 0) | (b->wp_on != 0) << 1 | (b->b1_above_min != 0) << 2 | (b->b1_ge_release != 0) << 3
+		   | (b->wp_soc_low_on != 0) << 4 | (b->wp_soc_low_off != 0) << 5 | (bat1_first != 0) << 6 | (wp_low != 0) << 7;
+}
+
 /* D2. Per bank: SoC protection and force charge with hysteresis (only while the BMS reports), then the mode, first
    match: BMS_MISSING > FORCE > STALE > LADESPERRE > CHARGE / FULL > PROT > CHARGING > DIS. Charge mode on the
    surplus, held down to SOYO_HOLD_TH once charging. LOW (0.52-c, after 2026-10-11 04:07: the MUST BMS sent DCL 0 at
@@ -645,6 +651,7 @@ static void chain_d1(const struct bm_cfg *cfg, const struct bm_in *in, struct bm
 						 in->soc_bat1 >= cfg->bat1_soc_min + BAT1_FIRST_HYST, min_soc < cfg->wp_soc_min,
 						 min_soc >= cfg->wp_soc_min + WP_SOC_HYST};
 	struct bm_d1_out o;
+	out->d1_id = bm_d1_id(&b, st->bat1_first, st->wp_low);
 	bm_d1(&b, st->bat1_first, st->wp_low, &o);
 	st->bat1_first = o.bat1_first;
 	st->wp_low = o.wp_low;

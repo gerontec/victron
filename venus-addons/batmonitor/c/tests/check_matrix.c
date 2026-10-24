@@ -86,6 +86,7 @@ static void check_d1(void)
 			struct bm_d1_out o, o2;
 			bm_d1(&b, bf, wl, &o);
 			combos++;
+			INV(bm_d1_id(&b, bf, wl) == (int)(v | (unsigned)st << 6), "d1_id = the enumerated cell (inputs | state << 6)");
 			reach[o.src_reason]++;
 			INV(o.bat1_first == (b.b1_above_min && (bf || b.b1_ge_release)), "B1FIRST latch: on from min + hyst, off at min");
 			INV(o.b1_first == (o.bat1_first && b.wp_on), "B1FIRST acts only with the WP running");

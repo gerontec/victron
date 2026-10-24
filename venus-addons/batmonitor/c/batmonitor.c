@@ -82,7 +82,7 @@
 #include "bm_logic.h"
 #include "bm_parse.h"
 
-#define VERSION "0.59-c"
+#define VERSION "0.60-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
@@ -572,6 +572,7 @@ static void write_state(const int *sp, char why[][WHY_LEN], double surplus)
 	cJSON_AddStringToObject(js, "season_source", o_.season_measured ? "measured" : "months");
 	cJSON_AddNumberToObject(js, "bat1_first", o_.bat1_first);
 	cJSON_AddNumberToObject(js, "wp_low", o_.wp_low);          /* WP_SOC_MIN: the discharge leaves the WP to the grid */
+	cJSON_AddNumberToObject(js, "d1_id", o_.d1_id);            /* 0.60-c: the D1 cell, bit mask see bm_d1_id */
 	o = cJSON_AddObjectToObject(js, "chain");                  /* 0.42-c: S3 reason, as in the rule text */
 	cJSON_AddStringToObject(o, "src", o_.src_why);
 	o = cJSON_AddObjectToObject(js, "pi");

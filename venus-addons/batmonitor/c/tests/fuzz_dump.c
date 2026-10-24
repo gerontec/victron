@@ -125,8 +125,8 @@ int main(int argc, char **argv)
 			printf("%d %d %d %d %d\t%s\t%s\t%s\t%.3f %.3f %.3f %d %d %d %d\n", run, k, out.sp[0], out.sp[1], out.sp[2],
 				   out.why[0], out.why[1], out.why[2], out.surplus, out.pi.u, out.pi.y, out.pi.sp[0], out.pi.sp[1],
 				   out.pi.sp[2], out.bat1_first);
-			if (io)                                         /* the DO4 pulse too (D5 changes no setpoint) */
-				printf("D5 %d %d %d\n", run, k, out.do4_pulse);
+			if (io)                       /* the DO4 pulse too (D5 changes no setpoint), and the D1 cell (0.60-c) */
+				printf("D5 %d %d %d %d\n", run, k, out.do4_pulse, out.d1_id);
 		}
 	}
 	return 0;
