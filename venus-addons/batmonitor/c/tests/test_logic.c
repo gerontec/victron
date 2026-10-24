@@ -585,6 +585,24 @@ static void test_forecast_overrides_winter(void)
 	CHECK(!r.out.fc_active && rule_has(&r, "WP:Z2"), "stale forecast ignored");
 }
 
+/* 0.54-c (user 2026-10-24): below WP_SOC_MIN (15 %) the stacks give nothing to the heat pump, even when a good
+   forecast (target 5 %) would let them serve it as in summer; the house is still served */
+static void test_low_soc_no_wp(void)
+{
+	struct run r;
+	struct plant pl = BASE(.house = 500, .wp = 4400, .r290_hz = 60, .season = BM_WINTER, .season_age_h = 1,
+						   .fc_target = 5, .soc = {13, 13});
+	simulate(&r, &pl, local_time(2026, 10, 24, 4, 0), 60);
+	print_state("winter night, forecast target 5 %, SoC 13", &r);
+	CHECK(r.out.fc_active && rule_has(&r, "WP:LOWSOC"), "forecast active, but low SoC: WP:LOWSOC");
+	CHECK(abs(sum_sp(&r) + 500) <= 60, "only the house, sp sum %d", sum_sp(&r));
+
+	pl.soc[0] = pl.soc[1] = 20;                                  /* above 15 + 2: the forecast rule serves the WP */
+	simulate(&r, &pl, local_time(2026, 10, 24, 4, 0), 60);
+	CHECK(rule_has(&r, "WP:FC "), "SoC 20: WP:FC again");
+	CHECK(abs(sum_sp(&r) + 4900) <= 60, "house + heat pump, sp sum %d", sum_sp(&r));
+}
+
 static void test_forecast_bad_caps_wp(void)
 {
 	struct run r;
@@ -907,6 +925,7 @@ int main(void)
 	test_transition_wp_1900();
 	test_param_override();
 	test_forecast_overrides_winter();
+	test_low_soc_no_wp();
 	test_forecast_bad_caps_wp();
 	test_forecast_keeps_source();
 	test_do4_pulse();

@@ -49,6 +49,7 @@ struct bm_cfg {
 	double export_cap, house_est;   /* summer peak window (0.49-c): charge only the export above this W; house load guess */
 	double do4_grace_s, do4_hard_w; /* DO4 only after PCC > 20 kW for this long, at once above this (0.50-c) */
 	double acout_feed_max_w, acout_feed_s;   /* DO4 when PV feeds more than this into one AC-out for this long (0.51-c) */
+	double wp_soc_min;              /* no heat pump support from the stacks while the lowest stack SoC is below (0.54-c) */
 };
 
 /* parameter table: name (env BATMONITOR_<name>), default, allowed range, unit, meaning */
@@ -116,6 +117,7 @@ struct bm_state {
 	int ls_yday, peak_today;                     /* local day of the peak window, PCC > 20 kW seen today */
 	int fc_active;                               /* forecast: stacks above the target SoC -> serve everything */
 	int bat1_first;                              /* Sofar Bat1 above BAT1_SOC_MIN: it discharges first (0.38-c) */
+	int wp_low;                                  /* lowest stack below WP_SOC_MIN: no heat pump support (0.54-c) */
 	double do4_last;                             /* monotonic s of the last DO4 pulse, 0 = none (0.46-c) */
 	double do4_over_since;                       /* monotonic s since the PCC is above PCC_PEAK_TH, 0 = not (0.50-c) */
 	double acout_over_since;                     /* monotonic s since an AC-out feeds above ACOUT_FEED_MAX_W (0.51-c) */
@@ -148,7 +150,7 @@ struct bm_out {
 /* ---- decision layer (0.43-c): the discrete part of the rule chain as pure functions of predicates ("bits", each a
    threshold comparison of the inputs) and the hysteresis state bits; the amounts (W) stay in bm_step. Every
    input / state combination of each function is enumerated by tests/check_matrix.c (make check). */
-enum bm_wp_reason { BM_WP_NA, BM_WP_OFF, BM_WP_FC, BM_WP_FCBAD, BM_WP_Z2, BM_WP_T1900, BM_WP_ALL, BM_WP_N };
+enum bm_wp_reason { BM_WP_NA, BM_WP_OFF, BM_WP_FC, BM_WP_FCBAD, BM_WP_Z2, BM_WP_T1900, BM_WP_ALL, BM_WP_LOWSOC, BM_WP_N };
 enum bm_src_reason { BM_SRC_DAY, BM_SRC_B1, BM_SRC_STK, BM_SRC_B1W, BM_SRC_N };
 enum bm_mode { BM_M_BMS_MISSING, BM_M_FORCE, BM_M_STALE, BM_M_LADESPERRE, BM_M_CHARGE, BM_M_FULL, BM_M_PROT,
 			   BM_M_CHARGING, BM_M_DIS, BM_M_N };
@@ -178,7 +180,7 @@ struct bm_mode_rule {
 extern const struct bm_mode_rule BM_MODE_RULE[];
 extern const char *BM_WPK_NAME[BM_WPK_N];
 
-/* D1: forecast rule, S3 source, S2 scope. State: fc_active, bat1_first */
+/* D1: forecast rule, S3 source, S2 scope. State: fc_active, bat1_first, wp_low */
 struct bm_d1_in {
 	int season;                 /* base season BM_SUMMER / BM_WINTER / BM_TRANSITION (measured, else months) */
 	int night;                  /* have_pv && pv < NIGHT_PV_TH */
@@ -193,14 +195,16 @@ struct bm_d1_in {
 	int fc_target_bad;          /* target_soc >= FC_BAD_TARGET */
 	int b1_above_min;           /* SOC_Bat1 present and > BAT1_SOC_MIN */
 	int b1_ge_release;          /* SOC_Bat1 >= BAT1_SOC_MIN + BAT1_FIRST_HYST */
+	int wp_soc_low_on;          /* lowest stack SoC < WP_SOC_MIN (0.54-c) */
+	int wp_soc_low_off;         /* lowest stack SoC >= WP_SOC_MIN + WP_SOC_HYST */
 };
 struct bm_d1_out {
-	int fc_active, bat1_first;  /* next state */
+	int fc_active, bat1_first, wp_low;   /* next state */
 	int fc_ok, fc_bad, season_wp, winter, b1_first, night_floor, wp_fc_capped, wp_cap_armed;
 	int wp_reason, src_reason;
 	int wp_kind;                /* enum bm_wp_kind: S2 row of the discharge matrix */
 };
-void bm_d1(const struct bm_d1_in *b, int fc_active, int bat1_first, struct bm_d1_out *o);
+void bm_d1(const struct bm_d1_in *b, int fc_active, int bat1_first, int wp_low, struct bm_d1_out *o);
 
 /* D2: S0 SoC protection / force charge per bank and the S1 mode per bank. State: prot[], force[], low[], chg_prev */
 struct bm_d2_bank {

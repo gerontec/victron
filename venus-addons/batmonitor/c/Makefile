@@ -63,7 +63,7 @@ tests/check_matrix: tests/check_matrix.c bm_logic.c bm_logic.h
 # "cbmc-full" adds the floating-point amount proofs (cbmc 5.95 + cadical: alloc_discharge ~6 min, charge ~6 min,
 # discharge ~1 min)
 CBMC_BIN ?= cbmc
-CBMC = $(CBMC_BIN) tests/cbmc_harness.c -I. --unwind 32 --unwinding-assertions --external-sat-solver cadical
+CBMC = $(CBMC_BIN) tests/cbmc_harness.c -I. --unwind 40 --unwinding-assertions --external-sat-solver cadical
 CBMC_FAST = h_d2_bits h_d1_bits h_dis_amount
 CBMC_SLOW = h_alloc_discharge h_charge h_discharge
 # one target per harness, so "make -j cbmc-full" runs them in parallel (the slow ones take minutes each)

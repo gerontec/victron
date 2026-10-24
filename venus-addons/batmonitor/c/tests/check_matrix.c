@@ -83,18 +83,19 @@ static void check_d1(void)
 	static const char *SN[4] = {"", "summer", "winter", "transition"};
 	long combos = 0, reach[BM_WP_N][BM_SRC_N] = {{0}}, reach_season[4][BM_SRC_N] = {{0}};
 	for (int si = 0; si < 3; si++)
-		for (unsigned v = 0; v < (1u << 14); v++)
-			for (int s = 0; s < 4; s++) {
+		for (unsigned v = 0; v < (1u << 16); v++)
+			for (int s = 0; s < 8; s++) {
 				struct bm_d1_in b = {SEASONS[si], BIT(v, 0), BIT(v, 1), BIT(v, 2), BIT(v, 3), BIT(v, 4), BIT(v, 5),
 									 BIT(v, 6), BIT(v, 7), BIT(v, 8), BIT(v, 9), BIT(v, 10), BIT(v, 11), BIT(v, 12),
-									 BIT(v, 13)};
+									 BIT(v, 13), BIT(v, 14), BIT(v, 15)};
 				/* constraints: wp_pos needs fresh data (> 0 W), wp_on needs wp_pos (WP_ON_TH > 0);
 				   SoC > target + FC_HYST excludes SoC < target */
-				if ((b.wp_pos && !b.wp_fresh) || (b.wp_on && !b.wp_pos) || (b.fc_above_on && b.fc_below_off))
+				if ((b.wp_pos && !b.wp_fresh) || (b.wp_on && !b.wp_pos) || (b.fc_above_on && b.fc_below_off)
+					|| (b.wp_soc_low_on && b.wp_soc_low_off))
 					continue;
-				int fa = s & 1, bf = s >> 1;
+				int fa = s & 1, bf = (s >> 1) & 1, wl = s >> 2;
 				struct bm_d1_out o, o2;
-				bm_d1(&b, fa, bf, &o);
+				bm_d1(&b, fa, bf, wl, &o);
 				combos++;
 				reach[o.wp_reason][o.src_reason]++;
 				reach_season[o.season_wp][o.src_reason]++;
@@ -111,14 +112,19 @@ static void check_d1(void)
 				/* S3 independent of the forecast state (0.45-c) */
 				{
 					struct bm_d1_out x;
-					bm_d1(&b, !fa, bf, &x);
+					bm_d1(&b, !fa, bf, wl, &x);
 					INV(x.src_reason == o.src_reason && x.night_floor == o.night_floor, "SRC independent of FC_ACTIVE");
 				}
 				INV(!o.wp_fc_capped || (o.fc_bad && b.wp_pos), "forecast cap only with FC_BAD and WP power");
 				INV(!o.wp_cap_armed || (!b.wp_fresh && o.winter && b.wp_running), "WP_CAP only as stale-data fallback");
 				INV((o.wp_reason == BM_WP_NA) == !b.wp_fresh, "WP:NA exactly with stale em0/power");
 				INV((o.wp_reason == BM_WP_OFF) == (b.wp_fresh && !b.wp_on), "WP:OFF exactly below WP_ON_TH");
-				INV((o.wp_reason == BM_WP_FC) == (b.wp_on && o.fc_active), "WP:FC exactly WP on + FC_ACTIVE");
+				INV((o.wp_reason == BM_WP_FC) == (b.wp_on && o.fc_active && !o.wp_low), "WP:FC exactly WP on + FC_ACTIVE, SoC ok");
+				/* low SoC (0.54-c): no heat pump support, whatever season and forecast say */
+				INV(o.wp_low == (b.wp_soc_low_on || (wl && !b.wp_soc_low_off)), "WP_LOW latch: on below, off from + hyst");
+				INV((o.wp_reason == BM_WP_LOWSOC) == (b.wp_on && o.wp_low), "WP:LOWSOC exactly WP on + low SoC");
+				INV(!o.wp_low || o.wp_kind == BM_WPK_NONE, "low SoC -> the stacks cover none of the heat pump");
+				INV(!o.wp_low || !o.wp_fc_capped, "low SoC overrides the forecast cap");
 				INV(o.wp_reason != BM_WP_FCBAD || o.wp_fc_capped, "WP:FCBAD only when the forecast cap binds");
 				INV(o.wp_reason != BM_WP_Z2 || o.season_wp == BM_WINTER, "WP:Z2 only in winter");
 				/* discharge matrix rows (0.45-c) */
@@ -131,13 +137,14 @@ static void check_d1(void)
 				/* B1FIRST in winter changes only the reason, not the regulation (night floor, 0.40-c note) */
 				if (b.season == BM_WINTER) {
 					struct bm_d1_out x;
-					bm_d1(&b, fa, !bf, &x);
+					bm_d1(&b, fa, !bf, wl, &x);
 					INV(x.night_floor == o.night_floor, "winter: night floor independent of bat1_first");
 				}
-				bm_d1(&b, o.fc_active, o.bat1_first, &o2);
-				INV(o2.fc_active == o.fc_active && o2.bat1_first == o.bat1_first, "D1 state fixed after one step");
+				bm_d1(&b, o.fc_active, o.bat1_first, o.wp_low, &o2);
+				INV(o2.fc_active == o.fc_active && o2.bat1_first == o.bat1_first && o2.wp_low == o.wp_low,
+					"D1 state fixed after one step");
 			}
-	printf("\nD1 forecast / source / scope: %ld consistent combinations (14 bits x 3 seasons x 4 states)\n", combos);
+	printf("\nD1 forecast / source / scope: %ld consistent combinations (16 bits x 3 seasons x 8 states)\n", combos);
 	printf("  WP reason x SRC reason (count of combinations, 0 = unreachable):\n  %-6s", "");
 	for (int s = 0; s < BM_SRC_N; s++)
 		printf("%8s", BM_SRC_NAME[s]);

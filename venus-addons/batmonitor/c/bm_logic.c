@@ -28,6 +28,7 @@
 #define SEASON_MAX_AGE (2 * 86400)   /* s: older batmonitor/season -> month rule */
 #define FC_MAX_AGE (3 * 3600)        /* s: older batmonitor/forecast is ignored */
 #define BAT1_FIRST_HYST 2.0          /* %: Sofar-first back on above BAT1_SOC_MIN + this */
+#define WP_SOC_HYST 2.0              /* %: heat pump support back from WP_SOC_MIN + this (0.54-c) */
 /* batmonitor */
 #define BAT1_CHARGE_FACTOR 0.5
 /* charge block, 1:1 from waveshare/fox2db_logic.h (fox2db v2.9) and sofar_waveshare.yaml */
@@ -109,6 +110,7 @@ const struct bm_param BM_PARAMS[] = {
 	{"ACOUT_FEED_MAX_W",      P(acout_feed_max_w),          5000,    0,       10000,   "W", "grid offline: DO4 when PV feeds more than this into one MultiPlus AC-out (factor 1.0 rule, 5000 VA; 0 = off)"},
 	{"ACOUT_FEED_S",          P(acout_feed_s),              10,      0,       120,     "s", "... for this long"},
 	{"CHARGER_DC_W",          P(charger_dc_w),              3600,    500,     5000,    "W", "full_at forecast: DC at the BMS per MultiPlus at its limit (measured 2026-10-09: ~3.6 kW, 65-67 A, flat over 53.6-54.6 V)"},
+	{"WP_SOC_MIN",            P(wp_soc_min),                15,      0,       100,     "%", "no heat pump support from the stacks while the lowest stack SoC is below this, also with a good forecast; back from + 2 % (0 = off)"},
 };
 const int BM_NPARAMS = sizeof(BM_PARAMS) / sizeof(BM_PARAMS[0]);
 
@@ -442,7 +444,7 @@ static void chg_caps(const struct bm_out *out, int *cap)
 
 /* ---- decision layer (0.43-c): pure functions of bits + state, see bm_logic.h -------------------------------- */
 
-const char *BM_WP_NAME[BM_WP_N] = {"NA", "OFF", "FC", "FCBAD", "Z2", "T1900", "ALL"};
+const char *BM_WP_NAME[BM_WP_N] = {"NA", "OFF", "FC", "FCBAD", "Z2", "T1900", "ALL", "LOWSOC"};
 const char *BM_SRC_NAME[BM_SRC_N] = {"DAY", "B1", "STK", "B1W"};
 const char *BM_MODE_NAME[BM_M_N] = {"BMS_MISSING", "FORCE", "STALE", "LADESPERRE", "CHARGE", "FULL", "PROT", "CHARGING",
 									"DIS"};
@@ -450,7 +452,9 @@ const char *BM_MODE_NAME[BM_M_N] = {"BMS_MISSING", "FORCE", "STALE", "LADESPERRE
 /* D1. Forecast (0.24): while the lowest stack is above the SoC the next day's PV refills, the stacks serve the heat
    pump as in summer; on above target + FC_HYST, off below target. Bad forecast (0.37-c): target_soc >= FC_BAD_TARGET
    -> the stacks cover at most WP_BAT_SHARE_BAD % of the heat pump (S2). Sofar first (0.38-c): Bat1 above BAT1_SOC_MIN
-   (on again from + BAT1_FIRST_HYST) and the heat pump running -> the Sofar delivers first at night (S3) */
+   (on again from + BAT1_FIRST_HYST) and the heat pump running -> the Sofar delivers first at night (S3). Low SoC
+   (0.54-c, user 2026-10-24): the lowest stack below WP_SOC_MIN (back from + WP_SOC_HYST) -> the stacks cover none of
+   the heat pump, whatever season or forecast say (S2 kind NONE, reason LOWSOC); the house load is served as before */
 /* the discharge matrix rows (bm_logic.h): only the night floor (SRC STK) takes the Sofar battery over */
 const struct bm_src_rule BM_SRC_RULE[BM_SRC_N] = {
 	/*               b1_signed trickle idle_w      prop_hold */
@@ -474,9 +478,14 @@ const struct bm_mode_rule BM_MODE_RULE[BM_M_N] = {
 };
 const char *BM_WPK_NAME[BM_WPK_N] = {"NONE", "CAP", "ALL", "BAD"};
 
-void bm_d1(const struct bm_d1_in *b, int fc_active, int bat1_first, struct bm_d1_out *o)
+void bm_d1(const struct bm_d1_in *b, int fc_active, int bat1_first, int wp_low, struct bm_d1_out *o)
 {
 	memset(o, 0, sizeof(*o));
+	if (b->wp_soc_low_on)
+		wp_low = 1;
+	else if (b->wp_soc_low_off)
+		wp_low = 0;
+	o->wp_low = wp_low;
 	o->fc_ok = b->fc_fresh && b->fc_minsoc_ok;
 	if (!o->fc_ok)
 		fc_active = 0;
@@ -496,13 +505,14 @@ void bm_d1(const struct bm_d1_in *b, int fc_active, int bat1_first, struct bm_d1
 	o->b1_first = bat1_first && b->wp_on;
 	/* S3 reads the measured season, not season_wp (0.45-c): the forecast only widens the heat pump scope (S2) */
 	o->night_floor = b->night && !o->b1_first && (b->season != BM_WINTER || !b->wp_on);
-	o->wp_fc_capped = o->fc_bad && b->wp_pos && b->fc_share_lt_share;
+	o->wp_fc_capped = !wp_low && o->fc_bad && b->wp_pos && b->fc_share_lt_share;
 	o->wp_cap_armed = !b->wp_fresh && o->winter && b->wp_running;
-	o->wp_reason = !b->wp_fresh ? BM_WP_NA : !b->wp_on ? BM_WP_OFF : fc_active ? BM_WP_FC : o->wp_fc_capped ? BM_WP_FCBAD
+	o->wp_reason = !b->wp_fresh ? BM_WP_NA : !b->wp_on ? BM_WP_OFF : wp_low ? BM_WP_LOWSOC : fc_active ? BM_WP_FC
+				   : o->wp_fc_capped ? BM_WP_FCBAD
 				   : o->season_wp == BM_WINTER ? BM_WP_Z2
 				   : o->season_wp == BM_TRANSITION && b->wp_gt_trans ? BM_WP_T1900 : BM_WP_ALL;
 	o->src_reason = !b->night ? BM_SRC_DAY : o->b1_first ? BM_SRC_B1 : o->night_floor ? BM_SRC_STK : BM_SRC_B1W;
-	o->wp_kind = o->wp_fc_capped ? BM_WPK_BAD : o->season_wp == BM_WINTER ? BM_WPK_NONE
+	o->wp_kind = wp_low ? BM_WPK_NONE : o->wp_fc_capped ? BM_WPK_BAD : o->season_wp == BM_WINTER ? BM_WPK_NONE
 				 : o->season_wp == BM_TRANSITION ? BM_WPK_CAP : BM_WPK_ALL;
 }
 
@@ -696,6 +706,8 @@ static void d1_bits(const struct bm_cfg *cfg, const struct bm_in *in, const stru
 	b->fc_target_bad = in->fc_target >= cfg->fc_bad_target;
 	b->b1_above_min = in->have_soc_bat1 && in->soc_bat1 > cfg->bat1_soc_min;
 	b->b1_ge_release = in->soc_bat1 >= cfg->bat1_soc_min + BAT1_FIRST_HYST;
+	b->wp_soc_low_on = min_soc < cfg->wp_soc_min;
+	b->wp_soc_low_off = min_soc >= cfg->wp_soc_min + WP_SOC_HYST;
 }
 
 /* S2 row of the discharge matrix: the part of the heat pump W the stacks cover */
@@ -720,9 +732,10 @@ static void chain_d1(const struct bm_cfg *cfg, const struct bm_in *in, struct bm
 	struct bm_d1_out o;
 	double min_soc = lowest_soc(in);
 	d1_bits(cfg, in, out, c, &b);
-	bm_d1(&b, st->fc_active, st->bat1_first, &o);
+	bm_d1(&b, st->fc_active, st->bat1_first, st->wp_low, &o);
 	st->fc_active = o.fc_active;
 	st->bat1_first = o.bat1_first;
+	st->wp_low = o.wp_low;
 	out->fc_active = o.fc_active;
 	out->fc_target = o.fc_ok ? in->fc_target : -1;
 	out->fc_min_soc = min_soc;

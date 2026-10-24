@@ -42,6 +42,7 @@ WP_ON_TH = 300.0               # W: heat pump counts as running (no night floor)
 SEASON_MAX_AGE = 2 * 86400     # s: older batmonitor/season -> month rule
 FC_MAX_AGE = 3 * 3600          # s: older batmonitor/forecast is ignored
 BAT1_FIRST_HYST = 2.0          # %: Sofar-first back on above BAT1_SOC_MIN + this
+WP_SOC_HYST = 2.0              # %: heat pump support back from WP_SOC_MIN + this (0.54-c)
 BAT1_CHARGE_FACTOR = 0.5
 # charge block, 1:1 from waveshare/fox2db_logic.h (fox2db v2.9) and sofar_waveshare.yaml
 LADESPERRE_FROM, LADESPERRE_TO = 5, 8
@@ -190,6 +191,7 @@ BM_PARAMS = [
     Param("ACOUT_FEED_MAX_W", "acout_feed_max_w", 5000, 0, 10000, "W", "grid offline: DO4 when PV feeds more than this into one MultiPlus AC-out (factor 1.0 rule, 5000 VA; 0 = off)"),
     Param("ACOUT_FEED_S", "acout_feed_s", 10, 0, 120, "s", "... for this long"),
     Param("CHARGER_DC_W", "charger_dc_w", 3600, 500, 5000, "W", "full_at forecast: DC at the BMS per MultiPlus at its limit"),
+    Param("WP_SOC_MIN", "wp_soc_min", 15, 0, 100, "%", "no heat pump support from the stacks while the lowest stack SoC is below this, also with a good forecast; back from + 2 % (0 = off)"),
 ]
 
 
@@ -272,6 +274,7 @@ class State:
     peak_today: int = 0                         # PCC > 20 kW seen today (display)
     fc_active: int = 0
     bat1_first: int = 0
+    wp_low: int = 0                             # lowest stack below WP_SOC_MIN: no heat pump support (0.54-c)
     do4_last: float = 0.0
     do4_over_since: float = 0.0                 # monotonic s since the PCC is above PCC_PEAK_TH, 0 = not (0.50-c)
     acout_over_since: float = 0.0               # monotonic s since an AC-out feeds above ACOUT_FEED_MAX_W (0.51-c)
@@ -499,8 +502,8 @@ def int_caps(caps):
 
 # ---- decision layer: pure functions of predicate bits + state (enumerated by make check in C) ----------------
 
-BM_WP_NA, BM_WP_OFF, BM_WP_FC, BM_WP_FCBAD, BM_WP_Z2, BM_WP_T1900, BM_WP_ALL = range(7)
-BM_WP_NAME = ["NA", "OFF", "FC", "FCBAD", "Z2", "T1900", "ALL"]
+BM_WP_NA, BM_WP_OFF, BM_WP_FC, BM_WP_FCBAD, BM_WP_Z2, BM_WP_T1900, BM_WP_ALL, BM_WP_LOWSOC = range(8)
+BM_WP_NAME = ["NA", "OFF", "FC", "FCBAD", "Z2", "T1900", "ALL", "LOWSOC"]
 BM_SRC_DAY, BM_SRC_B1, BM_SRC_STK, BM_SRC_B1W = range(4)
 BM_SRC_NAME = ["DAY", "B1", "STK", "B1W"]
 (BM_M_BMS_MISSING, BM_M_FORCE, BM_M_STALE, BM_M_LADESPERRE, BM_M_CHARGE, BM_M_FULL, BM_M_PROT, BM_M_CHARGING,
@@ -551,12 +554,18 @@ BM_MODE_RULE = {
 }
 
 
-def bm_d1(b, fc_active, bat1_first):
+def bm_d1(b, fc_active, bat1_first, wp_low):
     """D1. Forecast: while the lowest stack is above the SoC the next day's PV refills, the stacks serve the heat pump
     as in summer (on above target + FC_HYST, off below target). Bad forecast: the stacks cover at most WP_BAT_SHARE_BAD %
     of the heat pump (S2). Sofar first: Bat1 above BAT1_SOC_MIN and the heat pump running -> the Sofar delivers first
-    at night (S3). b: dict of the bm_d1_in bits. Returns a dict like bm_d1_out."""
+    at night (S3). Low SoC (0.54-c): the lowest stack below WP_SOC_MIN (back from + WP_SOC_HYST) -> the stacks cover
+    none of the heat pump (kind NONE, reason LOWSOC). b: dict of the bm_d1_in bits. Returns a dict like bm_d1_out."""
     o = {}
+    if b["wp_soc_low_on"]:
+        wp_low = 1
+    elif b["wp_soc_low_off"]:
+        wp_low = 0
+    o["wp_low"] = wp_low
     o["fc_ok"] = b["fc_fresh"] and b["fc_minsoc_ok"]
     if not o["fc_ok"]:
         fc_active = 0
@@ -576,12 +585,14 @@ def bm_d1(b, fc_active, bat1_first):
     o["b1_first"] = int(bool(bat1_first and b["wp_on"]))
     # S3 reads the measured season, not season_wp (0.45-c): the forecast only widens the heat pump scope (S2)
     o["night_floor"] = bool(b["night"] and not o["b1_first"] and (b["season"] != BM_WINTER or not b["wp_on"]))
-    o["wp_fc_capped"] = bool(o["fc_bad"] and b["wp_pos"] and b["fc_share_lt_share"])
+    o["wp_fc_capped"] = bool(not wp_low and o["fc_bad"] and b["wp_pos"] and b["fc_share_lt_share"])
     o["wp_cap_armed"] = bool(not b["wp_fresh"] and o["winter"] and b["wp_running"])
     if not b["wp_fresh"]:
         o["wp_reason"] = BM_WP_NA
     elif not b["wp_on"]:
         o["wp_reason"] = BM_WP_OFF
+    elif wp_low:
+        o["wp_reason"] = BM_WP_LOWSOC
     elif fc_active:
         o["wp_reason"] = BM_WP_FC
     elif o["wp_fc_capped"]:
@@ -594,7 +605,7 @@ def bm_d1(b, fc_active, bat1_first):
         o["wp_reason"] = BM_WP_ALL
     o["src_reason"] = (BM_SRC_DAY if not b["night"] else BM_SRC_B1 if o["b1_first"]
                        else BM_SRC_STK if o["night_floor"] else BM_SRC_B1W)
-    o["wp_kind"] = (BM_WPK_BAD if o["wp_fc_capped"] else BM_WPK_NONE if o["season_wp"] == BM_WINTER
+    o["wp_kind"] = (BM_WPK_NONE if wp_low else BM_WPK_BAD if o["wp_fc_capped"] else BM_WPK_NONE if o["season_wp"] == BM_WINTER
                     else BM_WPK_CAP if o["season_wp"] == BM_TRANSITION else BM_WPK_ALL)
     return o
 
@@ -758,6 +769,8 @@ def d1_bits(cfg, inp, out, c):
         "fc_target_bad": inp.fc_target >= cfg.fc_bad_target,
         "b1_above_min": bool(inp.have_soc_bat1 and inp.soc_bat1 > cfg.bat1_soc_min),
         "b1_ge_release": inp.soc_bat1 >= cfg.bat1_soc_min + BAT1_FIRST_HYST,
+        "wp_soc_low_on": min_soc < cfg.wp_soc_min,
+        "wp_soc_low_off": min_soc >= cfg.wp_soc_min + WP_SOC_HYST,
     }
 
 
@@ -774,9 +787,10 @@ def wp_share(cfg, wp_kind, wp):
 
 def chain_d1(cfg, inp, st, out, c):
     """forecast, S3 source, S2 scope; then z2 = PCC + the heat pump part the stacks must NOT cover"""
-    o = bm_d1(d1_bits(cfg, inp, out, c), st.fc_active, st.bat1_first)
+    o = bm_d1(d1_bits(cfg, inp, out, c), st.fc_active, st.bat1_first, st.wp_low)
     st.fc_active = o["fc_active"]
     st.bat1_first = o["bat1_first"]
+    st.wp_low = o["wp_low"]
     out.fc_active = o["fc_active"]
     out.fc_target = inp.fc_target if o["fc_ok"] else -1
     out.fc_min_soc = lowest_soc(inp)

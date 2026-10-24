@@ -95,6 +95,7 @@ void h_d1_bits(void)
 	bm_cfg_default(&c);
 	c.fc_hyst = in_range(0, 20);
 	c.wp_bat_share_bad = in_range(0, 100);
+	c.wp_soc_min = in_range(0, 100);
 	memset(&in, 0, sizeof(in));
 	memset(&out, 0, sizeof(out));
 	memset(&ch, 0, sizeof(ch));
@@ -112,6 +113,7 @@ void h_d1_bits(void)
 	assert(!b.wp_pos || b.wp_fresh);
 	assert(!b.wp_on || b.wp_pos);
 	assert(!(b.fc_above_on && b.fc_below_off));
+	assert(!(b.wp_soc_low_on && b.wp_soc_low_off));
 }
 
 void h_alloc_discharge(void)
