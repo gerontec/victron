@@ -17,6 +17,13 @@ https://kylehart.github.io/mk2vsc/FORMAT.html and FIELDS.html, read 2026-10-21);
 Scaled value: scale > 0 -> (raw + offset) * scale, scale < 0 -> (raw + offset) / -scale,
 scale = 0 -> no scaling known from the device schema (value NULL).
 
+ESS assistant (setting ids from 1000 on): behind the 192 setting words each device block carries the assistant
+program VEConfig wrote (u16 length, then code). Its settings are constants inside the code, found behind fixed byte
+patterns (anchors, ESS_FIELDS). Found 2026-10-24 by diffing pre_/post_pytes49_20261024.rvms (sustain 50 -> 51 V,
+dynamic cut-off 52/50/49.2/48 -> 49 V, PV inverters on AC-out no -> yes with 15000 W) and checked on every backup
+since 2026-10-07. Cut-off and PV frequencies/power are only in the master (L1); a value whose anchor is missing or
+not unique gets no row. The restart offset (1.20 V) is not a plain constant and is not decoded.
+
 Grid code: setting 81 (grid_code). Also read live from Venus (N/<portal>/vebus/<n>/Settings/GridCode, local MQTT
 broker) as source = 'dbus', and a mismatch with the backup is reported.
 
@@ -98,11 +105,26 @@ SETTINGS = {
 SETTINGS.update({i: (f'not_defined_yet_{127 - i}', 'UNKNOWN') for i in range(90, 128)})
 SETTINGS.update({i: (f'grid_settings_int{i - 129}', 'UNKNOWN') for i in range(129, 190)})
 
+# ESS assistant constants: anchor bytes -> values directly behind it, (setting id, name, bytes, divisor, confidence)
+ESS_FIELDS = (
+	(bytes.fromhex('51012bb244'), ((1000, 'ess_sustain_V', 2, 100, 'CONFIRMED'),)),
+	(bytes.fromhex('54d40264'), ((1001, 'ess_cutoff_0005C_V', 2, 100, 'CONFIRMED'),
+								  (1002, 'ess_cutoff_025C_V', 2, 100, 'CONFIRMED'),
+								  (1003, 'ess_cutoff_07C_V', 2, 100, 'CONFIRMED'),
+								  (1004, 'ess_cutoff_2C_V', 2, 100, 'CONFIRMED'))),
+	(bytes.fromhex('2ea624'), ((1010, 'ess_pv_freq_start_reduce_Hz', 2, 100, 'HIGH'),
+							   (1011, 'ess_pv_freq_min_power_Hz', 2, 100, 'HIGH'),
+							   (1012, 'ess_pv_freq_disconnect_Hz', 2, 100, 'HIGH'),
+							   (1013, 'ess_pv_inverter_W', 3, 1, 'CONFIRMED'),
+							   (1014, 'ess_pv_panel_W', 3, 1, 'CONFIRMED'))),
+)
+ASSISTANT_LEN_ID = 999
+
 DDL = f"""CREATE TABLE IF NOT EXISTS {TABLE} (
 	device_id TINYINT UNSIGNED NOT NULL COMMENT 'VE.Bus device of Venus: 0 = L1 master, 1 = L2, 2 = L3',
 	source VARCHAR(8) NOT NULL COMMENT 'rvms = mk2vsc backup file, dbus = live Venus value',
 	setting_id SMALLINT UNSIGNED NOT NULL,
-	setting_name VARCHAR(64) NULL COMMENT 'name from the mk2vsc project (FIELDS.html)',
+	setting_name VARCHAR(64) NULL COMMENT 'name from the mk2vsc project (FIELDS.html); ids >= 999 = ESS assistant',
 	confidence VARCHAR(10) NULL COMMENT 'mk2vsc: CONFIRMED / HIGH / MEDIUM / LOW / UNKNOWN',
 	raw_value SMALLINT UNSIGNED NULL,
 	value DOUBLE NULL COMMENT 'scaled raw value, NULL if the device schema has no scaling',
@@ -172,7 +194,8 @@ def parse_rvms(path):
 			serial = data[b + 0x3a:b + 0x45].split(b'\0')[0].decode('ascii')
 			stamp, = struct.unpack_from('<I', data, b + 0x4f + shift)
 			words = struct.unpack_from(f'<{N_SETTINGS}H', data, b + 0x59 + shift)
-			devices.append({'serial': serial, 'target_id': target, 'firmware': fw & 0xFFFFFF,
+			assistant = data[b + 0x59 + shift + 2 * N_SETTINGS:end - 4]
+			devices.append({'serial': serial, 'target_id': target, 'firmware': fw & 0xFFFFFF, 'assistant': assistant,
 							'backup_at': datetime.fromtimestamp(stamp), 'words': words})
 	if firmware is None or not devices:
 		sys.exit(f'{path}: settings info or device data missing')
@@ -180,6 +203,23 @@ def parse_rvms(path):
 		if dev['firmware'] != firmware:
 			sys.exit(f"{path}: device {dev['serial']} has firmware {dev['firmware']}, settings info is for {firmware}")
 	return firmware, infos, devices
+
+
+def ess_values(assistant):
+	"""Return [(setting id, name, raw, value, confidence)] of the ESS constants found in an assistant program."""
+	if len(assistant) < 2:
+		return []
+	out = [(ASSISTANT_LEN_ID, 'assistant_program_len', struct.unpack_from('<H', assistant)[0], None, 'MEDIUM')]
+	for anchor, fields in ESS_FIELDS:
+		pos = assistant.find(anchor)
+		if pos < 0 or assistant.find(anchor, pos + 1) >= 0:
+			continue
+		pos += len(anchor)
+		for sid, name, width, divisor, confidence in fields:
+			raw = int.from_bytes(assistant[pos:pos + width], 'little')
+			out.append((sid, name, raw, raw / divisor, confidence))
+			pos += width
+	return out
 
 
 def venus_vebus(expected):
@@ -242,6 +282,11 @@ def build_rows(path, firmware, infos, devices, serial_map, grid_code):
 							 value_text=GRID_CODES.get(raw) if sid == GRID_CODE_SETTING else None,
 							 scale=scale, offset_raw=offset, default_raw=default, min_raw=vmin, max_raw=vmax,
 							 source_file=os.path.basename(path), backup_at=dev['backup_at']))
+		for sid, name, raw, value, confidence in ess_values(dev['assistant']):
+			rows.append(dict(common, source='rvms', setting_id=sid, setting_name=name, confidence=confidence,
+							 raw_value=raw if raw <= 0xFFFF else None, value=value if value is not None else raw,
+							 value_text=None, scale=None, offset_raw=None, default_raw=None, min_raw=None, max_raw=None,
+							 source_file=os.path.basename(path), backup_at=dev['backup_at']))
 		if grid_code is not None:
 			if grid_code != dev['words'][GRID_CODE_SETTING]:
 				print(f"WARNING: grid code of {dev['serial']} is {dev['words'][GRID_CODE_SETTING]} in the backup, "
@@ -286,7 +331,7 @@ def main():
 		  + f', grid code backup {sorted({d["words"][GRID_CODE_SETTING] for d in devices})} / Venus {grid_code}')
 	if '--print' in sys.argv:
 		for r in rows:
-			print(f"{r['device_id']} {r['source']:4s} {r['setting_id']:3d} {r['setting_name']:38s} {r['confidence']:9s} "
+			print(f"{r['device_id']} {r['source']:4s} {r['setting_id']:4d} {r['setting_name']:38s} {r['confidence']:9s} "
 				  f"raw={r['raw_value']} value={r['value']} {r['value_text'] or ''}")
 		return
 	write(rows)

@@ -13,6 +13,13 @@ three-phase system without moving the MK3 to a Windows PC.
 | `ess.sh` | the recorded GUI steps (see below) |
 | `dlgshot.sh` | capture the newest Wine dialog to `/tmp/dlg.xwd` (some dialogs are not composited into the root image) |
 | `xwd2png.py` | convert an xwd screenshot to PNG with the Python standard library (no ImageMagick/PIL on the Pi), optional crop `x y w h` |
+| `wiz.sh` | single steps inside the open ESS wizard (`start`, `next`, `set X Y VALUE`, `tab VALUE`, `shot NAME`), one PNG per step in `/tmp/pytes49/`; sends nothing |
+| `cap600.sh` | battery capacity change on all three units (`pre`/`dry`/`run`/`finish`/`status`), used for 600 Ah on 2026-10-23 |
+| `cap.sh` | capture all VEConfig tabs, ESS summary and virtual panel of the open unit to `/tmp/cap/` |
+| `../vebus-backup.sh` | read the complete VE.Bus configuration (incl. assistants) through Venus' MK3 tunnel with mk2vsc to `~/vebus-backup/<name>.rvms` |
+| `nightly-config.sh` | cron 03:30: `vebus-backup.sh` + `rvms2db.py` into `wagodb.dim_config`; skips while Wine holds the MK3 (no vebus service) |
+| `mk3-remote.sh` | lend the MK3 to a PC over USB/IP and take it back |
+| `env.sh` | DISPLAY/WINEPREFIX/PATH for manual use |
 | `../feedin.sh` | fixed feed-in per phase via `/Hub4/Lx/AcPowerSetpoint` (Hub4Mode 3) until a given time |
 
 ## Roll-out on a new three-phase system (3 units, same model and firmware)
@@ -75,3 +82,34 @@ python3 ~/python/rvms2db.py /data/vebus-backup/post_aes_20261021.rvms   # into w
 
 The coordinates in `ess.sh` are absolute on the 1280x800 Xvfb screen with the 1260x780 Wine virtual
 desktop; they hold as long as the window sizes do not change.
+
+## Pytes values in the ESS assistant (2026-10-24)
+
+A "Low battery" alarm at 17 % SoC came from the ESS dynamic cut-off (52/50/49.2/48 V): with 600 Ah,
+26 A is only 0.04C, the interpolated cut-off is about 51.7 V, and L1 sagged to 51.16 V. Changed to the
+Pytes recommendation for the E-BOX48100 (Victron compatibility PDF "VE Configure setting with Pytes 51.2V
+batteries"): sustain 51.00 V, dynamic cut-off 49.00 V at 0.005C/0.25C/0.7C/2C, restart offset 1.20 V
+(unchanged), capacity 600 Ah. "PV inverters on AC out" set to Yes (15000 W inverter and panel power,
+frequencies 50.20/52.70/53.00 Hz default) before the PV inverter is wired; in grid mode it has no effect.
+
+```sh
+cd ~/vec
+sh vebus-backup.sh pre_pytes49_20261024
+setsid nohup sh ess.sh release qc l1 get assist >/tmp/ess_run.log 2>&1 </dev/null &
+sh wiz.sh start; sh wiz.sh next; sh wiz.sh next; sh wiz.sh next     # Welcome, Battery system, Capacity
+sh wiz.sh set 133 228 51.00                                         # Sustain
+sh wiz.sh next; sh wiz.sh set 123 266 49.00; sh wiz.sh tab 49.00; sh wiz.sh tab 49.00; sh wiz.sh tab 49.00
+sh wiz.sh next; sh wiz.sh next                                      # Restart offset, PV inverters (Yes: radio 46,162)
+# PV pages on the master only: restart PV voltage, frequencies, total solar power (fields 222,153 / 222,174)
+sh wiz.sh next; sh wiz.sh next                                      # VEConfig settings summary, finish
+sh ess.sh sendthis
+sh ess.sh close l2 get assist                                       # L2/L3: Sustain + PV only, then sendthis
+```
+
+- Look at every PNG before the next click. The wizard window does not always open at the same place:
+  `wiz.sh next` clicks ">>" relative to the window (364, height-34), not at absolute coordinates.
+- On L2/L3 the wizard has no cut-off, restart or PV detail pages; PV "Yes" goes straight to the summary.
+- `sendall` never carries assistants (VEConfig says so); every unit needs its own `sendthis`.
+- Each `sendthis` resets the VE.Bus; right after it a slave can show 53 Hz output for a few seconds.
+- `rvms2db.py` decodes the ESS constants from the assistant program in the backup (setting ids 999-1014,
+  see readers/rvms2db.py) so the values show up in `dim_config`.

@@ -1,4 +1,5 @@
 #!/bin/sh
+# Runtime (measured 2026-10-08, 3 units, MK3 tunnel): successful read ~73 s; when all 3 attempts fail it exits after ~16 s (rc=1).
 # Read the complete VE.Bus configuration (all units, incl. assistants) through Venus' MK3 tunnel with
 # Victron's mk2vsc and copy it to ~/vebus-backup on the Pi host.  usage: vebus-backup.sh <name>
 N=${1:?name}; L=$(sudo machinectl show venus -p Leader --value); V() { sudo nsenter -t "$L" -a "$@"; }

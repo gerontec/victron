@@ -42,8 +42,8 @@ esswiz)   # Start assistant; screen origin of the wizard dialog is x=389, ">>" i
   click 588 562 1 15
   click 754 562                                            # Welcome
   click 434 457 1 3; click 754 563                         # Battery system: LiFePo4 with other type BMS
-  click 621 476 1 2; xdotool key End BackSpace BackSpace BackSpace BackSpace BackSpace BackSpace type 900; sleep 2
-  click 754 562                                            # Battery capacity 900 Ah (300 CAN + 600 EBox)
+  click 621 476 1 2; xdotool key End BackSpace BackSpace BackSpace BackSpace BackSpace BackSpace type 600; sleep 2
+  click 754 562                                            # Battery capacity 600 Ah (300 CAN + 300 EBox) = 30 kWh
   click 754 561                                            # change battery type as suggested (default)
   click 754 562                                            # sustain voltage 50.00 V (default)
   click 754 562                                            # dynamic cut-off (defaults)
