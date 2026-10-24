@@ -1,0 +1,569 @@
+{
+ "/Settings/Alarm/Audible": {
+  "label": "Audible alarm",
+  "page": "Select security profile"
+ },
+ "/Settings/Alarm/Vebus/HighDcCurrent": {
+  "label": "High DC current",
+  "page": "PageVebusAlarmSettings",
+  "options": {
+   "0": "Disabled",
+   "1": "Alarm only",
+   "2": "Alarms & warnings"
+  }
+ },
+ "/Settings/Alarm/Vebus/HighDcRipple": {
+  "label": "High DC ripple",
+  "page": "PageVebusAlarmSettings",
+  "options": {
+   "0": "Disabled",
+   "1": "Alarm only",
+   "2": "Alarms & warnings"
+  }
+ },
+ "/Settings/Alarm/Vebus/HighDcVoltage": {
+  "label": "High DC voltage",
+  "page": "PageVebusAlarmSettings",
+  "options": {
+   "0": "Disabled",
+   "1": "Alarm only",
+   "2": "Alarms & warnings"
+  }
+ },
+ "/Settings/Alarm/Vebus/HighTemperature": {
+  "label": "High temperature",
+  "page": "PageVebusAlarmSettings",
+  "options": {
+   "0": "Disabled",
+   "1": "Alarm only",
+   "2": "Alarms & warnings"
+  }
+ },
+ "/Settings/Alarm/Vebus/InverterOverload": {
+  "label": "Inverter Overload",
+  "page": "PageVebusAlarmSettings",
+  "options": {
+   "0": "Disabled",
+   "1": "Alarm only",
+   "2": "Alarms & warnings"
+  }
+ },
+ "/Settings/Alarm/Vebus/LowBattery": {
+  "label": "Low battery voltage",
+  "page": "PageVebusAlarmSettings",
+  "options": {
+   "0": "Disabled",
+   "1": "Alarm only",
+   "2": "Alarms & warnings"
+  }
+ },
+ "/Settings/Alarm/Vebus/TemperatureSenseError": {
+  "label": "Temperature sense error",
+  "page": "PageVebusAlarmSettings",
+  "options": {
+   "0": "Disabled",
+   "1": "Alarm only",
+   "2": "Alarms & warnings"
+  }
+ },
+ "/Settings/Alarm/Vebus/VeBusError": {
+  "label": "VE.Bus error",
+  "page": "PageVebusAlarmSettings",
+  "options": {
+   "0": "Disabled",
+   "2": "Enabled"
+  }
+ },
+ "/Settings/Alarm/Vebus/VoltageSenseError": {
+  "label": "Voltage sense error",
+  "page": "PageVebusAlarmSettings",
+  "options": {
+   "0": "Disabled",
+   "1": "Alarm only",
+   "2": "Alarms & warnings"
+  }
+ },
+ "/Settings/AlarmLevel/HighTemperature": {
+  "label": "High temperature",
+  "page": "PageRsAlarmSettings",
+  "options": {
+   "0": "Disabled",
+   "1": "Alarm only",
+   "2": "Alarms & warnings"
+  }
+ },
+ "/Settings/AlarmLevel/HighVoltage": {
+  "label": "High battery voltage",
+  "page": "PageRsAlarmSettings",
+  "options": {
+   "0": "Disabled",
+   "1": "Alarm only",
+   "2": "Alarms & warnings"
+  }
+ },
+ "/Settings/AlarmLevel/HighVoltageAcOut": {
+  "label": "High AC OUT voltage",
+  "page": "PageRsAlarmSettings",
+  "options": {
+   "0": "Disabled",
+   "1": "Alarm only",
+   "2": "Alarms & warnings"
+  }
+ },
+ "/Settings/AlarmLevel/LowSoc": {
+  "label": "Low state of charge",
+  "page": "PageRsAlarmSettings",
+  "options": {
+   "0": "Disabled",
+   "1": "Alarm only",
+   "2": "Alarms & warnings"
+  }
+ },
+ "/Settings/AlarmLevel/LowVoltage": {
+  "label": "Low battery voltage",
+  "page": "PageRsAlarmSettings",
+  "options": {
+   "0": "Disabled",
+   "1": "Alarm only",
+   "2": "Alarms & warnings"
+  }
+ },
+ "/Settings/AlarmLevel/LowVoltageAcOut": {
+  "label": "Low AC OUT voltage",
+  "page": "PageRsAlarmSettings",
+  "options": {
+   "0": "Disabled",
+   "1": "Alarm only",
+   "2": "Alarms & warnings"
+  }
+ },
+ "/Settings/AlarmLevel/Overload": {
+  "label": "Overload",
+  "page": "PageRsAlarmSettings",
+  "options": {
+   "0": "Disabled",
+   "1": "Alarm only",
+   "2": "Alarms & warnings"
+  }
+ },
+ "/Settings/AlarmLevel/Ripple": {
+  "label": "DC ripple",
+  "page": "PageRsAlarmSettings",
+  "options": {
+   "0": "Disabled",
+   "1": "Alarm only",
+   "2": "Alarms & warnings"
+  }
+ },
+ "/Settings/AlarmLevel/ShortCircuit": {
+  "label": "Short circuit",
+  "page": "PageRsAlarmSettings",
+  "options": {
+   "0": "Disabled",
+   "1": "Alarm only",
+   "2": "Alarms & warnings"
+  }
+ },
+ "/Settings/Ble/Service/Pincode": {
+  "label": "Pincode",
+  "page": "Bluetooth"
+ },
+ "/Settings/BluetoothMode": {
+  "label": "Bluetooth Enabled",
+  "page": "PageBatterySettings",
+  "options": {
+   "0": "No",
+   "1": "Yes"
+  }
+ },
+ "/Settings/BmsPresent": {
+  "label": "BMS Controlled",
+  "page": "Engine",
+  "options": {
+   "0": "No",
+   "1": "Yes"
+  }
+ },
+ "/Settings/CGwacs/AcPowerSetPoint": {
+  "label": "Grid setpoint",
+  "page": "Grid Setpoint",
+  "unit": "W"
+ },
+ "/Settings/CGwacs/BatteryLife/MinimumSocLimit": {
+  "label": "Minimum SOC (unless grid fails)",
+  "page": "PageSettingsHub4",
+  "unit": "%"
+ },
+ "/Settings/CGwacs/BatteryUse": {
+  "label": "Self-consumption from battery",
+  "page": "PageSettingsHub4",
+  "options": {
+   "0": "All system loads",
+   "1": "Only critical loads"
+  }
+ },
+ "/Settings/CGwacs/MaxChargePower": {
+  "label": "Maximum charge power",
+  "page": "PageSettingsHub4",
+  "unit": "W"
+ },
+ "/Settings/CGwacs/MaxDischargePower": {
+  "label": "Maximum inverter power",
+  "page": "PageSettingsHub4",
+  "unit": "W"
+ },
+ "/Settings/CGwacs/MaxFeedInPower": {
+  "label": "Maximum feed-in",
+  "page": "PageSettingsHub4Feedin",
+  "unit": "W"
+ },
+ "/Settings/CGwacs/OvervoltageFeedIn": {
+  "label": "DC-coupled PV - feed in excess",
+  "page": "PageSettingsHub4Feedin"
+ },
+ "/Settings/CGwacs/PreventFeedback": {
+  "label": "AC-coupled PV - feed in excess",
+  "page": "PageSettingsHub4Feedin"
+ },
+ "/Settings/ChargeCurrentLimit": {
+  "label": "Charge current",
+  "page": "Engine",
+  "unit": "A"
+ },
+ "/Settings/ChargeVoltage": {
+  "label": "Charge voltage",
+  "page": "Engine",
+  "unit": "V"
+ },
+ "/Settings/DynamicEss/Mode": {
+  "label": "Mode",
+  "page": "PageSettingsDynamicEss",
+  "options": {
+   "0": "Off",
+   "1": "Auto"
+  }
+ },
+ "/Settings/Ess/MinimumSocLimit": {
+  "label": "Minimum SOC (unless grid fails)",
+  "page": "PageRsSystemEss",
+  "unit": "%"
+ },
+ "/Settings/Ess/Mode": {
+  "label": "Mode",
+  "page": "PageRsSystemEss",
+  "options": {
+   "0": "Optimized (with BatteryLife)",
+   "1": "Optimized (without BatteryLife)",
+   "2": "Keep batteries charged",
+   "3": "External control"
+  }
+ },
+ "/Settings/Fronius/AutoScan": {
+  "label": "Automatic scanning",
+  "page": "PV inverters"
+ },
+ "/Settings/Fronius/PortNumber": {
+  "label": "TCP port",
+  "page": "PV inverters"
+ },
+ "/Settings/Gps/Format": {
+  "label": "Format",
+  "page": "PageSettingsGps",
+  "options": {
+   "0": "52Â° 20' 41.6\" N, 5Â° 13' 12.3\" E",
+   "1": "52.34489, 5.22008",
+   "2": "52Â° 20.693 N, 5Â° 13.205 E"
+  }
+ },
+ "/Settings/Gps/SpeedUnit": {
+  "label": "Speed Unit",
+  "page": "PageSettingsGps"
+ },
+ "/Settings/Gui/AutoBrightness": {
+  "label": "Adaptive brightness",
+  "page": "Units"
+ },
+ "/Settings/Gui/DemoMode": {
+  "label": "Demo mode",
+  "page": "Select security profile",
+  "options": {
+   "0": "Disabled",
+   "1": "ESS demo",
+   "2": "Boat/Motorhome demo 1",
+   "3": "Boat/Motorhome demo 2"
+  }
+ },
+ "/Settings/Gui/DisplayOff": {
+  "label": "Display off time",
+  "page": "Units",
+  "options": {
+   "10": "10 sec",
+   "30": "30 sec",
+   "60": "1 min",
+   "600": "10 min",
+   "1800": "30 min",
+   "0": "Never"
+  }
+ },
+ "/Settings/Gui/Language": {
+  "label": "Language",
+  "page": "Units"
+ },
+ "/Settings/Gui/MobileOverview": {
+  "label": "Show boat & motorhome overview",
+  "page": "Units"
+ },
+ "/Settings/Gui/TanksOverview": {
+  "label": "Show tanks overview",
+  "page": "Units"
+ },
+ "/Settings/LEDs/Enable": {
+  "label": "Enable status LEDs",
+  "page": "Select security profile"
+ },
+ "/Settings/ModbusClient/tcp/AutoScan": {
+  "label": "Automatic scanning",
+  "page": "Modbus TCP/UDP devices"
+ },
+ "/Settings/Modem/PIN": {
+  "label": "PIN",
+  "page": "APN"
+ },
+ "/Settings/Modem/RoamingPermitted": {
+  "label": "Allow roaming",
+  "page": "APN"
+ },
+ "/Settings/Network/VrmPortal": {
+  "label": "VRM Portal",
+  "page": "PageSettingsLogger",
+  "options": {
+   "0": "Off",
+   "1": "Read-only",
+   "2": "Full"
+  }
+ },
+ "/Settings/Pump0/Mode": {
+  "label": "Mode",
+  "page": "Tank pump",
+  "options": {
+   "0": "Auto",
+   "1": "On",
+   "2": "Off"
+  }
+ },
+ "/Settings/Pump0/StartValue": {
+  "label": "Start level",
+  "page": "Tank pump",
+  "unit": "%"
+ },
+ "/Settings/Pump0/StopValue": {
+  "label": "Stop level",
+  "page": "Tank pump",
+  "unit": "%"
+ },
+ "/Settings/Pump0/TankService": {
+  "label": "Tank sensor",
+  "page": "Tank pump"
+ },
+ "/Settings/Relay/1/Polarity": {
+  "label": "Relay 2 polarity",
+  "page": "Relay",
+  "options": {
+   "0": "Normally open",
+   "1": "Normally closed"
+  }
+ },
+ "/Settings/RestoreDefaults": {
+  "label": "Restore factory defaults",
+  "page": "PageBatterySettings",
+  "options": {
+   "0": "Cancel",
+   "1": "Restore"
+  }
+ },
+ "/Settings/Services/BleSensors": {
+  "label": "Enable",
+  "page": "Bluetooth sensors"
+ },
+ "/Settings/Services/Bluetooth": {
+  "label": "Enabled",
+  "page": "Bluetooth"
+ },
+ "/Settings/Services/Bol": {
+  "label": "DVCC",
+  "page": "PageChargeCurrentLimits"
+ },
+ "/Settings/Services/EthernetLinkLocal": {
+  "label": "Enable Link-local",
+  "page": "Ethernet"
+ },
+ "/Settings/Services/Modbus": {
+  "label": "Enable Modbus/TCP",
+  "page": "Modbus/TCP"
+ },
+ "/Settings/Services/MqttLocal": {
+  "label": "MQTT Access",
+  "page": "Services",
+  "options": {
+   "0": "Off",
+   "2": "Paired devices only",
+   "1": "On"
+  }
+ },
+ "/Settings/Services/MqttLocalInsecure": {
+  "label": "MQTT on LAN (Plaintext)",
+  "page": "Services"
+ },
+ "/Settings/Services/MqttVrm": {
+  "label": "VRM two-way communication",
+  "page": "PageSettingsLogger"
+ },
+ "/Settings/System/AccessLevel": {
+  "label": "Access level",
+  "page": "Select security profile"
+ },
+ "/Settings/System/AutoUpdate": {
+  "label": "Auto update",
+  "page": "Online updates",
+  "options": {
+   "0": "Disabled",
+   "2": "Check only",
+   "3": "Check and download only",
+   "1": "Check and update"
+  }
+ },
+ "/Settings/System/ImageType": {
+  "label": "Image type",
+  "page": "Online updates"
+ },
+ "/Settings/System/ReleaseType": {
+  "label": "Update feed",
+  "page": "Online updates"
+ },
+ "/Settings/System/RemoteSupport": {
+  "label": "Remote support",
+  "page": "Select security profile"
+ },
+ "/Settings/System/RemoteSupportIpAndPort": {
+  "label": "Remote support IP and port",
+  "page": "Select security profile"
+ },
+ "/Settings/System/SSHLocal": {
+  "label": "SSH on LAN",
+  "page": "Select security profile"
+ },
+ "/Settings/System/SecurityProfile": {
+  "label": "Local Network Security Profile",
+  "page": "Select security profile"
+ },
+ "/Settings/System/VncLocal": {
+  "label": "Enable Remote Console",
+  "page": "Remote Console"
+ },
+ "/Settings/System/VolumeUnit": {
+  "label": "Volume unit",
+  "page": "Setup",
+  "options": {
+   "0": "Cubic metre",
+   "1": "Litre",
+   "2": "Imperial gallon",
+   "3": "U.S. gallon"
+  }
+ },
+ "/Settings/SystemSetup/AcInput1": {
+  "label": "AC input 1",
+  "page": "PageSettingsSystem",
+  "options": {
+   "0": "Not available",
+   "1": "Grid",
+   "2": "Generator",
+   "3": "Shore power"
+  }
+ },
+ "/Settings/SystemSetup/AcInput2": {
+  "label": "AC input 2",
+  "page": "PageSettingsSystem",
+  "options": {
+   "0": "Not available",
+   "1": "Grid",
+   "2": "Generator",
+   "3": "Shore power"
+  }
+ },
+ "/Settings/SystemSetup/Batteries/Configuration//Enabled": {
+  "label": "Visible",
+  "page": "Battery measurements"
+ },
+ "/Settings/SystemSetup/Batteries/Configuration//Name": {
+  "label": "Name",
+  "page": "Battery measurements"
+ },
+ "/Settings/SystemSetup/BatteryCurrentSense": {
+  "label": "SCS - Shared current sense",
+  "page": "PageSettingsDVCC"
+ },
+ "/Settings/SystemSetup/BatteryService": {
+  "label": "Battery monitor",
+  "page": "PageSettingsSystem"
+ },
+ "/Settings/SystemSetup/BmsInstance": {
+  "label": "Controlling BMS",
+  "page": "PageSettingsDVCC"
+ },
+ "/Settings/SystemSetup/HasAcInLoads": {
+  "label": "Position of AC loads",
+  "page": "PageSettingsSystem",
+  "options": {
+   "1": "AC input & output",
+   "0": "AC output only"
+  }
+ },
+ "/Settings/SystemSetup/HasAcOutSystem": {
+  "label": "Inverter AC output in use",
+  "page": "PageSettingsHub4"
+ },
+ "/Settings/SystemSetup/HasDcSystem": {
+  "label": "Has DC system",
+  "page": "PageSettingsSystem"
+ },
+ "/Settings/SystemSetup/SharedTemperatureSense": {
+  "label": "STS - Shared temperature sense",
+  "page": "PageSettingsDVCC"
+ },
+ "/Settings/SystemSetup/SharedVoltageSense": {
+  "label": "SVS - Shared voltage sense",
+  "page": "PageSettingsDVCC"
+ },
+ "/Settings/SystemSetup/SystemName": {
+  "label": "System name",
+  "page": "PageSettingsSystem"
+ },
+ "/Settings/SystemSetup/TemperatureService": {
+  "label": "Temperature sensor",
+  "page": "PageSettingsDVCC"
+ },
+ "/Settings/Vrmlogger/HttpsEnabled": {
+  "label": "Use secure connection (HTTPS)",
+  "page": "PageSettingsLogger"
+ },
+ "/Settings/Vrmlogger/LogInterval": {
+  "label": "Log interval",
+  "page": "PageSettingsLogger",
+  "options": {
+   "60": "1 min",
+   "300": "5 min",
+   "600": "10 min",
+   "900": "15 min",
+   "1800": "30 min",
+   "3600": "1 hour",
+   "7200": "2 hours",
+   "14400": "4 hours",
+   "43200": "12 hours",
+   "86400": "1 day"
+  }
+ },
+ "/Settings/Watchdog/VrmTimeout": {
+  "label": "Reboot device when no contact",
+  "page": "PageSettingsLogger"
+ }
+}
