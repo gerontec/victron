@@ -1,9 +1,9 @@
-// batmonitor 0.57-c: charge path of one cycle as decision matrices, with the summer peak window (D4 LADESPERRE)
+// batmonitor 0.58-c: charge path of one cycle as decision matrices, with the summer peak window (D4 LADESPERRE)
 // that keeps the stacks free in the morning so they take the midday PV and the PCC export stays below 20 kW.
 // render: dot -Tpdf charge_flow.dot -o charge_flow.pdf   (or -Tpng)
 digraph charge {
 	graph [rankdir=TB, fontname="Helvetica", fontsize=11, nodesep=0.35, ranksep=0.35, newrank=true,
-		   label="batmonitor 0.57-c: charge path (every 5 s)   |   blue = pure decision function (bits + state, enumerated by make check)   |   green = matrix / amounts   |   [CBMC] = proved for all inputs",
+		   label="batmonitor 0.58-c: charge path (every 5 s)   |   blue = pure decision function (bits + state, enumerated by make check)   |   green = matrix / amounts   |   [CBMC] = proved for all inputs",
 		   labelloc=t];
 	node [shape=box, style="rounded,filled", fillcolor="#f4f4f4", fontname="Helvetica", fontsize=10];
 	edge [fontname="Helvetica", fontsize=9];
@@ -19,7 +19,7 @@ digraph charge {
 			<table border="0" cellborder="1" cellspacing="0" cellpadding="3" bgcolor="#ffffff">
 			<tr><td colspan="2"><b>bm_d6 bits</b></td></tr>
 			<tr><td>enabled</td><td>WP_PV_CHG_SHARE &gt; 0 and WP_PV_GRID_MAX &gt; 0</td></tr>
-			<tr><td>row_pv</td><td>BM_WP_RULE[wp_row].pv_charge (rows SUMMER, FC)</td></tr>
+			<tr><td>row_pv</td><td>bm_wp_covers_all: row share 100 %, no cap (SUMMER, FC)</td></tr>
 			<tr><td>day, wp_on</td><td>PV &ge; 100 W; heat pump &ge; 300 W, em0 fresh</td></tr>
 			<tr><td>pcc_fresh, no_cap</td><td>PCC there, inverter not stale; D4 export cap not active</td></tr>
 			<tr><td>surplus_gt_on / ge_hold</td><td>surplus without the share &gt; 200 W / &ge; 0 (PV covers house + WP)</td></tr>
@@ -30,16 +30,15 @@ digraph charge {
 
 	wpm [shape=plain, label=<
 			<table border="0" cellborder="1" cellspacing="0" cellpadding="3" bgcolor="#ffffff">
-			<tr><td colspan="7"><b>heat pump matrix BM_WP_RULE</b> (0.57-c: one row per cycle, first match top-down; the amounts read only its columns)</td></tr>
-			<tr><td><b>row</b></td><td><b>when</b></td><td><b>rule text</b></td><td><b>cover: stacks give the WP</b></td><td><b>charge point z2</b></td><td><b>pv_charge (D6 WPPV)</b></td><td><b>make check</b></td></tr>
-			<tr><td>LOWSOC</td><td>lowest stack &lt; WP_SOC_MIN 21 % (back &ge; 23 %)</td><td>WP:LOWSOC</td><td>NONE: 0 W</td><td>PCC + WP</td><td>0</td><td>221184</td></tr>
-			<tr><td>FC</td><td>good forecast (stacks above target_soc)</td><td>WP:FC</td><td>ALL</td><td>PCC</td><td bgcolor="#fde9c8">1</td><td>27648</td></tr>
-			<tr><td>FCBAD</td><td>bad forecast (target_soc 100)</td><td>WP:FCBAD</td><td>BAD: 50 % (WP_BAT_SHARE_BAD)</td><td>PCC + 50 % WP</td><td>0</td><td>10368</td></tr>
-			<tr><td>WINTER</td><td>season winter</td><td>WP:Z2</td><td>NONE: 0 W</td><td>PCC + WP</td><td>0</td><td>61056</td></tr>
-			<tr><td>TRANS</td><td>season transition</td><td>WP:ALL / T1900</td><td>TRANS: up to 1900 W</td><td>PCC + (WP - 1900)</td><td>0</td><td>61056</td></tr>
-			<tr><td>SUMMER</td><td>season summer</td><td>WP:ALL</td><td>ALL</td><td>PCC</td><td bgcolor="#fde9c8">1</td><td>61056</td></tr>
-			<tr><td colspan="7">WP &lt; 300 W: text WP:OFF, em0 stale: WP:NA (+ winter / transition: WP_CAP 1 kW discharge fallback) - the row still sets cover<br/>
-			<b>D6 WPPV</b> where pv_charge = 1, by day, no D4 cap, PV covers house + WP: z2 += min(50 % WP, 2000 W), the grid buys it, rule text + WPPV</td></tr>
+			<tr><td colspan="6"><b>heat pump matrix BM_WP_RULE</b> (0.58-c: first match top-down; stacks cover min(share x WP, cap), the rest onto z2) - details wp_matrix.pdf</td></tr>
+			<tr><td><b>row</b></td><td><b>when</b></td><td><b>rule text</b></td><td><b>share %</b></td><td><b>cap W</b></td><td><b>make check</b></td></tr>
+			<tr><td>LOWSOC</td><td>lowest stack &lt; WP_SOC_MIN 21 % (back &ge; 23 %)</td><td>WP:LOWSOC</td><td>0</td><td>-</td><td>221184</td></tr>
+			<tr><td bgcolor="#fde9c8">FC</td><td>good forecast (stacks above target_soc)</td><td>WP:FC</td><td>100</td><td>-</td><td>27648</td></tr>
+			<tr><td>FCBAD</td><td>bad forecast (target_soc 100)</td><td>WP:FCBAD</td><td>WP_BAT_SHARE_BAD 50</td><td>-</td><td>10368</td></tr>
+			<tr><td>WINTER</td><td>season winter</td><td>WP:Z2</td><td>0</td><td>-</td><td>61056</td></tr>
+			<tr><td>TRANS</td><td>season transition</td><td>WP:ALL / T1900</td><td>100</td><td>WP_BAT_MAX_TRANSITION 1900</td><td>61056</td></tr>
+			<tr><td bgcolor="#fde9c8">SUMMER</td><td>season summer</td><td>WP:ALL</td><td>100</td><td>-</td><td>61056</td></tr>
+			<tr><td colspan="6">orange = share 100 %, no cap: <b>D6 WPPV</b> allowed (by day, no D4 cap, PV covers house + WP): z2 += min(50 % WP, 2000 W)</td></tr>
 			</table>>];
 
 	subgraph cluster_d4 {

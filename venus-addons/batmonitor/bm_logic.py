@@ -513,29 +513,46 @@ BM_SRC_NAME = ["DAY", "B1", "STK", "B1W"]
 (BM_M_BMS_MISSING, BM_M_FORCE, BM_M_STALE, BM_M_LADESPERRE, BM_M_CHARGE, BM_M_FULL, BM_M_PROT, BM_M_CHARGING,
  BM_M_DIS) = range(9)
 BM_MODE_NAME = ["BMS_MISSING", "FORCE", "STALE", "LADESPERRE", "CHARGE", "FULL", "PROT", "CHARGING", "DIS"]
-# heat pump matrix (0.57-c): D1 picks one row, first match LOWSOC > FC > FCBAD > WINTER > TRANS > SUMMER; the amounts
-# read only its columns: reason (rule text WP:<..>, TRANS shows T1900 above WP_BAT_MAX_TRANSITION), cover (part of the
-# heat pump the stacks cover; the rest goes to the charge point z2), pv_charge (D6 WPPV allowed)
+# heat pump matrix (0.57-c, 0.58-c two number columns): D1 picks one row, first match LOWSOC > FC > FCBAD > WINTER >
+# TRANS > SUMMER; the amounts read only its columns: reason (rule text WP:<..>, TRANS shows T1900 above
+# WP_BAT_MAX_TRANSITION), share % and cap W: the stacks cover min(share % x WP, cap), the rest goes to the charge point
+# z2. A cell is a number or the name of a Cfg attribute (a parameter). D6 WPPV only where a row covers all of it
 BM_WR_LOWSOC, BM_WR_FC, BM_WR_FCBAD, BM_WR_WINTER, BM_WR_TRANS, BM_WR_SUMMER = range(6)
-BM_WC_NONE, BM_WC_TRANS, BM_WC_ALL, BM_WC_BAD = range(4)
 
 
 @dataclass(frozen=True)
 class WpRule:
     name: str
     reason: int
-    cover: int
-    pv_charge: int
+    share: object       # % (number or parameter name)
+    cap: object         # W, math.inf = none (number or parameter name)
 
 
 BM_WP_RULE = [
-    WpRule("LOWSOC", BM_WP_LOWSOC, BM_WC_NONE, 0),     # lowest stack < WP_SOC_MIN (0.54-c)
-    WpRule("FC", BM_WP_FC, BM_WC_ALL, 1),              # good forecast: as in summer (0.24)
-    WpRule("FCBAD", BM_WP_FCBAD, BM_WC_BAD, 0),        # bad forecast cap binds (0.37-c)
-    WpRule("WINTER", BM_WP_Z2, BM_WC_NONE, 0),         # Z2: the grid pays the heat pump (0.19)
-    WpRule("TRANS", BM_WP_ALL, BM_WC_TRANS, 0),        # up to 1900 W from the stacks (0.22)
-    WpRule("SUMMER", BM_WP_ALL, BM_WC_ALL, 1),
+    WpRule("LOWSOC", BM_WP_LOWSOC, 0, math.inf),                      # stack < WP_SOC_MIN (0.54-c)
+    WpRule("FC", BM_WP_FC, 100, math.inf),                            # good forecast: as summer (0.24)
+    WpRule("FCBAD", BM_WP_FCBAD, "wp_bat_share_bad", math.inf),       # bad forecast: 50 % (0.37-c)
+    WpRule("WINTER", BM_WP_Z2, 0, math.inf),                          # Z2: the grid pays (0.19)
+    WpRule("TRANS", BM_WP_ALL, 100, "wp_bat_max_transition"),         # 1900 W (0.22)
+    WpRule("SUMMER", BM_WP_ALL, 100, math.inf),
 ]
+
+
+def bm_wp_val(cfg, x):
+    return getattr(cfg, x) if isinstance(x, str) else x
+
+
+def bm_wp_share(cfg, wp_row, wp):
+    """the one formula: min(share % x WP, cap); share 100 % is the heat pump itself"""
+    r = BM_WP_RULE[wp_row]
+    share = bm_wp_val(cfg, r.share)
+    return fmin(wp if share >= 100 else wp * share / 100.0, bm_wp_val(cfg, r.cap))
+
+
+def bm_wp_covers_all(cfg, wp_row):
+    """share >= 100 % and no cap: D6 WPPV allowed"""
+    r = BM_WP_RULE[wp_row]
+    return int(bm_wp_val(cfg, r.share) >= 100 and math.isinf(bm_wp_val(cfg, r.cap)))
 
 
 @dataclass(frozen=True)
@@ -713,7 +730,7 @@ def bm_d5(pcc_over, grace_over, pcc_hard, lockout_over, acout_over):
 
 def bm_d6(b, wp_pv):
     """D6 WPPV (0.56-c, user 2026-10-24): heat pump on PV -> the stacks charge WP_PV_CHG_SHARE % of it on top, the PCC
-    buys it (at most WP_PV_GRID_MAX). Only rows with pv_charge (SUMMER, FC), by day, heat pump on, PCC fresh, no D4 cap. On above
+    buys it (at most WP_PV_GRID_MAX). Only rows covering all of the WP (SUMMER, FC), by day, heat pump on, PCC fresh, no D4 cap. On above
     PCC_SURPLUS_TH, held while the surplus without the share is >= 0. Returns the next wp_pv"""
     gate = (b["enabled"] and b["row_pv"] and b["day"] and b["wp_on"] and b["pcc_fresh"] and b["no_cap"])
     return int(bool(gate and (b["surplus_gt_on"] or (wp_pv and b["surplus_ge_hold"]))))
@@ -801,18 +818,6 @@ def d1_bits(cfg, inp, out, c):
     }
 
 
-def wp_share(cfg, wp_row, wp):
-    """heat pump matrix, column cover: the part of the heat pump W the stacks cover"""
-    cover = BM_WP_RULE[wp_row].cover
-    if cover == BM_WC_NONE:
-        return 0.0
-    if cover == BM_WC_TRANS:
-        return fmin(wp, cfg.wp_bat_max_transition)
-    if cover == BM_WC_BAD:
-        return wp * cfg.wp_bat_share_bad / 100.0
-    return wp
-
-
 def chain_d1(cfg, inp, st, out, c):
     """forecast, S3 source, S2 scope; then z2 = PCC + the heat pump part the stacks must NOT cover"""
     o = bm_d1(d1_bits(cfg, inp, out, c), st.fc_active, st.bat1_first, st.wp_low)
@@ -831,7 +836,7 @@ def chain_d1(cfg, inp, st, out, c):
     out.wp_why = BM_WP_NAME[o["wp_reason"]]
     out.src_why = BM_SRC_NAME[o["src_reason"]]
     if c.wp_fresh and inp.wp > 0:
-        c.wp_eff = inp.wp - wp_share(cfg, c.wp_row, inp.wp)
+        c.wp_eff = inp.wp - bm_wp_share(cfg, c.wp_row, inp.wp)
     c.z2 = inp.pcc + c.wp_eff
 
 
@@ -940,7 +945,7 @@ def chain_mode(cfg, inp, st, out, c):
     # D6 WPPV (0.56-c): the heat pump runs on PV -> charge a share of it on top, the PCC buys it
     st.wp_pv = bm_d6({
         "enabled": cfg.wp_pv_chg_share > 0 and cfg.wp_pv_grid_max > 0,
-        "row_pv": BM_WP_RULE[c.wp_row].pv_charge,
+        "row_pv": bm_wp_covers_all(cfg, c.wp_row),
         "day": not c.night,
         "wp_on": c.wp_on,
         "pcc_fresh": inp.have_pcc and not c.stale,

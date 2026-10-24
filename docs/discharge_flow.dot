@@ -2,7 +2,7 @@
 // render: dot -Tpdf discharge_flow.dot -o discharge_flow.pdf   (or -Tpng)
 digraph batmonitor {
 	graph [rankdir=TB, fontname="Helvetica", fontsize=11, nodesep=0.35, ranksep=0.35, newrank=true,
-		   label="batmonitor 0.57-c: one cycle (bm_step, every 5 s)   |   blue = pure decision function (bits + state, enumerated by make check)   |   green = discharge matrix   |   [CBMC] = proved for all inputs",
+		   label="batmonitor 0.58-c: one cycle (bm_step, every 5 s)   |   blue = pure decision function (bits + state, enumerated by make check)   |   green = discharge matrix   |   [CBMC] = proved for all inputs",
 		   labelloc=t];
 	node [shape=box, style="rounded,filled", fillcolor="#f4f4f4", fontname="Helvetica", fontsize=10];
 	edge [fontname="Helvetica", fontsize=9];
@@ -13,7 +13,7 @@ digraph batmonitor {
 
 	src [label=<<b>S3 source</b> (measured season only, 0.45-c)<br/>day -&gt; <b>DAY</b><br/>night + B1FIRST -&gt; <b>B1</b><br/>night, not (winter + WP on) -&gt; <b>STK</b> (night floor)<br/>night, winter + WP on -&gt; <b>B1W</b>>, fillcolor="#dbe8fb"];
 
-	wpk [label=<<b>heat pump row</b> BM_WP_RULE (0.57-c), first match:<br/>LOWSOC (cover NONE) &gt; FC (ALL) &gt; FCBAD (BAD 50 %) &gt;<br/>WINTER (NONE) &gt; TRANS (up to 1900 W) &gt; SUMMER (ALL)>, fillcolor="#dbe8fb"];
+	wpk [label=<<b>heat pump row</b> BM_WP_RULE (0.57-c), first match:<br/>LOWSOC 0 % &gt; FC 100 % &gt; FCBAD 50 % &gt;<br/>WINTER 0 % &gt; TRANS 100 % cap 1900 W &gt; SUMMER 100 %<br/>cover = min(share x WP, cap)>, fillcolor="#dbe8fb"];
 
 	share [label=<<b>wp_share</b><br/>NONE 0  |  CAP min(WP, WP_BAT_MAX_TRANSITION)  |  ALL WP  |  BAD WP x WP_BAT_SHARE_BAD %<br/>z2 = PCC + (WP - share)   (the point the stacks regulate on)>];
 

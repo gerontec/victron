@@ -1,8 +1,8 @@
-// batmonitor 0.57-c: heat pump matrix BM_WP_RULE - who pays the heat pump (one row per 5 s cycle, first match).
+// batmonitor 0.58-c: heat pump matrix BM_WP_RULE - who pays the heat pump (one row per 5 s cycle, first match).
 // render: dot -Tpdf wp_matrix.dot -o wp_matrix.pdf   (or -Tpng)
 digraph wp {
 	graph [rankdir=TB, fontname="Helvetica", fontsize=12, nodesep=0.3, ranksep=0.35, labelloc=t,
-		   label="batmonitor 0.57-c: heat pump matrix BM_WP_RULE (bm_logic.c)\nD1 picks one row (first match top-down), the amounts read only its columns - make check: 442368 combinations, row = 0.56-c chains"];
+		   label="batmonitor 0.58-c: heat pump matrix BM_WP_RULE (bm_logic.c)\nD1 picks one row (first match top-down); the stacks cover min(share x WP, cap), the rest goes onto the charge point - make check: 442368 combinations = 0.56-c chains"];
 	node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=11, fillcolor="#dbe8fb"];
 	edge [fontname="Helvetica", fontsize=10];
 
@@ -14,15 +14,15 @@ digraph wp {
 
 	matrix [shape=plain, label=<
 		<table border="0" cellborder="1" cellspacing="0" cellpadding="6" bgcolor="#ffffff">
-		<tr><td bgcolor="#e8e8e8"><b>row</b></td><td bgcolor="#e8e8e8"><b>rule text<br/>(WP running)</b></td><td bgcolor="#e8e8e8"><b>cover: the stacks give the WP<br/>(discharge)</b></td><td bgcolor="#e8e8e8"><b>charge point z2<br/>(the rest of the WP)</b></td><td bgcolor="#e8e8e8"><b>pv_charge<br/>D6 WPPV</b></td><td bgcolor="#e8e8e8"><b>grid pays</b></td></tr>
-		<tr><td port="lowsoc"><b>LOWSOC</b></td><td>WP:LOWSOC</td><td>NONE - 0 W</td><td>PCC + WP</td><td>0</td><td>all of the WP</td></tr>
-		<tr><td port="fc"><b>FC</b></td><td>WP:FC</td><td>ALL</td><td>PCC</td><td bgcolor="#fde9c8"><b>1</b></td><td>- (WPPV: min(50 % WP, 2 kW))</td></tr>
-		<tr><td port="fcbad"><b>FCBAD</b></td><td>WP:FCBAD</td><td>BAD - 50 % (WP_BAT_SHARE_BAD)</td><td>PCC + 50 % WP</td><td>0</td><td>50 % of the WP</td></tr>
-		<tr><td port="winter"><b>WINTER</b></td><td>WP:Z2</td><td>NONE - 0 W</td><td>PCC + WP</td><td>0</td><td>all of the WP</td></tr>
-		<tr><td port="trans"><b>TRANS</b></td><td>WP:ALL, WP:T1900 above 1900 W</td><td>TRANS - up to 1900 W</td><td>PCC + (WP - 1900)</td><td>0</td><td>WP above 1900 W</td></tr>
-		<tr><td port="summer"><b>SUMMER</b></td><td>WP:ALL</td><td>ALL</td><td>PCC</td><td bgcolor="#fde9c8"><b>1</b></td><td>- (WPPV: min(50 % WP, 2 kW))</td></tr>
-		<tr><td colspan="6" align="left"><font point-size="10">WP &lt; 300 W: text WP:OFF, em0 stale: WP:NA (winter / transition: discharge capped at WP_CAP 1 kW) - the row still sets cover.<br/>
-		<b>D6 WPPV</b> (0.56-c) where pv_charge = 1, by day, no D4 export cap, PV covers house + WP (surplus &gt; 200 W on, held &ge; 0):<br/>
+		<tr><td bgcolor="#e8e8e8"><b>row</b></td><td bgcolor="#e8e8e8"><b>rule text<br/>(WP running)</b></td><td bgcolor="#e8e8e8"><b>share %</b></td><td bgcolor="#e8e8e8"><b>cap W</b></td><td bgcolor="#e8e8e8"><b>stacks give the WP (discharge)<br/>= min(share x WP, cap)</b></td><td bgcolor="#e8e8e8"><b>charge point z2<br/>= PCC + the rest</b></td></tr>
+		<tr><td port="lowsoc"><b>LOWSOC</b></td><td>WP:LOWSOC</td><td>0</td><td>-</td><td>0 W</td><td>PCC + WP</td></tr>
+		<tr><td port="fc" bgcolor="#fde9c8"><b>FC</b></td><td>WP:FC</td><td>100</td><td>-</td><td>all</td><td>PCC (+ WPPV)</td></tr>
+		<tr><td port="fcbad"><b>FCBAD</b></td><td>WP:FCBAD</td><td>WP_BAT_SHARE_BAD 50</td><td>-</td><td>50 %</td><td>PCC + 50 % WP</td></tr>
+		<tr><td port="winter"><b>WINTER</b></td><td>WP:Z2</td><td>0</td><td>-</td><td>0 W</td><td>PCC + WP</td></tr>
+		<tr><td port="trans"><b>TRANS</b></td><td>WP:ALL, WP:T1900 above the cap</td><td>100</td><td>WP_BAT_MAX_TRANSITION 1900</td><td>up to 1900 W</td><td>PCC + (WP - 1900)</td></tr>
+		<tr><td port="summer" bgcolor="#fde9c8"><b>SUMMER</b></td><td>WP:ALL</td><td>100</td><td>-</td><td>all</td><td>PCC (+ WPPV)</td></tr>
+		<tr><td colspan="6" align="left"><font point-size="10">A cell is a number or a parameter (BATMONITOR_&lt;NAME&gt; in /data/batmonitor/env). WP &lt; 300 W: text WP:OFF, em0 stale: WP:NA (winter / transition: discharge capped at WP_CAP 1 kW).<br/>
+		<b>D6 WPPV</b> (orange rows: share 100 %, no cap = the stacks would cover all): by day, no D4 export cap, PV covers house + WP (surplus &gt; 200 W on, held &ge; 0):<br/>
 		the charge point gets + min(WP_PV_CHG_SHARE 50 % x WP, WP_PV_GRID_MAX 2000 W): the stacks charge it, the grid buys it as cheap heat power (rule text + WPPV).</font></td></tr>
 		</table>>];
 

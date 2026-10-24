@@ -650,6 +650,24 @@ static void test_wp_pv_charge(void)
 	r_override_cap_off = 0;
 }
 
+/* 0.58-c: the heat pump matrix cells that name a parameter follow it (env override), the fixed ones do not */
+static void test_wp_matrix_params(void)
+{
+	struct bm_cfg cfg;
+	bm_cfg_default(&cfg);
+	CHECK(bm_wp_share(&cfg, BM_WR_FCBAD, 3000) == 1500 && bm_wp_share(&cfg, BM_WR_TRANS, 3000) == 1900,
+		  "defaults: FCBAD 50 %% = 1500, TRANS cap 1900");
+	CHECK(bm_wp_share(&cfg, BM_WR_SUMMER, 3000) == 3000 && bm_wp_share(&cfg, BM_WR_WINTER, 3000) == 0
+		  && bm_wp_share(&cfg, BM_WR_LOWSOC, 3000) == 0 && bm_wp_share(&cfg, BM_WR_FC, 3000) == 3000, "fixed rows");
+	cfg.wp_bat_share_bad = 30;
+	cfg.wp_bat_max_transition = 1000;
+	CHECK(bm_wp_share(&cfg, BM_WR_FCBAD, 3000) == 900 && bm_wp_share(&cfg, BM_WR_TRANS, 3000) == 1000,
+		  "parameters followed: FCBAD %.0f TRANS %.0f", bm_wp_share(&cfg, BM_WR_FCBAD, 3000),
+		  bm_wp_share(&cfg, BM_WR_TRANS, 3000));
+	CHECK(bm_wp_covers_all(&cfg, BM_WR_SUMMER) && bm_wp_covers_all(&cfg, BM_WR_FC) && !bm_wp_covers_all(&cfg, BM_WR_TRANS)
+		  && !bm_wp_covers_all(&cfg, BM_WR_FCBAD) && !bm_wp_covers_all(&cfg, BM_WR_WINTER), "WPPV rows: SUMMER, FC");
+}
+
 static void test_forecast_bad_caps_wp(void)
 {
 	struct run r;
@@ -974,6 +992,7 @@ int main(void)
 	test_forecast_overrides_winter();
 	test_low_soc_no_wp();
 	test_wp_pv_charge();
+	test_wp_matrix_params();
 	test_forecast_bad_caps_wp();
 	test_forecast_keeps_source();
 	test_do4_pulse();

@@ -186,16 +186,23 @@ extern const struct bm_mode_rule BM_MODE_RULE[];
    (first match: LOWSOC > FC > FCBAD > WINTER > TRANS > SUMMER), the amounts read only its columns. Before, D1 derived
    a reason and a kind with two separate chains, and D6 tested the kind; now one row, one table */
 enum bm_wp_row { BM_WR_LOWSOC, BM_WR_FC, BM_WR_FCBAD, BM_WR_WINTER, BM_WR_TRANS, BM_WR_SUMMER, BM_WR_N };
-enum bm_wp_cover { BM_WC_NONE, BM_WC_TRANS, BM_WC_ALL, BM_WC_BAD };
+/* 0.58-c (user 2026-10-24: "simplifiziere"): two number columns instead of a cover kind and a WPPV flag. A cell is a
+   fixed number or a bm_cfg parameter. The stacks cover min(share % x WP, cap) of the heat pump (discharge), the rest
+   goes onto the charge point z2; D6 WPPV only where a row covers all of it (share 100 %, no cap) */
+struct bm_wp_val {
+	double v;                   /* the fixed value */
+	unsigned par;               /* 0, or 1 + offsetof(struct bm_cfg, field): the value of that parameter */
+};
 struct bm_wp_rule {
 	const char *name;           /* the row name (make check, diagrams) */
 	int reason;                 /* enum bm_wp_reason: rule text WP:<..> while the heat pump runs */
-	int cover;                  /* enum bm_wp_cover: part of the heat pump the stacks cover (discharge) - the rest is
-								   added to the charge point z2: none, up to WP_BAT_MAX_TRANSITION, all,
-								   WP_BAT_SHARE_BAD % */
-	int pv_charge;              /* D6 WPPV may add WP_PV_CHG_SHARE % of the heat pump to the charge point */
+	struct bm_wp_val share;     /* % of the heat pump the stacks cover */
+	struct bm_wp_val cap;       /* W, at most (INFINITY = none) */
 };
 extern const struct bm_wp_rule BM_WP_RULE[BM_WR_N];
+double bm_wp_val(const struct bm_cfg *cfg, struct bm_wp_val x);
+double bm_wp_share(const struct bm_cfg *cfg, int wp_row, double wp);   /* W of the heat pump the stacks cover */
+int bm_wp_covers_all(const struct bm_cfg *cfg, int wp_row);           /* share >= 100 % and no cap: D6 WPPV allowed */
 
 /* D1: forecast rule, S3 source, S2 scope. State: fc_active, bat1_first, wp_low */
 struct bm_d1_in {
@@ -304,13 +311,13 @@ int bm_d5(const struct bm_d5_in *b);                                  /* 1 = pul
 
 /* D6 (0.56-c, user 2026-10-24): heat pump on PV -> the stacks charge WP_PV_CHG_SHARE % of its power on top, the PCC
    buys it (at most WP_PV_GRID_MAX): grid heat power is cheaper than the stored PV is worth. Only where the stacks
-   would cover all of the heat pump (BM_WP_RULE pv_charge: rows SUMMER, FC), by day, without the D4 export cap. On while
+   would cover all of the heat pump (bm_wp_covers_all: rows SUMMER, FC), by day, without the D4 export cap. On while
    the surplus without the heat pump share (z2 + Bat1_eff + own charge - own discharge) is above PCC_SURPLUS_TH, i.e.
    the PV covers house + heat pump and still charges; held down to 0. Charging the share does not change that surplus
    (own charge up, PCC down by the same W), so the rule holds itself. State: wp_pv */
 struct bm_d6_in {
 	int enabled;                                 /* WP_PV_CHG_SHARE > 0 and WP_PV_GRID_MAX > 0 */
-	int row_pv;                                  /* BM_WP_RULE[wp_row].pv_charge (0.57-c, was: kind ALL) */
+	int row_pv;                                  /* bm_wp_covers_all(wp_row) (0.58-c; 0.56-c: kind ALL) */
 	int day;                                     /* not night */
 	int wp_on;                                   /* heat pump >= WP_ON_TH, em0/power fresh */
 	int pcc_fresh;                               /* PCC present, inverter data not stale */
