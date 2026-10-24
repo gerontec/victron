@@ -513,8 +513,29 @@ BM_SRC_NAME = ["DAY", "B1", "STK", "B1W"]
 (BM_M_BMS_MISSING, BM_M_FORCE, BM_M_STALE, BM_M_LADESPERRE, BM_M_CHARGE, BM_M_FULL, BM_M_PROT, BM_M_CHARGING,
  BM_M_DIS) = range(9)
 BM_MODE_NAME = ["BMS_MISSING", "FORCE", "STALE", "LADESPERRE", "CHARGE", "FULL", "PROT", "CHARGING", "DIS"]
-BM_WPK_NONE, BM_WPK_CAP, BM_WPK_ALL, BM_WPK_BAD = range(4)
-BM_WPK_NAME = ["NONE", "CAP", "ALL", "BAD"]
+# heat pump matrix (0.57-c): D1 picks one row, first match LOWSOC > FC > FCBAD > WINTER > TRANS > SUMMER; the amounts
+# read only its columns: reason (rule text WP:<..>, TRANS shows T1900 above WP_BAT_MAX_TRANSITION), cover (part of the
+# heat pump the stacks cover; the rest goes to the charge point z2), pv_charge (D6 WPPV allowed)
+BM_WR_LOWSOC, BM_WR_FC, BM_WR_FCBAD, BM_WR_WINTER, BM_WR_TRANS, BM_WR_SUMMER = range(6)
+BM_WC_NONE, BM_WC_TRANS, BM_WC_ALL, BM_WC_BAD = range(4)
+
+
+@dataclass(frozen=True)
+class WpRule:
+    name: str
+    reason: int
+    cover: int
+    pv_charge: int
+
+
+BM_WP_RULE = [
+    WpRule("LOWSOC", BM_WP_LOWSOC, BM_WC_NONE, 0),     # lowest stack < WP_SOC_MIN (0.54-c)
+    WpRule("FC", BM_WP_FC, BM_WC_ALL, 1),              # good forecast: as in summer (0.24)
+    WpRule("FCBAD", BM_WP_FCBAD, BM_WC_BAD, 0),        # bad forecast cap binds (0.37-c)
+    WpRule("WINTER", BM_WP_Z2, BM_WC_NONE, 0),         # Z2: the grid pays the heat pump (0.19)
+    WpRule("TRANS", BM_WP_ALL, BM_WC_TRANS, 0),        # up to 1900 W from the stacks (0.22)
+    WpRule("SUMMER", BM_WP_ALL, BM_WC_ALL, 1),
+]
 
 
 @dataclass(frozen=True)
@@ -563,7 +584,7 @@ def bm_d1(b, fc_active, bat1_first, wp_low):
     as in summer (on above target + FC_HYST, off below target). Bad forecast: the stacks cover at most WP_BAT_SHARE_BAD %
     of the heat pump (S2). Sofar first: Bat1 above BAT1_SOC_MIN and the heat pump running -> the Sofar delivers first
     at night (S3). Low SoC (0.54-c): the lowest stack below WP_SOC_MIN (back from + WP_SOC_HYST) -> the stacks cover
-    none of the heat pump (kind NONE, reason LOWSOC). b: dict of the bm_d1_in bits. Returns a dict like bm_d1_out."""
+    none of the heat pump (row LOWSOC). b: dict of the bm_d1_in bits. Returns a dict like bm_d1_out."""
     o = {}
     if b["wp_soc_low_on"]:
         wp_low = 1
@@ -591,26 +612,19 @@ def bm_d1(b, fc_active, bat1_first, wp_low):
     o["night_floor"] = bool(b["night"] and not o["b1_first"] and (b["season"] != BM_WINTER or not b["wp_on"]))
     o["wp_fc_capped"] = bool(not wp_low and o["fc_bad"] and b["wp_pos"] and b["fc_share_lt_share"])
     o["wp_cap_armed"] = bool(not b["wp_fresh"] and o["winter"] and b["wp_running"])
+    o["wp_row"] = (BM_WR_LOWSOC if wp_low else BM_WR_FC if fc_active else BM_WR_FCBAD if o["wp_fc_capped"]
+                   else BM_WR_WINTER if o["season_wp"] == BM_WINTER else BM_WR_TRANS if o["season_wp"] == BM_TRANSITION
+                   else BM_WR_SUMMER)
     if not b["wp_fresh"]:
         o["wp_reason"] = BM_WP_NA
     elif not b["wp_on"]:
         o["wp_reason"] = BM_WP_OFF
-    elif wp_low:
-        o["wp_reason"] = BM_WP_LOWSOC
-    elif fc_active:
-        o["wp_reason"] = BM_WP_FC
-    elif o["wp_fc_capped"]:
-        o["wp_reason"] = BM_WP_FCBAD
-    elif o["season_wp"] == BM_WINTER:
-        o["wp_reason"] = BM_WP_Z2
-    elif o["season_wp"] == BM_TRANSITION and b["wp_gt_trans"]:
+    elif o["wp_row"] == BM_WR_TRANS and b["wp_gt_trans"]:
         o["wp_reason"] = BM_WP_T1900
     else:
-        o["wp_reason"] = BM_WP_ALL
+        o["wp_reason"] = BM_WP_RULE[o["wp_row"]].reason
     o["src_reason"] = (BM_SRC_DAY if not b["night"] else BM_SRC_B1 if o["b1_first"]
                        else BM_SRC_STK if o["night_floor"] else BM_SRC_B1W)
-    o["wp_kind"] = (BM_WPK_NONE if wp_low else BM_WPK_BAD if o["wp_fc_capped"] else BM_WPK_NONE if o["season_wp"] == BM_WINTER
-                    else BM_WPK_CAP if o["season_wp"] == BM_TRANSITION else BM_WPK_ALL)
     return o
 
 
@@ -699,9 +713,9 @@ def bm_d5(pcc_over, grace_over, pcc_hard, lockout_over, acout_over):
 
 def bm_d6(b, wp_pv):
     """D6 WPPV (0.56-c, user 2026-10-24): heat pump on PV -> the stacks charge WP_PV_CHG_SHARE % of it on top, the PCC
-    buys it (at most WP_PV_GRID_MAX). Only S2 kind ALL, by day, heat pump on, PCC fresh, no D4 cap. On above
+    buys it (at most WP_PV_GRID_MAX). Only rows with pv_charge (SUMMER, FC), by day, heat pump on, PCC fresh, no D4 cap. On above
     PCC_SURPLUS_TH, held while the surplus without the share is >= 0. Returns the next wp_pv"""
-    gate = (b["enabled"] and b["kind_all"] and b["day"] and b["wp_on"] and b["pcc_fresh"] and b["no_cap"])
+    gate = (b["enabled"] and b["row_pv"] and b["day"] and b["wp_on"] and b["pcc_fresh"] and b["no_cap"])
     return int(bool(gate and (b["surplus_gt_on"] or (wp_pv and b["surplus_ge_hold"]))))
 
 
@@ -719,7 +733,7 @@ class Chain:
         self.wp_fc_capped = 0
         self.z2 = 0.0
         self.b1_first = self.night_floor = 0
-        self.src = self.wp_kind = 0
+        self.src = self.wp_row = 0
         self.wp_cap_armed = 0
         self.bat1_eff = self.chg_ref = self.surplus = 0.0
         self.block = self.charge_mode = 0
@@ -787,13 +801,14 @@ def d1_bits(cfg, inp, out, c):
     }
 
 
-def wp_share(cfg, wp_kind, wp):
-    """S2 row of the discharge matrix: the part of the heat pump W the stacks cover"""
-    if wp_kind == BM_WPK_NONE:
+def wp_share(cfg, wp_row, wp):
+    """heat pump matrix, column cover: the part of the heat pump W the stacks cover"""
+    cover = BM_WP_RULE[wp_row].cover
+    if cover == BM_WC_NONE:
         return 0.0
-    if wp_kind == BM_WPK_CAP:
+    if cover == BM_WC_TRANS:
         return fmin(wp, cfg.wp_bat_max_transition)
-    if wp_kind == BM_WPK_BAD:
+    if cover == BM_WC_BAD:
         return wp * cfg.wp_bat_share_bad / 100.0
     return wp
 
@@ -811,12 +826,12 @@ def chain_d1(cfg, inp, st, out, c):
     out.bat1_first = o["b1_first"]
     c.season_wp, c.winter = o["season_wp"], o["winter"]
     c.b1_first, c.night_floor = o["b1_first"], o["night_floor"]
-    c.src, c.wp_kind = o["src_reason"], o["wp_kind"]
+    c.src, c.wp_row = o["src_reason"], o["wp_row"]
     c.wp_fc_capped, c.wp_cap_armed = o["wp_fc_capped"], o["wp_cap_armed"]
     out.wp_why = BM_WP_NAME[o["wp_reason"]]
     out.src_why = BM_SRC_NAME[o["src_reason"]]
     if c.wp_fresh and inp.wp > 0:
-        c.wp_eff = inp.wp - wp_share(cfg, c.wp_kind, inp.wp)
+        c.wp_eff = inp.wp - wp_share(cfg, c.wp_row, inp.wp)
     c.z2 = inp.pcc + c.wp_eff
 
 
@@ -925,7 +940,7 @@ def chain_mode(cfg, inp, st, out, c):
     # D6 WPPV (0.56-c): the heat pump runs on PV -> charge a share of it on top, the PCC buys it
     st.wp_pv = bm_d6({
         "enabled": cfg.wp_pv_chg_share > 0 and cfg.wp_pv_grid_max > 0,
-        "kind_all": c.wp_kind == BM_WPK_ALL,
+        "row_pv": BM_WP_RULE[c.wp_row].pv_charge,
         "day": not c.night,
         "wp_on": c.wp_on,
         "pcc_fresh": inp.have_pcc and not c.stale,

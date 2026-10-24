@@ -456,7 +456,8 @@ const char *BM_MODE_NAME[BM_M_N] = {"BMS_MISSING", "FORCE", "STALE", "LADESPERRE
    -> the stacks cover at most WP_BAT_SHARE_BAD % of the heat pump (S2). Sofar first (0.38-c): Bat1 above BAT1_SOC_MIN
    (on again from + BAT1_FIRST_HYST) and the heat pump running -> the Sofar delivers first at night (S3). Low SoC
    (0.54-c, user 2026-10-24): the lowest stack below WP_SOC_MIN (back from + WP_SOC_HYST) -> the stacks cover none of
-   the heat pump, whatever season or forecast say (S2 kind NONE, reason LOWSOC); the house load is served as before */
+   the heat pump, whatever season or forecast say (row LOWSOC); the house load is served as before. 0.57-c: one heat
+   pump row (BM_WP_RULE) instead of a reason and a kind chain */
 /* the discharge matrix rows (bm_logic.h): only the night floor (SRC STK) takes the Sofar battery over */
 const struct bm_src_rule BM_SRC_RULE[BM_SRC_N] = {
 	/*               b1_signed trickle idle_w      prop_hold */
@@ -478,7 +479,16 @@ const struct bm_mode_rule BM_MODE_RULE[BM_M_N] = {
 	[BM_M_CHARGING]    = {BM_A_ZERO,      0,      BM_W_POWER},
 	[BM_M_DIS]         = {BM_A_DISCHARGE, 1,      BM_W_NONE},
 };
-const char *BM_WPK_NAME[BM_WPK_N] = {"NONE", "CAP", "ALL", "BAD"};
+/* the heat pump matrix rows (bm_logic.h). TRANS shows T1900 once the heat pump is above WP_BAT_MAX_TRANSITION */
+const struct bm_wp_rule BM_WP_RULE[BM_WR_N] = {
+	/*                name      reason        cover        pv_charge */
+	[BM_WR_LOWSOC] = {"LOWSOC", BM_WP_LOWSOC, BM_WC_NONE,  0},   /* lowest stack < WP_SOC_MIN (0.54-c) */
+	[BM_WR_FC]     = {"FC",     BM_WP_FC,     BM_WC_ALL,   1},   /* good forecast: as in summer (0.24) */
+	[BM_WR_FCBAD]  = {"FCBAD",  BM_WP_FCBAD,  BM_WC_BAD,   0},   /* bad forecast cap binds (0.37-c) */
+	[BM_WR_WINTER] = {"WINTER", BM_WP_Z2,     BM_WC_NONE,  0},   /* Z2: the grid pays the heat pump (0.19) */
+	[BM_WR_TRANS]  = {"TRANS",  BM_WP_ALL,    BM_WC_TRANS, 0},   /* up to 1900 W from the stacks (0.22) */
+	[BM_WR_SUMMER] = {"SUMMER", BM_WP_ALL,    BM_WC_ALL,   1},
+};
 
 void bm_d1(const struct bm_d1_in *b, int fc_active, int bat1_first, int wp_low, struct bm_d1_out *o)
 {
@@ -509,13 +519,11 @@ void bm_d1(const struct bm_d1_in *b, int fc_active, int bat1_first, int wp_low, 
 	o->night_floor = b->night && !o->b1_first && (b->season != BM_WINTER || !b->wp_on);
 	o->wp_fc_capped = !wp_low && o->fc_bad && b->wp_pos && b->fc_share_lt_share;
 	o->wp_cap_armed = !b->wp_fresh && o->winter && b->wp_running;
-	o->wp_reason = !b->wp_fresh ? BM_WP_NA : !b->wp_on ? BM_WP_OFF : wp_low ? BM_WP_LOWSOC : fc_active ? BM_WP_FC
-				   : o->wp_fc_capped ? BM_WP_FCBAD
-				   : o->season_wp == BM_WINTER ? BM_WP_Z2
-				   : o->season_wp == BM_TRANSITION && b->wp_gt_trans ? BM_WP_T1900 : BM_WP_ALL;
+	o->wp_row = wp_low ? BM_WR_LOWSOC : fc_active ? BM_WR_FC : o->wp_fc_capped ? BM_WR_FCBAD
+				: o->season_wp == BM_WINTER ? BM_WR_WINTER : o->season_wp == BM_TRANSITION ? BM_WR_TRANS : BM_WR_SUMMER;
+	o->wp_reason = !b->wp_fresh ? BM_WP_NA : !b->wp_on ? BM_WP_OFF
+				   : o->wp_row == BM_WR_TRANS && b->wp_gt_trans ? BM_WP_T1900 : BM_WP_RULE[o->wp_row].reason;
 	o->src_reason = !b->night ? BM_SRC_DAY : o->b1_first ? BM_SRC_B1 : o->night_floor ? BM_SRC_STK : BM_SRC_B1W;
-	o->wp_kind = wp_low ? BM_WPK_NONE : o->wp_fc_capped ? BM_WPK_BAD : o->season_wp == BM_WINTER ? BM_WPK_NONE
-				 : o->season_wp == BM_TRANSITION ? BM_WPK_CAP : BM_WPK_ALL;
 }
 
 /* D2. Per bank: SoC protection and force charge with hysteresis (only while the BMS reports), then the mode, first
@@ -610,7 +618,7 @@ int bm_d5(const struct bm_d5_in *b)
 /* D6. WPPV (0.56-c): see bm_logic.h. On above PCC_SURPLUS_TH, held while the surplus without the share is >= 0 */
 int bm_d6(const struct bm_d6_in *b, int wp_pv)
 {
-	int gate = b->enabled && b->kind_all && b->day && b->wp_on && b->pcc_fresh && b->no_cap;
+	int gate = b->enabled && b->row_pv && b->day && b->wp_on && b->pcc_fresh && b->no_cap;
 	return gate && (b->surplus_gt_on || (wp_pv && b->surplus_ge_hold));
 }
 
@@ -647,7 +655,7 @@ struct chain {
 	int wp_fc_capped;                  /* S2: the bad-forecast cap binds */
 	double z2;                         /* PCC + wp_eff: the point the stacks regulate on */
 	int b1_first, night_floor;         /* S3 */
-	int src, wp_kind;                  /* the discharge matrix rows: enum bm_src_reason, enum bm_wp_kind */
+	int src, wp_row;                   /* the matrix rows: enum bm_src_reason, enum bm_wp_row */
 	int wp_cap_armed;                  /* WP_CAP fallback: em0/power stale, R290 running, not summer */
 	double bat1_eff, chg_ref, surplus;
 	int block, charge_mode;
@@ -722,15 +730,15 @@ static void d1_bits(const struct bm_cfg *cfg, const struct bm_in *in, const stru
 	b->wp_soc_low_off = min_soc >= cfg->wp_soc_min + WP_SOC_HYST;
 }
 
-/* S2 row of the discharge matrix: the part of the heat pump W the stacks cover */
-static double wp_share(const struct bm_cfg *cfg, int wp_kind, double wp)
+/* heat pump matrix, column cover: the part of the heat pump W the stacks cover */
+static double wp_share(const struct bm_cfg *cfg, int wp_row, double wp)
 {
-	switch (wp_kind) {
-	case BM_WPK_NONE:
+	switch (BM_WP_RULE[wp_row].cover) {
+	case BM_WC_NONE:
 		return 0.0;
-	case BM_WPK_CAP:
+	case BM_WC_TRANS:
 		return fmin(wp, cfg->wp_bat_max_transition);
-	case BM_WPK_BAD:
+	case BM_WC_BAD:
 		return wp * cfg->wp_bat_share_bad / 100.0;
 	default:
 		return wp;
@@ -758,13 +766,13 @@ static void chain_d1(const struct bm_cfg *cfg, const struct bm_in *in, struct bm
 	c->b1_first = o.b1_first;
 	c->night_floor = o.night_floor;
 	c->src = o.src_reason;
-	c->wp_kind = o.wp_kind;
+	c->wp_row = o.wp_row;
 	c->wp_fc_capped = o.wp_fc_capped;
 	c->wp_cap_armed = o.wp_cap_armed;
 	snprintf(out->wp_why, sizeof(out->wp_why), "%s", BM_WP_NAME[o.wp_reason]);
 	snprintf(out->src_why, sizeof(out->src_why), "%s", BM_SRC_NAME[o.src_reason]);
 	if (c->wp_fresh && in->wp > 0)
-		c->wp_eff = in->wp - wp_share(cfg, c->wp_kind, in->wp);
+		c->wp_eff = in->wp - wp_share(cfg, c->wp_row, in->wp);
 	c->z2 = in->pcc + c->wp_eff;
 }
 
@@ -826,7 +834,7 @@ static void chain_mode(const struct bm_cfg *cfg, const struct bm_in *in, struct 
 	c->surplus = c->chg_ref + c->bat1_eff + c->own_charge - c->own_discharge;
 	c->block = ladesperre(cfg, in, st, out, c->stale, c->multis, c->surplus, &c->cap_active);
 	/* D6 WPPV (0.56-c): the heat pump runs on PV -> charge a share of it on top, the PCC buys it */
-	struct bm_d6_in d6 = {cfg->wp_pv_chg_share > 0 && cfg->wp_pv_grid_max > 0, c->wp_kind == BM_WPK_ALL, !c->night,
+	struct bm_d6_in d6 = {cfg->wp_pv_chg_share > 0 && cfg->wp_pv_grid_max > 0, BM_WP_RULE[c->wp_row].pv_charge, !c->night,
 						  c->wp_on, in->have_pcc && !c->stale, !c->cap_active, c->surplus > PCC_SURPLUS_TH,
 						  c->surplus >= 0};
 	st->wp_pv = bm_d6(&d6, st->wp_pv);

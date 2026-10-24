@@ -162,8 +162,7 @@ extern const char *BM_WP_NAME[BM_WP_N], *BM_SRC_NAME[BM_SRC_N], *BM_MODE_NAME[BM
 
 /* Discharge matrix (0.45-c): what the two decision axes of D1 mean for the discharge amount, one table row each.
    The amount code reads nothing else of D1. S3 source -> how the Sofar Bat1 counts, the target, the idle power, the
-   PROP hold; S2 heat pump kind -> the part of the heat pump the stacks cover. Enumerated by make check */
-enum bm_wp_kind { BM_WPK_NONE, BM_WPK_CAP, BM_WPK_ALL, BM_WPK_BAD, BM_WPK_N };
+   PROP hold; S2 heat pump row -> BM_WP_RULE below. Enumerated by make check */
 struct bm_src_rule {
 	int b1_signed;              /* 1: a Bat1 discharge is house load the stacks take over; 0: only its charge counts */
 	int trickle;                /* target + SOFAR_TRICKLE: the Sofar battery charges a few W steadily */
@@ -182,7 +181,21 @@ struct bm_mode_rule {
 								   none (the discharge stage writes it) */
 };
 extern const struct bm_mode_rule BM_MODE_RULE[];
-extern const char *BM_WPK_NAME[BM_WPK_N];
+
+/* Heat pump matrix (0.57-c, user 2026-10-24: "fasse die WP rules zusammen"): who pays the heat pump. D1 picks one row
+   (first match: LOWSOC > FC > FCBAD > WINTER > TRANS > SUMMER), the amounts read only its columns. Before, D1 derived
+   a reason and a kind with two separate chains, and D6 tested the kind; now one row, one table */
+enum bm_wp_row { BM_WR_LOWSOC, BM_WR_FC, BM_WR_FCBAD, BM_WR_WINTER, BM_WR_TRANS, BM_WR_SUMMER, BM_WR_N };
+enum bm_wp_cover { BM_WC_NONE, BM_WC_TRANS, BM_WC_ALL, BM_WC_BAD };
+struct bm_wp_rule {
+	const char *name;           /* the row name (make check, diagrams) */
+	int reason;                 /* enum bm_wp_reason: rule text WP:<..> while the heat pump runs */
+	int cover;                  /* enum bm_wp_cover: part of the heat pump the stacks cover (discharge) - the rest is
+								   added to the charge point z2: none, up to WP_BAT_MAX_TRANSITION, all,
+								   WP_BAT_SHARE_BAD % */
+	int pv_charge;              /* D6 WPPV may add WP_PV_CHG_SHARE % of the heat pump to the charge point */
+};
+extern const struct bm_wp_rule BM_WP_RULE[BM_WR_N];
 
 /* D1: forecast rule, S3 source, S2 scope. State: fc_active, bat1_first, wp_low */
 struct bm_d1_in {
@@ -206,7 +219,7 @@ struct bm_d1_out {
 	int fc_active, bat1_first, wp_low;   /* next state */
 	int fc_ok, fc_bad, season_wp, winter, b1_first, night_floor, wp_fc_capped, wp_cap_armed;
 	int wp_reason, src_reason;
-	int wp_kind;                /* enum bm_wp_kind: S2 row of the discharge matrix */
+	int wp_row;                 /* enum bm_wp_row: the heat pump matrix row (0.57-c) */
 };
 void bm_d1(const struct bm_d1_in *b, int fc_active, int bat1_first, int wp_low, struct bm_d1_out *o);
 
@@ -291,13 +304,13 @@ int bm_d5(const struct bm_d5_in *b);                                  /* 1 = pul
 
 /* D6 (0.56-c, user 2026-10-24): heat pump on PV -> the stacks charge WP_PV_CHG_SHARE % of its power on top, the PCC
    buys it (at most WP_PV_GRID_MAX): grid heat power is cheaper than the stored PV is worth. Only where the stacks
-   would cover all of the heat pump (S2 kind ALL: summer, good forecast), by day, without the D4 export cap. On while
+   would cover all of the heat pump (BM_WP_RULE pv_charge: rows SUMMER, FC), by day, without the D4 export cap. On while
    the surplus without the heat pump share (z2 + Bat1_eff + own charge - own discharge) is above PCC_SURPLUS_TH, i.e.
    the PV covers house + heat pump and still charges; held down to 0. Charging the share does not change that surplus
    (own charge up, PCC down by the same W), so the rule holds itself. State: wp_pv */
 struct bm_d6_in {
 	int enabled;                                 /* WP_PV_CHG_SHARE > 0 and WP_PV_GRID_MAX > 0 */
-	int kind_all;                                /* D1 wp_kind == BM_WPK_ALL */
+	int row_pv;                                  /* BM_WP_RULE[wp_row].pv_charge (0.57-c, was: kind ALL) */
 	int day;                                     /* not night */
 	int wp_on;                                   /* heat pump >= WP_ON_TH, em0/power fresh */
 	int pcc_fresh;                               /* PCC present, inverter data not stale */

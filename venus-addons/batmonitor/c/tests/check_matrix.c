@@ -54,10 +54,6 @@ static void check_dis_table(void)
 		INV((r->idle_w == 0) == stk, "idle power 0 exactly with the night floor (PCC near 0)");
 		INV(r->idle_w >= 0, "idle power never charges");
 	}
-	printf("  S2 heat pump kinds:");
-	for (int k = 0; k < BM_WPK_N; k++)
-		printf(" %s", BM_WPK_NAME[k]);
-	putchar('\n');
 }
 
 /* ---- mode matrix (0.48-c): what each S1 mode means for the setpoint -------------------------------------------- */
@@ -81,7 +77,7 @@ static void check_d1(void)
 {
 	static const int SEASONS[3] = {BM_SUMMER, BM_TRANSITION, BM_WINTER};
 	static const char *SN[4] = {"", "summer", "winter", "transition"};
-	long combos = 0, reach[BM_WP_N][BM_SRC_N] = {{0}}, reach_season[4][BM_SRC_N] = {{0}};
+	long combos = 0, reach_row[BM_WR_N] = {0}, reach[BM_WP_N][BM_SRC_N] = {{0}}, reach_season[4][BM_SRC_N] = {{0}};
 	for (int si = 0; si < 3; si++)
 		for (unsigned v = 0; v < (1u << 16); v++)
 			for (int s = 0; s < 8; s++) {
@@ -123,16 +119,26 @@ static void check_d1(void)
 				/* low SoC (0.54-c): no heat pump support, whatever season and forecast say */
 				INV(o.wp_low == (b.wp_soc_low_on || (wl && !b.wp_soc_low_off)), "WP_LOW latch: on below, off from + hyst");
 				INV((o.wp_reason == BM_WP_LOWSOC) == (b.wp_on && o.wp_low), "WP:LOWSOC exactly WP on + low SoC");
-				INV(!o.wp_low || o.wp_kind == BM_WPK_NONE, "low SoC -> the stacks cover none of the heat pump");
+				INV(!o.wp_low || BM_WP_RULE[o.wp_row].cover == BM_WC_NONE, "low SoC -> the stacks cover none of the heat pump");
 				INV(!o.wp_low || !o.wp_fc_capped, "low SoC overrides the forecast cap");
 				INV(o.wp_reason != BM_WP_FCBAD || o.wp_fc_capped, "WP:FCBAD only when the forecast cap binds");
 				INV(o.wp_reason != BM_WP_Z2 || o.season_wp == BM_WINTER, "WP:Z2 only in winter");
-				/* discharge matrix rows (0.45-c) */
-				INV((o.wp_kind == BM_WPK_BAD) == o.wp_fc_capped, "WP kind BAD exactly when the forecast cap binds");
-				INV(o.wp_reason != BM_WP_Z2 || o.wp_kind == BM_WPK_NONE, "WP:Z2 -> the stacks cover nothing");
-				INV(o.wp_reason != BM_WP_FC || o.wp_kind == BM_WPK_ALL, "WP:FC -> the stacks cover all");
-				INV(o.wp_reason != BM_WP_FCBAD || o.wp_kind == BM_WPK_BAD, "WP:FCBAD -> WP_BAT_SHARE_BAD");
-				INV(o.wp_reason != BM_WP_T1900 || o.wp_kind == BM_WPK_CAP, "WP:T1900 -> the transition cap");
+				/* heat pump matrix (0.57-c): one row; the reason and kind chains of 0.56-c as reference model */
+				const struct bm_wp_rule *wr = &BM_WP_RULE[o.wp_row];
+				int ref_cover = o.wp_low ? BM_WC_NONE : o.wp_fc_capped ? BM_WC_BAD : o.season_wp == BM_WINTER ? BM_WC_NONE
+								: o.season_wp == BM_TRANSITION ? BM_WC_TRANS : BM_WC_ALL;
+				int ref_reason = !b.wp_fresh ? BM_WP_NA : !b.wp_on ? BM_WP_OFF : o.wp_low ? BM_WP_LOWSOC
+								 : o.fc_active ? BM_WP_FC : o.wp_fc_capped ? BM_WP_FCBAD
+								 : o.season_wp == BM_WINTER ? BM_WP_Z2
+								 : o.season_wp == BM_TRANSITION && b.wp_gt_trans ? BM_WP_T1900 : BM_WP_ALL;
+				INV(wr->cover == ref_cover, "row cover = the 0.56-c kind chain");
+				INV(o.wp_reason == ref_reason, "rule text = the 0.56-c reason chain");
+				INV(wr->pv_charge == (ref_cover == BM_WC_ALL), "WPPV allowed exactly where the stacks cover all (0.56-c kind ALL)");
+				INV((wr->cover == BM_WC_BAD) == o.wp_fc_capped, "cover BAD exactly when the forecast cap binds");
+				INV(o.wp_reason != BM_WP_Z2 || wr->cover == BM_WC_NONE, "WP:Z2 -> the stacks cover nothing");
+				INV(o.wp_reason != BM_WP_FC || wr->cover == BM_WC_ALL, "WP:FC -> the stacks cover all");
+				INV(o.wp_reason != BM_WP_T1900 || wr->cover == BM_WC_TRANS, "WP:T1900 -> the transition cap");
+				reach_row[o.wp_row]++;
 				INV(BM_SRC_RULE[o.src_reason].b1_signed == o.night_floor, "Bat1 signed exactly with the night floor");
 				/* B1FIRST in winter changes only the reason, not the regulation (night floor, 0.40-c note) */
 				if (b.season == BM_WINTER) {
@@ -155,6 +161,12 @@ static void check_d1(void)
 			printf("%8ld", reach[w][s]);
 		putchar('\n');
 	}
+	printf("  heat pump matrix BM_WP_RULE (0.57-c):\n  %-7s %-7s %-6s %-9s %s\n", "row", "reason", "cover", "pv_charge",
+		   "combinations");
+	static const char *CN[4] = {"NONE", "TRANS", "ALL", "BAD"};
+	for (int w = 0; w < BM_WR_N; w++)
+		printf("  %-7s %-7s %-6s %-9d %ld\n", BM_WP_RULE[w].name, BM_WP_NAME[BM_WP_RULE[w].reason],
+			   CN[BM_WP_RULE[w].cover], BM_WP_RULE[w].pv_charge, reach_row[w]);
 	printf("  season used for the WP x SRC:\n");
 	for (int se = 1; se <= 3; se++) {
 		printf("  %-11s", SN[se]);
@@ -367,10 +379,10 @@ static void check_d6(void)
 			if (b.surplus_gt_on && !b.surplus_ge_hold)          /* surplus > 200 W implies >= 0 */
 				continue;
 			int r = bm_d6(&b, s);
-			int gate = b.enabled && b.kind_all && b.day && b.wp_on && b.pcc_fresh && b.no_cap;
+			int gate = b.enabled && b.row_pv && b.day && b.wp_on && b.pcc_fresh && b.no_cap;
 			combos++;
 			on += r;
-			INV(!r || gate, "WPPV only enabled, S2 kind ALL, by day, heat pump on, PCC fresh, no D4 cap");
+			INV(!r || gate, "WPPV only enabled, row with pv_charge, by day, heat pump on, PCC fresh, no D4 cap");
 			INV(!r || b.surplus_ge_hold, "WPPV never without the PV covering house + heat pump");
 			INV(!gate || !b.surplus_gt_on || r, "WPPV on above PCC_SURPLUS_TH");
 			INV(s || r == (gate && b.surplus_gt_on), "WPPV starts only above PCC_SURPLUS_TH");
