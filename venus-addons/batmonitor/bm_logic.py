@@ -631,7 +631,7 @@ def bm_d2(b, prot, force, low, chg_prev):
                 force[k] = 0
             if x["low_on"]:
                 low[k] = 1
-            elif x["low_off"]:
+            elif x["low_off"] and x["soc_ge_release"]:   # 0.55-c: and SoC back at SOC_MIN_RELEASE
                 low[k] = 0
         if not x["bms_ok"]:
             mode[k] = BM_M_BMS_MISSING

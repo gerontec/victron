@@ -203,7 +203,10 @@ static void d2_bank_inv(const struct bm_d2_in *b, int k, int prot, int force, in
 	INV(!o->force[k] || !x->bms_ok || m == BM_M_FORCE, "force charge has priority");
 	INV(!(x->bms_ok && x->low_on) || m == BM_M_FORCE, "DCL 0 / cell low: always force charge");
 	INV(!o->low[k] || !x->bms_ok || m == BM_M_FORCE, "LOW latched: force charge, no discharge");
-	INV(!(x->bms_ok && low && !x->low_off) || o->low[k], "LOW holds until DCL back and cell recovered");
+	INV(!(x->bms_ok && low && !(x->low_off && x->soc_ge_release)) || o->low[k],
+		"LOW holds until DCL back, cell recovered and SoC at SOC_MIN_RELEASE (0.55-c)");
+	INV(!x->bms_ok || o->low[k] == (x->low_on || (low && !(x->low_off && x->soc_ge_release))),
+		"LOW latch: on with DCL 0 / cell low, off only with DCL, cell and SoC all back");
 }
 
 /* D2 per stack (0.53-c): bm_d2 decides each bank alone; the banks are coupled only through the global bits

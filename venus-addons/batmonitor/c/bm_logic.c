@@ -520,7 +520,9 @@ void bm_d1(const struct bm_d1_in *b, int fc_active, int bat1_first, int wp_low, 
    match: BMS_MISSING > FORCE > STALE > LADESPERRE > CHARGE / FULL > PROT > CHARGING > DIS. Charge mode on the Z2
    surplus, held down to SOYO_HOLD_TH once charging. LOW (0.52-c, after 2026-10-11 04:07: the MUST BMS sent DCL 0 at
    10 % SoC / 3.0 V and switched itself off, the SoC force charge never started): DCL 0 or the lowest cell below
-   CELL_FORCE_V force charge too and stop the discharge at once, until DCL is back and the cell has recovered */
+   CELL_FORCE_V force charge too and stop the discharge at once, until DCL is back and the cell has recovered, and
+   (0.55-c, user 2026-10-24) the SoC is back at SOC_MIN_RELEASE: under the force charge current the cell is above
+   CELL_FORCE_RELEASE_V within minutes, without the SoC term LOW and discharge would take turns */
 void bm_d2(const struct bm_d2_in *b, const int *prot, const int *force, const int *low, int chg_prev,
 		   struct bm_d2_out *o)
 {
@@ -542,7 +544,7 @@ void bm_d2(const struct bm_d2_in *b, const int *prot, const int *force, const in
 				o->force[k] = 0;
 			if (x->low_on)
 				o->low[k] = 1;
-			else if (x->low_off)
+			else if (x->low_off && x->soc_ge_release)
 				o->low[k] = 0;
 		}
 		o->mode[k] = !x->bms_ok ? BM_M_BMS_MISSING : o->force[k] || o->low[k] ? BM_M_FORCE : b->stale ? BM_M_STALE
