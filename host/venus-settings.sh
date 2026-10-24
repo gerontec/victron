@@ -19,6 +19,7 @@ RUN_USER="${SUDO_USER:-pi}"
 RUN_HOME=$(getent passwd "$RUN_USER" | cut -d: -f6)
 V2DB_DIR="$RUN_HOME/python"
 V2DB_CRON="* * * * * /usr/bin/python3 $V2DB_DIR/victron2db.py >/tmp/victron2db.log 2>&1"
+DBUS2DB_CRON="*/5 * * * * /usr/bin/python3 $V2DB_DIR/victron_dbus2db.py >/tmp/victron_dbus2db.log 2>&1"
 
 [ "$(id -u)" -eq 0 ] || exec sudo "$0" "$@"
 
@@ -93,6 +94,14 @@ EOF
 	else
 		(crontab -u "$RUN_USER" -l 2>/dev/null; echo "$V2DB_CRON") | crontab -u "$RUN_USER" -
 		echo "victron2db: cron added"
+	fi
+	# settings snapshot wagodb.pv_victron_dbus (creates the table itself)
+	install -D -o "$RUN_USER" -g "$RUN_USER" -m 755 "$REPO/readers/victron_dbus2db.py" "$V2DB_DIR/victron_dbus2db.py"
+	if crontab -u "$RUN_USER" -l 2>/dev/null | grep -qF "$V2DB_DIR/victron_dbus2db.py"; then
+		echo "victron_dbus2db: cron ok"
+	else
+		(crontab -u "$RUN_USER" -l 2>/dev/null; echo "$DBUS2DB_CRON") | crontab -u "$RUN_USER" -
+		echo "victron_dbus2db: cron added"
 	fi
 }
 
