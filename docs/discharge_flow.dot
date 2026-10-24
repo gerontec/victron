@@ -2,7 +2,7 @@
 // render: dot -Tpdf discharge_flow.dot -o discharge_flow.pdf   (or -Tpng)
 digraph batmonitor {
 	graph [rankdir=TB, fontname="Helvetica", fontsize=11, nodesep=0.35, ranksep=0.35, newrank=true,
-		   label="batmonitor 0.52-c: one cycle (bm_step, every 5 s)   |   blue = pure decision function (bits + state, enumerated by make check)   |   green = discharge matrix   |   [CBMC] = proved for all inputs",
+		   label="batmonitor 0.56-c: one cycle (bm_step, every 5 s)   |   blue = pure decision function (bits + state, enumerated by make check)   |   green = discharge matrix   |   [CBMC] = proved for all inputs",
 		   labelloc=t];
 	node [shape=box, style="rounded,filled", fillcolor="#f4f4f4", fontname="Helvetica", fontsize=10];
 	edge [fontname="Helvetica", fontsize=9];
@@ -13,13 +13,13 @@ digraph batmonitor {
 
 	src [label=<<b>S3 source</b> (measured season only, 0.45-c)<br/>day -&gt; <b>DAY</b><br/>night + B1FIRST -&gt; <b>B1</b><br/>night, not (winter + WP on) -&gt; <b>STK</b> (night floor)<br/>night, winter + WP on -&gt; <b>B1W</b>>, fillcolor="#dbe8fb"];
 
-	wpk [label=<<b>S2 heat pump kind</b><br/>forecast cap binds -&gt; <b>BAD</b><br/>else season_wp (FC_ACTIVE = summer):<br/>winter -&gt; <b>NONE</b>, transition -&gt; <b>CAP</b>, summer -&gt; <b>ALL</b>>, fillcolor="#dbe8fb"];
+	wpk [label=<<b>S2 heat pump kind</b><br/>lowest stack &lt; WP_SOC_MIN -&gt; <b>NONE</b> (LOWSOC, 0.54-c)<br/>forecast cap binds -&gt; <b>BAD</b><br/>else season_wp (FC_ACTIVE = summer):<br/>winter -&gt; <b>NONE</b>, transition -&gt; <b>CAP</b>, summer -&gt; <b>ALL</b>>, fillcolor="#dbe8fb"];
 
 	share [label=<<b>wp_share</b><br/>NONE 0  |  CAP min(WP, WP_BAT_MAX_TRANSITION)  |  ALL WP  |  BAD WP x WP_BAT_SHARE_BAD %<br/>z2 = PCC + (WP - share)   (the point the stacks regulate on)>];
 
 	gates [label=<<b>S0 gates</b> per bank (chain_gates)<br/>SoC from the BMS; caps per phase, one per bank:<br/>chg_cap = min(charger x U, BMS CCL)   dis_cap = min(DISCHARGE_MAX_PHASE, BMS DCL)>];
 
-	d2 [label=<<b>D2</b> bm_d2 per bank   state: prot, force, low, chg_prev<br/>first match: BMS_MISSING &gt; FORCE (force or low) &gt; STALE &gt; LADESPERRE &gt;<br/>CHARGE / FULL &gt; PROT &gt; CHARGING &gt; <b>DIS</b><br/><b>LOW</b> (0.52-c, state low): on at DCL &lt; DCL_FORCE_A 1 A or lowest cell &lt; CELL_FORCE_V 3.00 V,<br/>off when DCL is back and the cell &ge; CELL_FORCE_RELEASE_V 3.25 V; LOW -&gt; FORCE (charge, no discharge)<br/><font point-size="9">make check: 16128 combinations per stack (84 bit sets x 12 global x 16 states) -&gt; mode:<br/>BMS_MISSING 8064 · FORCE 5184 · STALE 1440 · LADESPERRE 360 · PROT 324 ·<br/>CHARGE 288 · CHARGING 198 · DIS 198 · FULL 72</font><br/><font point-size="9">[CBMC h_d2_bits; threshold order needed: h_d2_bits_any_order]</font>>, fillcolor="#dbe8fb"];
+	d2 [label=<<b>D2</b> bm_d2 per bank   state: prot, force, low, chg_prev<br/>first match: BMS_MISSING &gt; FORCE (force or low) &gt; STALE &gt; LADESPERRE &gt;<br/>CHARGE / FULL &gt; PROT &gt; CHARGING &gt; <b>DIS</b><br/><b>LOW</b> (0.52-c, state low): on at DCL &lt; DCL_FORCE_A 1 A or lowest cell &lt; CELL_FORCE_V 3.00 V,<br/>off when DCL is back, the cell &ge; CELL_FORCE_RELEASE_V 3.25 V and (0.55-c) SoC &ge; SOC_MIN_RELEASE;<br/>LOW -&gt; FORCE (charge, no discharge); Lenggries env: CELL_FORCE_V 3.05 V<br/><font point-size="9">make check: 16128 combinations per stack (84 bit sets x 12 global x 16 states) -&gt; mode:<br/>BMS_MISSING 8064 · FORCE 5760 · STALE 1152 · LADESPERRE 288 · CHARGE 216 ·<br/>PROT 216 · CHARGING 180 · DIS 180 · FULL 72</font><br/><font point-size="9">[CBMC h_d2_bits; threshold order needed: h_d2_bits_any_order]</font>>, fillcolor="#dbe8fb"];
 
 	lead [label=<<b>D-lead</b> bm_dlead   state: lead<br/>|SoC1 - SoC2| &gt; SOC_BALANCE_ON -&gt; the stack ahead leads<br/>&lt; SOC_BALANCE_OFF -&gt; no lead>, fillcolor="#dbe8fb"];
 

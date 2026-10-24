@@ -50,6 +50,8 @@ struct bm_cfg {
 	double do4_grace_s, do4_hard_w; /* DO4 only after PCC > 20 kW for this long, at once above this (0.50-c) */
 	double acout_feed_max_w, acout_feed_s;   /* DO4 when PV feeds more than this into one AC-out for this long (0.51-c) */
 	double wp_soc_min;              /* no heat pump support from the stacks while the lowest stack SoC is below (0.54-c) */
+	double wp_pv_chg_share;         /* % of the heat pump W the stacks charge extra while it runs on PV (0.56-c) */
+	double wp_pv_grid_max;          /* W: ... at most this, the grid import it costs (0.56-c) */
 };
 
 /* parameter table: name (env BATMONITOR_<name>), default, allowed range, unit, meaning */
@@ -118,6 +120,7 @@ struct bm_state {
 	int fc_active;                               /* forecast: stacks above the target SoC -> serve everything */
 	int bat1_first;                              /* Sofar Bat1 above BAT1_SOC_MIN: it discharges first (0.38-c) */
 	int wp_low;                                  /* lowest stack below WP_SOC_MIN: no heat pump support (0.54-c) */
+	int wp_pv;                                   /* WPPV latched: heat pump on PV, the stacks charge a share of it (0.56-c) */
 	double do4_last;                             /* monotonic s of the last DO4 pulse, 0 = none (0.46-c) */
 	double do4_over_since;                       /* monotonic s since the PCC is above PCC_PEAK_TH, 0 = not (0.50-c) */
 	double acout_over_since;                     /* monotonic s since an AC-out feeds above ACOUT_FEED_MAX_W (0.51-c) */
@@ -129,6 +132,7 @@ struct bm_out {
 	int sp[NPH];
 	char why[NPH][WHY_LEN];
 	double surplus, wp_eff;
+	double wp_pv_w;                              /* D6 WPPV: W added to the charge point, 0 = rule off (0.56-c) */
 	int season, season_measured;                 /* BM_SUMMER/WINTER/TRANSITION used; 1 = from batmonitor/season */
 	int fc_active;
 	int fc_bad;                                  /* forecast fresh and target_soc >= FC_BAD_TARGET: WP share capped */
@@ -284,6 +288,24 @@ int bm_d5(const struct bm_d5_in *b);                                  /* 1 = pul
 #define DO4_LOCKOUT 300.0                    /* s between two pulses: WR2 needs its restart after a pulse */
 #define DO4_PCC_MAX_AGE 15.0                 /* s: only a fresh PCC triggers (sofar_fast.py: every 4 s) */
 #define DO4_PULSE_S 3.0                      /* s: DO4=1, then DO4=0 (as fox2db / the ESP: r4 pulse 3) */
+
+/* D6 (0.56-c, user 2026-10-24): heat pump on PV -> the stacks charge WP_PV_CHG_SHARE % of its power on top, the PCC
+   buys it (at most WP_PV_GRID_MAX): grid heat power is cheaper than the stored PV is worth. Only where the stacks
+   would cover all of the heat pump (S2 kind ALL: summer, good forecast), by day, without the D4 export cap. On while
+   the surplus without the heat pump share (z2 + Bat1_eff + own charge - own discharge) is above PCC_SURPLUS_TH, i.e.
+   the PV covers house + heat pump and still charges; held down to 0. Charging the share does not change that surplus
+   (own charge up, PCC down by the same W), so the rule holds itself. State: wp_pv */
+struct bm_d6_in {
+	int enabled;                                 /* WP_PV_CHG_SHARE > 0 and WP_PV_GRID_MAX > 0 */
+	int kind_all;                                /* D1 wp_kind == BM_WPK_ALL */
+	int day;                                     /* not night */
+	int wp_on;                                   /* heat pump >= WP_ON_TH, em0/power fresh */
+	int pcc_fresh;                               /* PCC present, inverter data not stale */
+	int no_cap;                                  /* D4 cap not active */
+	int surplus_gt_on;                           /* surplus without the share > PCC_SURPLUS_TH */
+	int surplus_ge_hold;                         /* ... >= 0 */
+};
+int bm_d6(const struct bm_d6_in *b, int wp_pv);                       /* next wp_pv = the rule is active */
 
 void bm_init(struct bm_state *st);
 /* charge ceiling of one phase (W AC): charger_a x BMS voltage of its bank / charge_eff, at most CHARGE_MAX_PHASE;

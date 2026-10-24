@@ -357,6 +357,29 @@ static void check_d5(void)
 	printf("\nD5 DO4 pulse: 5 bits (PCC grace / hard limit, AC-out overfeed)\n");
 }
 
+/* ---- D6 WPPV (0.56-c) ---------------------------------------------------------------------------------------- */
+static void check_d6(void)
+{
+	long combos = 0, on = 0;
+	for (unsigned v = 0; v < 256; v++)
+		for (int s = 0; s < 2; s++) {
+			struct bm_d6_in b = {BIT(v, 0), BIT(v, 1), BIT(v, 2), BIT(v, 3), BIT(v, 4), BIT(v, 5), BIT(v, 6), BIT(v, 7)};
+			if (b.surplus_gt_on && !b.surplus_ge_hold)          /* surplus > 200 W implies >= 0 */
+				continue;
+			int r = bm_d6(&b, s);
+			int gate = b.enabled && b.kind_all && b.day && b.wp_on && b.pcc_fresh && b.no_cap;
+			combos++;
+			on += r;
+			INV(!r || gate, "WPPV only enabled, S2 kind ALL, by day, heat pump on, PCC fresh, no D4 cap");
+			INV(!r || b.surplus_ge_hold, "WPPV never without the PV covering house + heat pump");
+			INV(!gate || !b.surplus_gt_on || r, "WPPV on above PCC_SURPLUS_TH");
+			INV(s || r == (gate && b.surplus_gt_on), "WPPV starts only above PCC_SURPLUS_TH");
+			INV(!s || r == (gate && b.surplus_ge_hold), "WPPV held down to 0");
+			INV(bm_d6(&b, r) == r, "fixed point after one step");
+		}
+	printf("\nD6 WPPV: %ld combinations (8 bits x state), %ld active\n", combos, on);
+}
+
 /* ---- D3 -------------------------------------------------------------------------------------------------------- */
 static void check_d3(void)
 {
@@ -486,6 +509,7 @@ int main(void)
 	check_mode_table();
 	check_d4();
 	check_d5();
+	check_d6();
 	check_d1();
 	check_d2();
 	check_lead();

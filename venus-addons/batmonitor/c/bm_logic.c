@@ -111,6 +111,8 @@ const struct bm_param BM_PARAMS[] = {
 	{"ACOUT_FEED_S",          P(acout_feed_s),              10,      0,       120,     "s", "... for this long"},
 	{"CHARGER_DC_W",          P(charger_dc_w),              3600,    500,     5000,    "W", "full_at forecast: DC at the BMS per MultiPlus at its limit (measured 2026-10-09: ~3.6 kW, 65-67 A, flat over 53.6-54.6 V)"},
 	{"WP_SOC_MIN",            P(wp_soc_min),                15,      0,       100,     "%", "no heat pump support from the stacks while the lowest stack SoC is below this, also with a good forecast; back from + 2 % (0 = off)"},
+	{"WP_PV_CHG_SHARE",       P(wp_pv_chg_share),           50,      0,       100,     "%", "heat pump on PV (summer, good forecast): the stacks charge this share of its power on top, the PCC buys it (0 = off)"},
+	{"WP_PV_GRID_MAX",        P(wp_pv_grid_max),            2000,    0,       10000,   "W", "... at most this much (0 = off)"},
 };
 const int BM_NPARAMS = sizeof(BM_PARAMS) / sizeof(BM_PARAMS[0]);
 
@@ -605,6 +607,13 @@ int bm_d5(const struct bm_d5_in *b)
 	return ((b->pcc_over && (b->grace_over || b->pcc_hard)) || b->acout_over) && b->lockout_over;
 }
 
+/* D6. WPPV (0.56-c): see bm_logic.h. On above PCC_SURPLUS_TH, held while the surplus without the share is >= 0 */
+int bm_d6(const struct bm_d6_in *b, int wp_pv)
+{
+	int gate = b->enabled && b->kind_all && b->day && b->wp_on && b->pcc_fresh && b->no_cap;
+	return gate && (b->surplus_gt_on || (wp_pv && b->surplus_ge_hold));
+}
+
 /* ---- the rule chain (0.41-c): one function per stage, run in this order by bm_step ---------------------------------
    inputs     derived facts: data age, heat pump running, season, night, own AC-in
    forecast   FC_ACTIVE / FC_BAD from batmonitor/forecast
@@ -643,6 +652,7 @@ struct chain {
 	double bat1_eff, chg_ref, surplus;
 	int block, charge_mode;
 	int cap_active;                    /* D4: charge only the export above EXPORT_CAP */
+	double wp_pv_w;                    /* D6 WPPV: W added to the charge point (0.56-c) */
 	int discharge[NPH], charge[NPH], n_dis, n_chg;
 };
 
@@ -815,6 +825,16 @@ static void chain_mode(const struct bm_cfg *cfg, const struct bm_in *in, struct 
 	c->chg_ref = in->have_pcc ? c->z2 : 0.0;
 	c->surplus = c->chg_ref + c->bat1_eff + c->own_charge - c->own_discharge;
 	c->block = ladesperre(cfg, in, st, out, c->stale, c->multis, c->surplus, &c->cap_active);
+	/* D6 WPPV (0.56-c): the heat pump runs on PV -> charge a share of it on top, the PCC buys it */
+	struct bm_d6_in d6 = {cfg->wp_pv_chg_share > 0 && cfg->wp_pv_grid_max > 0, c->wp_kind == BM_WPK_ALL, !c->night,
+						  c->wp_on, in->have_pcc && !c->stale, !c->cap_active, c->surplus > PCC_SURPLUS_TH,
+						  c->surplus >= 0};
+	st->wp_pv = bm_d6(&d6, st->wp_pv);
+	if (st->wp_pv) {
+		c->wp_pv_w = fmin(in->wp * cfg->wp_pv_chg_share / 100.0, cfg->wp_pv_grid_max);
+		c->chg_ref += c->wp_pv_w;
+		c->surplus += c->wp_pv_w;
+	}
 	struct bm_d2_in d;
 	struct bm_d2_out o;
 	memset(&d, 0, sizeof(d));
@@ -940,6 +960,8 @@ static void chain_charge(const struct bm_cfg *cfg, const struct bm_state *st, st
 			strncat(out->why[p], st->lead >= 0 ? " BAL" : " EQ", WHY_LEN - 1 - strlen(out->why[p]));
 			if (c->cap_active)
 				strncat(out->why[p], " CAP", WHY_LEN - 1 - strlen(out->why[p]));
+			if (c->wp_pv_w > 0)
+				strncat(out->why[p], " WPPV", WHY_LEN - 1 - strlen(out->why[p]));
 		}
 }
 
@@ -1073,6 +1095,7 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 	chain_pi(cfg, in, st, out, &c);
 	out->surplus = c.surplus;
 	out->wp_eff = c.wp_eff;
+	out->wp_pv_w = c.wp_pv_w;
 	memcpy(st->setpoints, out->sp, sizeof(st->setpoints));
 }
 

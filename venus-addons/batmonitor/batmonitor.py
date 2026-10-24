@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bm_logic as L  # noqa: E402
 import bm_parse  # noqa: E402
 
-VERSION = "0.53-py"
+VERSION = "0.56-py"
 INVERTER_TOPIC = "inverter/power_grid_exchange/json"
 R290_TOPIC = "r290/heatpump/all"
 AUSSEN_TOPIC = "aussen/temp"
@@ -351,7 +351,7 @@ class Batmonitor:
             "forecast_rule": {"active": o.fc_active, "bad": o.fc_bad, "target_soc": o.fc_target,
                               "min_soc": o.fc_min_soc},
             "bat1_first": o.bat1_first,
-            "chain": {"wp": o.wp_why, "src": o.src_why},
+            "chain": {"wp": o.wp_why, "src": o.src_why, "wp_pv_w": c_round(o.wp_pv_w)},
             "pi": {"armed": self.cfg.pi_armed, "y_w": c_round(o.pi.y), "e_w": c_round(o.pi.e),
                    "applied_w": c_round(o.pi.applied), "u_w": c_round(o.pi.u),
                    "sp": {L.BM_PH[p]: o.pi.sp[p] for p in range(L.NPH)}},

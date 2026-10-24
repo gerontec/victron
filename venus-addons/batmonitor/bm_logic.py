@@ -192,6 +192,8 @@ BM_PARAMS = [
     Param("ACOUT_FEED_S", "acout_feed_s", 10, 0, 120, "s", "... for this long"),
     Param("CHARGER_DC_W", "charger_dc_w", 3600, 500, 5000, "W", "full_at forecast: DC at the BMS per MultiPlus at its limit"),
     Param("WP_SOC_MIN", "wp_soc_min", 15, 0, 100, "%", "no heat pump support from the stacks while the lowest stack SoC is below this, also with a good forecast; back from + 2 % (0 = off)"),
+    Param("WP_PV_CHG_SHARE", "wp_pv_chg_share", 50, 0, 100, "%", "heat pump on PV (summer, good forecast): the stacks charge this share of its power on top, the PCC buys it (0 = off)"),
+    Param("WP_PV_GRID_MAX", "wp_pv_grid_max", 2000, 0, 10000, "W", "... at most this much (0 = off)"),
 ]
 
 
@@ -275,6 +277,7 @@ class State:
     fc_active: int = 0
     bat1_first: int = 0
     wp_low: int = 0                             # lowest stack below WP_SOC_MIN: no heat pump support (0.54-c)
+    wp_pv: int = 0                              # WPPV latched: heat pump on PV, the stacks charge a share of it (0.56-c)
     do4_last: float = 0.0
     do4_over_since: float = 0.0                 # monotonic s since the PCC is above PCC_PEAK_TH, 0 = not (0.50-c)
     acout_over_since: float = 0.0               # monotonic s since an AC-out feeds above ACOUT_FEED_MAX_W (0.51-c)
@@ -313,6 +316,7 @@ class Out:
     why: list = field(default_factory=lambda: [""] * NPH)        # rule text per phase
     surplus: float = 0.0
     wp_eff: float = 0.0
+    wp_pv_w: float = 0.0                        # D6 WPPV: W added to the charge point, 0 = rule off (0.56-c)
     season: int = 0
     season_measured: int = 0
     fc_active: int = 0
@@ -693,6 +697,14 @@ def bm_d5(pcc_over, grace_over, pcc_hard, lockout_over, acout_over):
     return int(bool(((pcc_over and (grace_over or pcc_hard)) or acout_over) and lockout_over))
 
 
+def bm_d6(b, wp_pv):
+    """D6 WPPV (0.56-c, user 2026-10-24): heat pump on PV -> the stacks charge WP_PV_CHG_SHARE % of it on top, the PCC
+    buys it (at most WP_PV_GRID_MAX). Only S2 kind ALL, by day, heat pump on, PCC fresh, no D4 cap. On above
+    PCC_SURPLUS_TH, held while the surplus without the share is >= 0. Returns the next wp_pv"""
+    gate = (b["enabled"] and b["kind_all"] and b["day"] and b["wp_on"] and b["pcc_fresh"] and b["no_cap"])
+    return int(bool(gate and (b["surplus_gt_on"] or (wp_pv and b["surplus_ge_hold"]))))
+
+
 # ---- the rule chain: one function per stage, run in this order by bm_step ------------------------------------
 # Rule text per phase: <S1/S4 mode> [WP:<S2>] [SRC:<S3>] [<S5 split>] [<limit>], see bm_logic.c
 
@@ -712,6 +724,7 @@ class Chain:
         self.bat1_eff = self.chg_ref = self.surplus = 0.0
         self.block = self.charge_mode = 0
         self.cap_active = 0                     # D4: charge only the export above EXPORT_CAP
+        self.wp_pv_w = 0.0                      # D6 WPPV: W added to the charge point (0.56-c)
         self.discharge = [0] * NPH
         self.charge = [0] * NPH
         self.n_dis = self.n_chg = 0
@@ -909,6 +922,21 @@ def chain_mode(cfg, inp, st, out, c):
     c.chg_ref = c.z2 if inp.have_pcc else 0.0
     c.surplus = c.chg_ref + c.bat1_eff + c.own_charge - c.own_discharge
     c.block = ladesperre(cfg, inp, st, out, c.stale, c.multis, c.surplus, c)
+    # D6 WPPV (0.56-c): the heat pump runs on PV -> charge a share of it on top, the PCC buys it
+    st.wp_pv = bm_d6({
+        "enabled": cfg.wp_pv_chg_share > 0 and cfg.wp_pv_grid_max > 0,
+        "kind_all": c.wp_kind == BM_WPK_ALL,
+        "day": not c.night,
+        "wp_on": c.wp_on,
+        "pcc_fresh": inp.have_pcc and not c.stale,
+        "no_cap": not c.cap_active,
+        "surplus_gt_on": c.surplus > PCC_SURPLUS_TH,
+        "surplus_ge_hold": c.surplus >= 0,
+    }, st.wp_pv)
+    if st.wp_pv:
+        c.wp_pv_w = fmin(inp.wp * cfg.wp_pv_chg_share / 100.0, cfg.wp_pv_grid_max)
+        c.chg_ref += c.wp_pv_w
+        c.surplus += c.wp_pv_w
     d = {
         "stale": c.stale,
         "block": c.block,
@@ -1002,6 +1030,8 @@ def chain_charge(cfg, st, out, c):
             out.why[p] = (out.why[p] + (" BAL" if st.lead >= 0 else " EQ"))[:WHY_LEN - 1]
             if c.cap_active:
                 out.why[p] = (out.why[p] + " CAP")[:WHY_LEN - 1]
+            if c.wp_pv_w > 0:
+                out.why[p] = (out.why[p] + " WPPV")[:WHY_LEN - 1]
 
 
 def chain_pi(cfg, inp, st, out, c):
@@ -1105,6 +1135,7 @@ def bm_step(cfg, inp, st):
     chain_pi(cfg, inp, st, out, c)
     out.surplus = c.surplus
     out.wp_eff = c.wp_eff
+    out.wp_pv_w = c.wp_pv_w
     st.setpoints = list(out.sp)
     return out
 

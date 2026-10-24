@@ -39,6 +39,7 @@ struct plant {
 	int grid_off;                  /* 1 = grid offline (island, transfer relay open) */
 };
 
+static int r_override_wppv_off;      /* 1: D6 WPPV off for the next simulate() (tests of the older rules) */
 static double r_override_w_max;     /* > 0: W_MAX for the next simulate() (parameter test) */
 static int r_override_cap_off;   /* 1: EXPORT_CAP 0 in simulate */
 
@@ -74,6 +75,8 @@ static void simulate(struct run *r, const struct plant *pl, time_t t0, int n)
 		bm_param_set(&r->cfg, 0, r_override_w_max);
 	if (r_override_cap_off)
 		r->cfg.export_cap = 0;
+	if (r_override_wppv_off)
+		r->cfg.wp_pv_chg_share = 0;
 	bm_init(&r->st);
 	double now = 1000.0;
 	for (int k = 0; k < n; k++, now += CYCLE_SECONDS) {
@@ -359,8 +362,11 @@ static void test_winter_charge_on_z2(void)
 	CHECK(abs(sum_sp(&r) - 8200) <= 80, "stacks take PV - house, sp sum %d", sum_sp(&r));
 	CHECK(fabs(r.pcc + 4000) <= 80, "WP from the Z1 grid, pcc %.0f", r.pcc);
 	CHECK(pcc_swing(&r, 20) < 100, "no oscillation, swing %.0f", pcc_swing(&r, 20));
+	CHECK(!rule_has(&r, "WPPV"), "winter: no WPPV");
 	struct plant ps = BASE(.pv = 9000, .house = 800, .wp = 4000, .r290_hz = 60, .season = BM_SUMMER, .season_age_h = 1);
+	r_override_wppv_off = 1;                                    /* summer with WPPV: test_wp_pv_charge */
 	simulate(&r, &ps, local_time(2026, 12, 21, 12, 0), 60);
+	r_override_wppv_off = 0;
 	CHECK(abs(sum_sp(&r) - 4200) <= 80 && fabs(r.pcc) <= 80, "summer: charging on Z1, sp sum %d pcc %.0f", sum_sp(&r), r.pcc);
 	/* Sofar with room: it covers the WP from Bat1 (2.5 kW), the rest comes from the grid */
 	struct plant pb = BASE(.pv = 9000, .house = 800, .wp = 4000, .r290_hz = 60, .sofar_dis = 1, .sofar_chg = 1);
@@ -601,6 +607,47 @@ static void test_low_soc_no_wp(void)
 	simulate(&r, &pl, local_time(2026, 10, 24, 4, 0), 60);
 	CHECK(rule_has(&r, "WP:FC "), "SoC 20: WP:FC again");
 	CHECK(abs(sum_sp(&r) + 4900) <= 60, "house + heat pump, sp sum %d", sum_sp(&r));
+}
+
+/* 0.56-c (user 2026-10-24): heat pump on PV (summer: the stacks would cover all of it) -> the stacks charge
+   WP_PV_CHG_SHARE 50 % of it on top, the PCC buys that, at most WP_PV_GRID_MAX 2 kW: grid heat power is cheaper */
+static void test_wp_pv_charge(void)
+{
+	struct run r;
+	struct plant pl = BASE(.pv = 9000, .house = 800, .wp = 2000, .r290_hz = 60, .season = BM_SUMMER, .season_age_h = 1);
+	simulate(&r, &pl, local_time(2026, 7, 15, 12, 0), 60);       /* clear July noon: the D4 export cap, no WPPV */
+	CHECK(r.out.ls.cap && !rule_has(&r, "WPPV") && r.out.wp_pv_w == 0, "D4 cap active: no WPPV, share %.0f",
+		  r.out.wp_pv_w);
+	r_override_cap_off = 1;
+	simulate(&r, &pl, local_time(2026, 7, 15, 12, 0), 60);
+	print_state("July noon, PV 9 kW, WP 2 kW, WPPV", &r);
+	CHECK(rule_has(&r, "WPPV") && fabs(r.out.wp_pv_w - 1000) < 1, "WPPV 50 %% of 2 kW, got %.0f", r.out.wp_pv_w);
+	CHECK(abs(sum_sp(&r) - 7200) <= 80 && fabs(r.pcc + 1000) <= 80, "stacks PV - house - WP + 1 kW, pcc -1 kW: sp sum %d pcc %.0f",
+		  sum_sp(&r), r.pcc);
+	CHECK(pcc_swing(&r, 20) < 100, "no oscillation, swing %.0f", pcc_swing(&r, 20));
+
+	pl.wp = 6000;                                               /* 50 % = 3 kW, capped at 2 kW */
+	simulate(&r, &pl, local_time(2026, 7, 15, 12, 0), 60);
+	CHECK(fabs(r.out.wp_pv_w - 2000) < 1 && fabs(r.pcc + 2000) <= 80, "capped at WP_PV_GRID_MAX, share %.0f pcc %.0f",
+		  r.out.wp_pv_w, r.pcc);
+
+	pl.pv = 4000;                                               /* PV 4 kW < house + WP: the stacks cover the WP */
+	pl.wp = 4000;
+	simulate(&r, &pl, local_time(2026, 7, 15, 12, 0), 60);
+	print_state("July noon, PV 4 kW < house + WP 4 kW", &r);
+	CHECK(!rule_has(&r, "WPPV") && r.out.wp_pv_w == 0 && sum_sp(&r) < 0, "no PV surplus: no WPPV, discharge %d", sum_sp(&r));
+
+	pl.pv = 9000;                                               /* the heat pump off: nothing extra */
+	pl.wp = 0;
+	pl.r290_hz = 0;
+	simulate(&r, &pl, local_time(2026, 7, 15, 12, 0), 60);
+	CHECK(!rule_has(&r, "WPPV") && fabs(r.pcc) <= 80, "WP off: no WPPV, pcc %.0f", r.pcc);
+
+	struct plant pt = BASE(.pv = 9000, .house = 800, .wp = 1600, .r290_hz = 60, .season = BM_TRANSITION,
+						   .season_age_h = 1);                   /* transition (WP:ALL below 1900 W) unchanged */
+	simulate(&r, &pt, local_time(2026, 10, 15, 12, 0), 60);
+	CHECK(!rule_has(&r, "WPPV") && fabs(r.pcc) <= 80, "transition: no WPPV, pcc %.0f", r.pcc);
+	r_override_cap_off = 0;
 }
 
 static void test_forecast_bad_caps_wp(void)
@@ -926,6 +973,7 @@ int main(void)
 	test_param_override();
 	test_forecast_overrides_winter();
 	test_low_soc_no_wp();
+	test_wp_pv_charge();
 	test_forecast_bad_caps_wp();
 	test_forecast_keeps_source();
 	test_do4_pulse();
