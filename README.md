@@ -169,7 +169,7 @@ Without data for 120 s the service exits and only registers again with fresh dat
   | `WP_BAT_MAX_TRANSITION` | 1900 W | heat pump share from the batteries in spring/autumn |
   | `WP_CAP` | 1000 W | discharge cap with the heat pump running when its meter is silent (winter) |
   | `SOC_MIN` / `SOC_MIN_RELEASE` | 5 / 7 % | discharge protection (Lenggries env since 2026-10-11: 8 / 10 %) |
-  | `SOC_FORCE` / `SOC_FORCE_RELEASE` / `FORCE_CHARGE_W` | 3 / 5 % / 500 W | grid force charge per phase |
+  | `SOC_FORCE` / `SOC_FORCE_RELEASE` / `FORCE_CHARGE_W` | 3 / 5 % / 500 W | grid force charge per phase (Lenggries env since 2026-10-24: `SOC_FORCE=0` = off, see below) |
   | `DCL_FORCE_A` | 1 A | LOW force charge while the BMS discharge limit is below this, no discharge (0 = off; 0.52-c) |
   | `CELL_FORCE_V` / `CELL_FORCE_RELEASE_V` | 3.00 / 3.25 V | LOW force charge while the lowest cell is below this; ends when DCL is back and the cell has reached the release value (0.52-c) |
   | `SOC_BALANCE_ON` / `SOC_BALANCE_OFF` | 3 / 1 % | SoC balancing between the stacks |
@@ -179,8 +179,8 @@ Without data for 120 s the service exits and only registers again with fresh dat
 - Several days without sun (Lenggries settings, 2026-10-24): there is no time-based force charge (the TOU window was
   removed on 2026-10-11), so the stacks are simply parked:
   1. The stacks discharge down to `SOC_MIN` (8 %) and then stop; from there the house runs on the grid.
-  2. At 8 % the SoC only falls by standby consumption and self-discharge. Reaching `SOC_FORCE` (3 %) takes very long,
-     so the SoC force charge practically never starts within a few days.
+  2. At 8 % the SoC only falls by standby consumption and self-discharge. The SoC force charge (`SOC_FORCE` 3 %)
+     would practically never have started, so it is switched off (`SOC_FORCE=0`, 2026-10-24); the LOW stage covers it.
   3. The LOW stage comes earlier:
      - Pytes (EBox): the BMS discharge limit (DCL) drops to 0 below 5 % SoC, which starts the LOW force charge.
      - MUST (CAN BMS): on 2026-10-11 the BMS sent DCL 0 already at 10 % SoC and a 3.0 V cell; the `CELL_FORCE_V`
@@ -188,6 +188,12 @@ Without data for 120 s the service exits and only registers again with fresh dat
   4. Victron as the last stage: if L1 falls to the ESS dynamic cut-off (49 V), the ESS assistant then keeps the
      battery at the sustain voltage (51 V) and charges from the grid with a small current to do so
      (see `tools/vec-wine/README.md`, "Pytes values in the ESS assistant").
+  The low-battery pre-alarm of the units sits at cut-off + restart offset = 50.2 V: under a heavy load on L1
+  (above about 100 A from the MUST stack) it shows a warning at 12-13 % SoC while discharging continues.
+- Venus ESS fallback aligned with batmonitor (2026-10-24): `/Settings/CGwacs/BatteryLife/State` = 10 (Optimized
+  without BatteryLife) and `MinimumSocLimit` = 8 %. batmonitor runs ESS in Hub4Mode 3, where these do not act; if
+  ESS ever falls back to Victron's own control (Hub4Mode 1, as on 2026-10-11) it now uses the same 8 % limit
+  instead of BatteryLife's 10/15 %.
 
 **PI prototype (not armed).** A velocity-form PI controller that drives PCC + Sofar Bat1 to 0 W is built in but only runs in shadow mode: every cycle it logs to `/data/batmonitor/pi_shadow.csv` what soyo sent and what the PI would have sent. `tools/compare.py` replays the PI in closed loop on the recorded disturbance and compares it with the measured soyo result (MAE/RMS, import/export Wh). `BATMONITOR_PI=1` would arm it; this is deliberately not done until enough sunny-day data shows it is better.
 
