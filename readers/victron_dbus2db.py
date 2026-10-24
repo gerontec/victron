@@ -16,6 +16,8 @@ settings.xml: localsettings writes the file seconds after a change, so it is exa
 load is the mtime at that time (2026-10-24 15:50), not the time each setting was made.
 
 active = 1 when the value differs from the default (numbers compared as numbers), i.e. the setting was set on purpose.
+flags = bit mask per version for SQL analyses, texts in dim_victron_dbus_flag: 1 non-default (= active), 2 switch
+(type i, min 0, max 1), 4 switch on, 8 silent, 16 range (min and max given), 32 at min, 64 at max, 128 out of range.
 
 DB credentials: ~/.victron2db.cnf (same as victron2db.py).
 Cron (pi):  */5 * * * * /usr/bin/python3 /home/pi/python/victron_dbus2db.py >/tmp/victron_dbus2db.log 2>&1
@@ -24,6 +26,9 @@ Examples:
   SELECT path, value, default_value FROM pv_victron_dbus_current WHERE active = 1 ORDER BY path;
   SELECT path, value, min_value, max_value FROM pv_victron_dbus_current WHERE section = 'CGwacs';
   SELECT path, value, valid_from, valid_to FROM pv_victron_dbus WHERE path LIKE '%/Hub4Mode' ORDER BY valid_from;
+  SELECT path FROM pv_victron_dbus_current WHERE flags & 4 AND NOT flags & 1;      -- switched on by default
+  SELECT section, SUM(flags & 1 > 0) AS non_default, SUM(flags & 4 > 0) AS on FROM pv_victron_dbus_current GROUP BY section;
+  SELECT GROUP_CONCAT(label) FROM dim_victron_dbus_flag WHERE 22 & bit_value;          -- decode one mask
 """
 import os
 import sys
@@ -50,14 +55,38 @@ DDL = (f"""CREATE TABLE IF NOT EXISTS {TABLE} (
   max_value     VARCHAR(32)  NULL,
   silent        TINYINT      NOT NULL DEFAULT 0 COMMENT '1 = changes are not logged by localsettings',
   active        TINYINT      NOT NULL COMMENT '1 = value differs from the default (set on purpose)',
+  flags         TINYINT UNSIGNED NULL COMMENT 'bit mask, see dim_victron_dbus_flag: 1 non-default, 2 switch, 4 switch on, 8 silent, 16 range, 32 at min, 64 at max, 128 out of range',
   portal_id     VARCHAR(16)  NOT NULL,
   PRIMARY KEY (path, valid_from),
   KEY (valid_to),
-  KEY (active)
+  KEY (active),
+  KEY (flags)
 ) COMMENT 'Venus OS settings from /data/conf/settings.xml, SCD type 2, filled by victron_dbus2db.py'""",
+	f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS flags TINYINT UNSIGNED NULL COMMENT 'bit mask, see dim_victron_dbus_flag: "
+	"1 non-default, 2 switch, 4 switch on, 8 silent, 16 range, 32 at min, 64 at max, 128 out of range' AFTER active",
+	f"ALTER TABLE {TABLE} ADD INDEX IF NOT EXISTS flags (flags)",
 	f"""CREATE OR REPLACE VIEW {TABLE}_current AS
-  SELECT path, section, type, value, default_value, min_value, max_value, silent, active, valid_from, portal_id
-  FROM {TABLE} WHERE valid_to IS NULL""")
+  SELECT path, section, type, value, default_value, min_value, max_value, silent, active, flags, valid_from, portal_id
+  FROM {TABLE} WHERE valid_to IS NULL""",
+	"""CREATE TABLE IF NOT EXISTS dim_victron_dbus_flag (
+  bit_no    TINYINT UNSIGNED NOT NULL,
+  bit_value TINYINT UNSIGNED NOT NULL,
+  label     VARCHAR(16)  NOT NULL,
+  text      VARCHAR(255) NOT NULL,
+  PRIMARY KEY (bit_no)
+) COMMENT 'bits of pv_victron_dbus.flags, filled by victron_dbus2db.py'""")
+
+# bit -> (label, text) of pv_victron_dbus.flags
+FLAGS = (
+	('non_default', 'value differs from the default (same as active)'),
+	('switch', 'on/off setting: type i, min 0, max 1'),
+	('switch_on', 'switch with value 1 (also when 1 is the default)'),
+	('silent', 'localsettings does not log changes'),
+	('range', 'min and max given'),
+	('at_min', 'value equals min'),
+	('at_max', 'value equals max'),
+	('out_of_range', 'value below min or above max'),
+)
 
 
 def dbus_name(tag):
@@ -71,6 +100,23 @@ def differs(typ, value, default):
 		except (TypeError, ValueError):
 			pass
 	return (value or '') != (default or '')
+
+
+def num(v):
+	try:
+		return float(v)
+	except (TypeError, ValueError):
+		return None
+
+
+def flag_bits(typ, value, default, vmin, vmax, silent):
+	"""pv_victron_dbus.flags, bit order as FLAGS"""
+	v, lo, hi = (num(x) if typ in ('i', 'f') else None for x in (value, vmin, vmax))
+	switch = typ == 'i' and lo == 0 and hi == 1
+	bits = (differs(typ, value, default), switch, switch and v == 1, silent, lo is not None and hi is not None,
+			v is not None and v == lo, v is not None and v == hi,
+			v is not None and ((lo is not None and v < lo) or (hi is not None and v > hi)))
+	return sum(1 << i for i, b in enumerate(bits) if b)
 
 
 def read_settings(fn):
@@ -94,6 +140,8 @@ def read_settings(fn):
 					'silent': 1 if a.get('silent') == 'True' else 0,
 					'active': 1 if differs(a['type'], value, a.get('default')) else 0,
 				})
+				r = rows[-1]
+				r['flags'] = flag_bits(r['type'], value, r['default_value'], r['min_value'], r['max_value'], r['silent'])
 			else:
 				walk(child, p)
 
@@ -108,6 +156,8 @@ def write(portal_id, rows, changed):
 		with conn.cursor() as cur:
 			for stmt in DDL:
 				cur.execute(stmt)
+			cur.executemany("REPLACE INTO dim_victron_dbus_flag VALUES (%s, %s, %s, %s)",
+							[(i, 1 << i, label, text) for i, (label, text) in enumerate(FLAGS)])
 			cur.execute(f"SELECT path, {', '.join(VERSION_COLS)} FROM {TABLE} WHERE valid_to IS NULL")
 			current = {r[0]: r[1:] for r in cur.fetchall()}
 			new = {r['path']: r for r in rows}
@@ -117,6 +167,9 @@ def write(portal_id, rows, changed):
 			if closed:
 				cur.executemany(f"UPDATE {TABLE} SET valid_to = %s WHERE path = %s AND valid_to IS NULL",
 								[(changed, p) for p in closed])
+			# versions written before flags existed (or before a bit was added): fill flags of the current ones
+			cur.executemany(f"UPDATE {TABLE} SET flags = %s WHERE path = %s AND valid_to IS NULL AND NOT flags <=> %s",
+							[(r['flags'], p, r['flags']) for p, r in new.items() if p not in opened_paths])
 			if opened:
 				cols = list(rows[0]) + ['valid_from', 'portal_id']
 				cur.executemany(f"INSERT INTO {TABLE} ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))})",
