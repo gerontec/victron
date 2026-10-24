@@ -97,6 +97,7 @@ EOF
 	fi
 	# settings snapshot wagodb.pv_victron_dbus (creates the table itself)
 	install -D -o "$RUN_USER" -g "$RUN_USER" -m 755 "$REPO/readers/victron_dbus2db.py" "$V2DB_DIR/victron_dbus2db.py"
+	install -D -o "$RUN_USER" -g "$RUN_USER" -m 755 "$REPO/readers/victron_dbus_restore.py" "$V2DB_DIR/victron_dbus_restore.py"
 	if crontab -u "$RUN_USER" -l 2>/dev/null | grep -qF "$V2DB_DIR/victron_dbus2db.py"; then
 		echo "victron_dbus2db: cron ok"
 	else
