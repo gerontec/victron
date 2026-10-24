@@ -39,7 +39,6 @@ struct plant {
 	int grid_off;                  /* 1 = grid offline (island, transfer relay open) */
 };
 
-static int r_override_wppv_off;      /* 1: D6 WPPV off for the next simulate() (tests of the older rules) */
 static double r_override_w_max;     /* > 0: W_MAX for the next simulate() (parameter test) */
 static int r_override_cap_off;   /* 1: EXPORT_CAP 0 in simulate */
 
@@ -75,8 +74,6 @@ static void simulate(struct run *r, const struct plant *pl, time_t t0, int n)
 		bm_param_set(&r->cfg, 0, r_override_w_max);
 	if (r_override_cap_off)
 		r->cfg.export_cap = 0;
-	if (r_override_wppv_off)
-		r->cfg.wp_pv_chg_share = 0;
 	bm_init(&r->st);
 	double now = 1000.0;
 	for (int k = 0; k < n; k++, now += CYCLE_SECONDS) {
@@ -183,15 +180,17 @@ static void print_state(const char *name, const struct run *r)
 #pragma GCC diagnostic ignored "-Woverride-init"
 #define BASE(...) ((struct plant){.soc = {50, 50}, .wp_fresh = 1, .aussen = 10, __VA_ARGS__})
 
-static void test_winter_wp_from_grid(void)
+/* 0.59-c (user 2026-10-24: PCC near 0): the heat pump is house load the stacks cover in every season (0.19..0.58-c:
+   in winter it came from the Z2 grid) */
+static void test_winter_wp_from_battery(void)
 {
 	struct run r;
 	struct plant pl = BASE(.house = 500, .wp = 4000, .r290_hz = 60);
 	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 60);       /* winter night, Sofar Bat1 empty */
 	print_state("winter night, WP 4 kW, Sofar empty", &r);
-	CHECK(abs(sum_sp(&r) + 500) <= 60, "Multis should cover the house 500 W only, sp sum %d", sum_sp(&r));
-	CHECK(fabs(r.pcc + 4000) <= 80, "the heat pump should come from the grid, pcc %.0f", r.pcc);
-	CHECK(rule_has(&r, "WP:Z2"), "rule should carry |Z2");
+	CHECK(abs(sum_sp(&r) + 4530) <= 60, "Multis cover house + WP + trickle 4530 W, sp sum %d", sum_sp(&r));
+	CHECK(fabs(r.pcc) <= 80, "PCC near 0, pcc %.0f", r.pcc);
+	CHECK(!rule_has(&r, "WP:"), "no heat pump rule text");
 	CHECK(pcc_swing(&r, 20) < 100, "no oscillation, swing %.0f", pcc_swing(&r, 20));
 }
 
@@ -201,8 +200,8 @@ static void test_winter_wp_5kw(void)
 	struct plant pl = BASE(.house = 400, .wp = 5000, .r290_hz = 70);
 	simulate(&r, &pl, local_time(2026, 2, 1, 3, 0), 60);
 	print_state("winter night, WP 5 kW, Sofar empty", &r);
-	CHECK(abs(sum_sp(&r) + 400) <= 60, "Multis should cover the house 400 W only, sp sum %d", sum_sp(&r));
-	CHECK(fabs(r.pcc + 5000) <= 80, "WP 5 kW from the grid, pcc %.0f", r.pcc);
+	CHECK(abs(sum_sp(&r) + 5430) <= 60, "house + WP 5 kW + trickle from the stacks, sp sum %d", sum_sp(&r));
+	CHECK(fabs(r.pcc) <= 80, "PCC near 0, pcc %.0f", r.pcc);
 }
 
 static void test_summer_wp_from_battery(void)
@@ -213,7 +212,7 @@ static void test_summer_wp_from_battery(void)
 	print_state("summer night, WP 1.2 kW, Sofar empty", &r);
 	CHECK(abs(sum_sp(&r) + 1700) <= 60, "Multis should cover house + WP 1700 W, sp sum %d", sum_sp(&r));
 	CHECK(fabs(r.pcc) <= 80, "no grid import in summer, pcc %.0f", r.pcc);
-	CHECK(!rule_has(&r, "WP:Z2"), "no |Z2 in summer");
+	CHECK(!rule_has(&r, "WP:"), "no heat pump rule text");
 }
 
 static void test_summer_wp_4kw_from_battery(void)
@@ -281,13 +280,16 @@ static void test_winter_night_floor(void)
 	CHECK(r.bat1 >= 10 && r.bat1 <= 50, "only the 30 W trickle goes into the Sofar battery, bat1 %.0f", r.bat1);
 }
 
-static void test_wp_running_no_night_floor(void)
+/* 0.59-c: the night floor also while the heat pump runs (0.19..0.58-c: not in winter, SRC B1W) */
+static void test_wp_running_night_floor(void)
 {
 	struct run r;
 	struct plant pl = BASE(.house = 300, .wp = 3000, .r290_hz = 50, .sofar_dis = 1, .sofar_chg = 1);
-	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 40);       /* Sofar covers the house: Multis idle */
-	print_state("winter night, WP 3 kW, Sofar covers", &r);
-	CHECK(sum_sp(&r) >= -20 && sum_sp(&r) <= 0, "no night floor while the WP runs, sp sum %d", sum_sp(&r));
+	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 60);       /* Sofar could cover, SOC_Bat1 unknown: no B1FIRST */
+	print_state("winter night, WP 3 kW, Sofar could cover", &r);
+	CHECK(rule_has(&r, "SRC:STK"), "night floor while the WP runs");
+	CHECK(abs(sum_sp(&r) + 3330) <= 60, "stacks take house + WP + trickle over, sp sum %d", sum_sp(&r));
+	CHECK(r.bat1 >= 0 && fabs(r.pcc) <= 60, "Sofar not discharging, PCC near 0, bat1 %.0f pcc %.0f", r.bat1, r.pcc);
 }
 
 static void test_day_surplus_to_zero(void)
@@ -351,30 +353,21 @@ static void test_bms_current_limits(void)
 	CHECK(abs(sum_sp(&r) + 2000) <= 30, "house covered by L2/L3, sp sum %d", sum_sp(&r));
 }
 
-static void test_winter_charge_on_z2(void)
+/* 0.59-c: charging on the real PCC in every season (0.30-c..0.58-c: in winter on PCC + WP, the grid paid the WP) */
+static void test_winter_charge_on_pcc(void)
 {
 	struct run r;
-	/* 0.30-c: December noon, PV 9 kW, house 0.8 kW, WP 4 kW, Sofar full: the stacks take 8.2 kW, the WP comes from
-	   the cheap Z1 grid (pcc -4000); in summer the WP eats the PV first (stacks 4.2 kW, pcc 0) */
 	struct plant pl = BASE(.pv = 9000, .house = 800, .wp = 4000, .r290_hz = 60);
 	simulate(&r, &pl, local_time(2026, 12, 21, 12, 0), 60);
-	print_state("Dec noon, PV 9 kW, WP 4 kW, winter", &r);
-	CHECK(abs(sum_sp(&r) - 8200) <= 80, "stacks take PV - house, sp sum %d", sum_sp(&r));
-	CHECK(fabs(r.pcc + 4000) <= 80, "WP from the Z1 grid, pcc %.0f", r.pcc);
+	print_state("Dec noon, PV 9 kW, WP 4 kW", &r);
+	CHECK(abs(sum_sp(&r) - 4200) <= 80, "stacks take PV - house - WP, sp sum %d", sum_sp(&r));
+	CHECK(fabs(r.pcc) <= 80, "PCC near 0, pcc %.0f", r.pcc);
 	CHECK(pcc_swing(&r, 20) < 100, "no oscillation, swing %.0f", pcc_swing(&r, 20));
-	CHECK(!rule_has(&r, "WPPV"), "winter: no WPPV");
-	struct plant ps = BASE(.pv = 9000, .house = 800, .wp = 4000, .r290_hz = 60, .season = BM_SUMMER, .season_age_h = 1);
-	r_override_wppv_off = 1;                                    /* summer with WPPV: test_wp_pv_charge */
-	simulate(&r, &ps, local_time(2026, 12, 21, 12, 0), 60);
-	r_override_wppv_off = 0;
-	CHECK(abs(sum_sp(&r) - 4200) <= 80 && fabs(r.pcc) <= 80, "summer: charging on Z1, sp sum %d pcc %.0f", sum_sp(&r), r.pcc);
-	/* Sofar with room: it covers the WP from Bat1 (2.5 kW), the rest comes from the grid */
+	/* Sofar with room: it no longer covers the WP from Bat1 while the PV goes into the stacks (0.30-c side effect) */
 	struct plant pb = BASE(.pv = 9000, .house = 800, .wp = 4000, .r290_hz = 60, .sofar_dis = 1, .sofar_chg = 1);
 	simulate(&r, &pb, local_time(2026, 12, 21, 12, 0), 80);
 	print_state("Dec noon, Sofar Bat1 can discharge", &r);
-	CHECK(abs(sum_sp(&r) - 8200) <= 120, "stacks take PV - house, sp sum %d", sum_sp(&r));
-	CHECK(fabs(r.bat1 + 2500) <= 80 && fabs(r.pcc + 1500) <= 120, "Bat1 2.5 kW + grid 1.5 kW into the WP, bat1 %.0f pcc %.0f",
-		  r.bat1, r.pcc);
+	CHECK(fabs(r.bat1) <= 100 && fabs(r.pcc) <= 100, "no Bat1 -> WP transfer, bat1 %.0f pcc %.0f", r.bat1, r.pcc);
 }
 
 static void test_day_sofar_covers_house(void)
@@ -439,14 +432,16 @@ static void test_stale(void)
 	CHECK(sum_sp(&r) == 0 && rule_has(&r, "STALE"), "stale inverter data: all 0, got %d %s", sum_sp(&r), r.out.why[0]);
 }
 
-static void test_wp_cap_fallback(void)
+/* 0.59-c: em0/power stale - the PCC still contains the heat pump, so it is covered (0.19..0.58-c: WP_CAP 1 kW) */
+static void test_wp_stale_still_covered(void)
 {
 	struct run r;
 	struct plant pl = BASE(.house = 500, .wp = 4000, .r290_hz = 60, .wp_fresh = 0);
-	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 40);       /* SDM72D silent: old 1000 W cap */
+	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 40);
 	print_state("winter, em0/power stale, R290 running", &r);
-	CHECK(sum_sp(&r) >= -1000 && sum_sp(&r) <= -990, "WP_CAP 1000 W, sp sum %d", sum_sp(&r));
-	CHECK(rule_has(&r, "WPCAP"), "rule WP_CAP");
+	CHECK(abs(sum_sp(&r) + 4530) <= 60 && fabs(r.pcc) <= 80, "house + WP from the PCC, sp sum %d pcc %.0f", sum_sp(&r),
+		  r.pcc);
+	CHECK(!rule_has(&r, "WPCAP"), "no WP_CAP");
 }
 
 static void test_balance(void)
@@ -502,20 +497,21 @@ static void test_peak_window_off(void)
 	CHECK(!r.out.ls.cap && sum_sp(&r) > 0, "EXPORT_CAP 0: no cap, sp sum %d", sum_sp(&r));
 }
 
+/* 0.59-c: the season is display only (state.json), the setpoints are the same in every season */
 static void test_season_measured_overrides_months(void)
 {
 	struct run r;
 	struct plant pl = BASE(.house = 500, .wp = 1200, .r290_hz = 40, .season = BM_SUMMER, .season_age_h = 1);
 	simulate(&r, &pl, local_time(2026, 10, 20, 23, 0), 60);      /* October, but measured: still summer */
 	print_state("Oct night, season.py says summer", &r);
-	CHECK(r.out.season == BM_SUMMER && r.out.season_measured, "measured summer used");
-	CHECK(abs(sum_sp(&r) + 1700) <= 60, "WP from the batteries, sp sum %d", sum_sp(&r));
+	CHECK(r.out.season == BM_SUMMER && r.out.season_measured, "measured summer shown");
+	int sp_summer = sum_sp(&r);
+	CHECK(abs(sp_summer + 1730) <= 60, "house + WP + trickle from the batteries, sp sum %d", sp_summer);
 
 	pl.season = BM_WINTER;
-	simulate(&r, &pl, local_time(2026, 5, 10, 23, 0), 60);       /* May, but measured: still winter */
-	print_state("May night, season.py says winter", &r);
-	CHECK(r.out.season == BM_WINTER && rule_has(&r, "WP:Z2"), "measured winter used, Z2 rule");
-	CHECK(abs(sum_sp(&r) + 500) <= 60, "Multis cover only the house, sp sum %d", sum_sp(&r));
+	simulate(&r, &pl, local_time(2026, 10, 20, 23, 0), 60);
+	CHECK(r.out.season == BM_WINTER && r.out.season_measured, "measured winter shown");
+	CHECK(sum_sp(&r) == sp_summer, "same setpoints as in summer, %d vs %d", sum_sp(&r), sp_summer);
 }
 
 static void test_season_stale_falls_back_to_months(void)
@@ -525,26 +521,19 @@ static void test_season_stale_falls_back_to_months(void)
 	simulate(&r, &pl, local_time(2026, 11, 20, 23, 0), 40);      /* summer message 49 h old: November = winter */
 	print_state("Nov night, season message 49 h old", &r);
 	CHECK(r.out.season == BM_WINTER && !r.out.season_measured, "stale message: month rule (winter)");
-	CHECK(abs(sum_sp(&r) + 500) <= 60, "Z2: Multis cover only the house, sp sum %d", sum_sp(&r));
+	CHECK(abs(sum_sp(&r) + 1730) <= 60, "house + WP + trickle, sp sum %d", sum_sp(&r));
 }
 
-static void test_transition_wp_1900(void)
+/* 0.59-c: no transition cap (0.22..0.58-c: the stacks gave the heat pump at most 1900 W, the grid the rest) */
+static void test_transition_wp_covered(void)
 {
 	struct run r;
-	/* W_MAX (1800 W total) would hide the 1900 W limit with a big heat pump: day, house 0, WP 2500 W */
 	struct plant pl = BASE(.pv = 200, .house = 200, .wp = 2500, .r290_hz = 50, .season = BM_TRANSITION, .season_age_h = 1);
 	simulate(&r, &pl, local_time(2026, 10, 9, 14, 0), 60);
 	print_state("transition, WP 2.5 kW, house 0 net", &r);
-	CHECK(r.out.season == BM_TRANSITION, "transition used");
-	CHECK(fabs(r.pcc + 600) <= 40, "WP above 1900 W from the grid: pcc -600, got %.0f", r.pcc);
-	CHECK(abs(sum_sp(&r) + 1900) <= 30, "batteries give 1900 W to the heat pump, sp sum %d", sum_sp(&r));
-	CHECK(rule_has(&r, "WP:T1900"), "rule |WP1900");
-
-	pl.wp = 1500;                                               /* below 1900 W: all from the batteries */
-	simulate(&r, &pl, local_time(2026, 10, 9, 14, 0), 60);
-	print_state("transition, WP 1.5 kW", &r);
-	CHECK(fabs(r.pcc) <= 60 && abs(sum_sp(&r) + 1500) <= 60, "WP 1.5 kW fully from the batteries, pcc %.0f sp %d",
-		  r.pcc, sum_sp(&r));
+	CHECK(fabs(r.pcc) <= 60 && abs(sum_sp(&r) + 2500) <= 60, "whole WP from the batteries, pcc %.0f sp %d", r.pcc,
+		  sum_sp(&r));
+	CHECK(!rule_has(&r, "T1900"), "no transition cap");
 }
 
 static void test_param_override(void)
@@ -552,7 +541,7 @@ static void test_param_override(void)
 	struct run r;
 	struct bm_cfg c;
 	bm_cfg_default(&c);
-	CHECK(c.w_max == 10000 && c.wp_bat_max_transition == 1900 && c.soc_min == 5, "defaults from BM_PARAMS");
+	CHECK(c.w_max == 10000 && c.soc_min == 5, "defaults from BM_PARAMS");
 	CHECK(strcmp(BM_PARAMS[0].name, "W_MAX") == 0, "W_MAX is parameter 0");
 	CHECK(bm_param_set(&c, 0, 50000) == -1 && c.w_max == 10000, "out of range rejected, default kept");
 	CHECK(bm_param_set(&c, 0, 3000) == 0 && c.w_max == 3000, "in range accepted");
@@ -565,158 +554,45 @@ static void test_param_override(void)
 	CHECK(sum_sp(&r) >= -3000 && sum_sp(&r) <= -2990, "W_MAX override 3000 W, sp sum %d", sum_sp(&r));
 }
 
-static void test_forecast_overrides_winter(void)
-{
-	struct run r;
-	struct plant pl = BASE(.house = 500, .wp = 4000, .r290_hz = 60, .season = BM_WINTER, .season_age_h = 1,
-						   .fc_target = 20, .soc = {50, 50});
-	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 60);       /* sunny day ahead: stacks may run down to 20 % */
-	print_state("winter, forecast target 20 %, SoC 50", &r);
-	CHECK(r.out.fc_active && rule_has(&r, "WP:FC "), "forecast rule active");
-	CHECK(abs(sum_sp(&r) + 4500) <= 60, "house + heat pump from the batteries, sp sum %d", sum_sp(&r));
-
-	pl.soc[0] = pl.soc[1] = 18;                                  /* below the target: tariff rules again */
-	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 60);
-	print_state("winter, forecast target 20 %, SoC 18", &r);
-	CHECK(!r.out.fc_active && rule_has(&r, "WP:Z2"), "below target: Z2 again");
-	CHECK(abs(sum_sp(&r) + 500) <= 60, "only the house, sp sum %d", sum_sp(&r));
-
-	pl.soc[0] = pl.soc[1] = 21;                                  /* inside the hysteresis: not back on from cold */
-	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 10);
-	CHECK(!r.out.fc_active, "21 %% < target 20 + 2: rule stays off");
-
-	pl.soc[0] = pl.soc[1] = 50;
-	pl.fc_age_h = 4;                                             /* stale forecast */
-	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 30);
-	CHECK(!r.out.fc_active && rule_has(&r, "WP:Z2"), "stale forecast ignored");
-}
-
-/* 0.54-c (user 2026-10-24): below WP_SOC_MIN (15 %) the stacks give nothing to the heat pump, even when a good
-   forecast (target 5 %) would let them serve it as in summer; the house is still served */
+/* 0.59-c: the forecast target SoC (batmonitor/forecast) no longer changes the setpoints; its kt slots still feed D4
+   and full_at */
+/* 0.54-c / 0.59-c (user 2026-10-24): below WP_SOC_MIN 21 % (back from 23 %) the stacks leave the heat pump to the grid
+   while discharging (WPLOW); at night with the heat pump running no night floor (SRC WPG); charging stays on the PCC */
 static void test_low_soc_no_wp(void)
 {
 	struct run r;
-	struct plant pl = BASE(.house = 500, .wp = 4400, .r290_hz = 60, .season = BM_WINTER, .season_age_h = 1,
-						   .fc_target = 5, .soc = {13, 13});
+	struct plant pl = BASE(.house = 500, .wp = 4400, .r290_hz = 60, .soc = {19, 30});
 	simulate(&r, &pl, local_time(2026, 10, 24, 4, 0), 60);
-	print_state("winter night, forecast target 5 %, SoC 13", &r);
-	CHECK(r.out.fc_active && rule_has(&r, "WP:LOWSOC"), "forecast active, but low SoC: WP:LOWSOC");
-	CHECK(abs(sum_sp(&r) + 500) <= 60, "only the house, sp sum %d", sum_sp(&r));
-
-	pl.soc[0] = pl.soc[1] = 20;                                  /* above 15 + 2: the forecast rule serves the WP */
-	simulate(&r, &pl, local_time(2026, 10, 24, 4, 0), 60);
-	CHECK(rule_has(&r, "WP:FC "), "SoC 20: WP:FC again");
-	CHECK(abs(sum_sp(&r) + 4900) <= 60, "house + heat pump, sp sum %d", sum_sp(&r));
-}
-
-/* 0.56-c (user 2026-10-24): heat pump on PV (summer: the stacks would cover all of it) -> the stacks charge
-   WP_PV_CHG_SHARE 50 % of it on top, the PCC buys that, at most WP_PV_GRID_MAX 2 kW: grid heat power is cheaper */
-static void test_wp_pv_charge(void)
-{
-	struct run r;
-	struct plant pl = BASE(.pv = 9000, .house = 800, .wp = 2000, .r290_hz = 60, .season = BM_SUMMER, .season_age_h = 1);
-	simulate(&r, &pl, local_time(2026, 7, 15, 12, 0), 60);       /* clear July noon: the D4 export cap, no WPPV */
-	CHECK(r.out.ls.cap && !rule_has(&r, "WPPV") && r.out.wp_pv_w == 0, "D4 cap active: no WPPV, share %.0f",
-		  r.out.wp_pv_w);
-	r_override_cap_off = 1;
-	simulate(&r, &pl, local_time(2026, 7, 15, 12, 0), 60);
-	print_state("July noon, PV 9 kW, WP 2 kW, WPPV", &r);
-	CHECK(rule_has(&r, "WPPV") && fabs(r.out.wp_pv_w - 1000) < 1, "WPPV 50 %% of 2 kW, got %.0f", r.out.wp_pv_w);
-	CHECK(abs(sum_sp(&r) - 7200) <= 80 && fabs(r.pcc + 1000) <= 80, "stacks PV - house - WP + 1 kW, pcc -1 kW: sp sum %d pcc %.0f",
+	print_state("night, lowest stack 19 %, WP 4.4 kW", &r);
+	CHECK(r.out.wp_low && rule_has(&r, "SRC:WPG") && rule_has(&r, "WPLOW"), "WP left to the grid: SRC:WPG WPLOW");
+	CHECK(abs(sum_sp(&r) + 500) <= 60 && fabs(r.pcc + 4400) <= 80, "only the house, WP from the grid, sp sum %d pcc %.0f",
 		  sum_sp(&r), r.pcc);
-	CHECK(pcc_swing(&r, 20) < 100, "no oscillation, swing %.0f", pcc_swing(&r, 20));
 
-	pl.wp = 6000;                                               /* 50 % = 3 kW, capped at 2 kW */
-	simulate(&r, &pl, local_time(2026, 7, 15, 12, 0), 60);
-	CHECK(fabs(r.out.wp_pv_w - 2000) < 1 && fabs(r.pcc + 2000) <= 80, "capped at WP_PV_GRID_MAX, share %.0f pcc %.0f",
-		  r.out.wp_pv_w, r.pcc);
+	/* the 21/23 % hysteresis needs the state across cycles: make check enumerates the latch (simulate starts fresh) */
+	pl.soc[0] = 23;                                              /* from 23 %: the stacks cover the WP again */
+	simulate(&r, &pl, local_time(2026, 10, 24, 4, 0), 60);
+	CHECK(!r.out.wp_low && rule_has(&r, "SRC:STK") && !rule_has(&r, "WPLOW"), "SoC 23: night floor again");
+	CHECK(abs(sum_sp(&r) + 4930) <= 60 && fabs(r.pcc) <= 80, "house + WP + trickle, sp sum %d", sum_sp(&r));
 
-	pl.pv = 4000;                                               /* PV 4 kW < house + WP: the stacks cover the WP */
-	pl.wp = 4000;
-	simulate(&r, &pl, local_time(2026, 7, 15, 12, 0), 60);
-	print_state("July noon, PV 4 kW < house + WP 4 kW", &r);
-	CHECK(!rule_has(&r, "WPPV") && r.out.wp_pv_w == 0 && sum_sp(&r) < 0, "no PV surplus: no WPPV, discharge %d", sum_sp(&r));
-
-	pl.pv = 9000;                                               /* the heat pump off: nothing extra */
-	pl.wp = 0;
-	pl.r290_hz = 0;
-	simulate(&r, &pl, local_time(2026, 7, 15, 12, 0), 60);
-	CHECK(!rule_has(&r, "WPPV") && fabs(r.pcc) <= 80, "WP off: no WPPV, pcc %.0f", r.pcc);
-
-	struct plant pt = BASE(.pv = 9000, .house = 800, .wp = 1600, .r290_hz = 60, .season = BM_TRANSITION,
-						   .season_age_h = 1);                   /* transition (WP:ALL below 1900 W) unchanged */
-	simulate(&r, &pt, local_time(2026, 10, 15, 12, 0), 60);
-	CHECK(!rule_has(&r, "WPPV") && fabs(r.pcc) <= 80, "transition: no WPPV, pcc %.0f", r.pcc);
-	r_override_cap_off = 0;
+	struct plant pc = BASE(.pv = 9000, .house = 800, .wp = 4000, .r290_hz = 60, .soc = {15, 15});
+	simulate(&r, &pc, local_time(2026, 12, 21, 12, 0), 60);       /* low SoC by day with PV: charging on the PCC */
+	print_state("Dec noon, SoC 15, PV 9 kW, WP 4 kW", &r);
+	CHECK(abs(sum_sp(&r) - 4200) <= 80 && fabs(r.pcc) <= 80, "charging unchanged, sp sum %d pcc %.0f", sum_sp(&r), r.pcc);
 }
 
-/* 0.58-c: the heat pump matrix cells that name a parameter follow it (env override), the fixed ones do not */
-static void test_wp_matrix_params(void)
-{
-	struct bm_cfg cfg;
-	bm_cfg_default(&cfg);
-	CHECK(bm_wp_share(&cfg, BM_WR_FCBAD, 3000) == 1500 && bm_wp_share(&cfg, BM_WR_TRANS, 3000) == 1900,
-		  "defaults: FCBAD 50 %% = 1500, TRANS cap 1900");
-	CHECK(bm_wp_share(&cfg, BM_WR_SUMMER, 3000) == 3000 && bm_wp_share(&cfg, BM_WR_WINTER, 3000) == 0
-		  && bm_wp_share(&cfg, BM_WR_LOWSOC, 3000) == 0 && bm_wp_share(&cfg, BM_WR_FC, 3000) == 3000, "fixed rows");
-	cfg.wp_bat_share_bad = 30;
-	cfg.wp_bat_max_transition = 1000;
-	CHECK(bm_wp_share(&cfg, BM_WR_FCBAD, 3000) == 900 && bm_wp_share(&cfg, BM_WR_TRANS, 3000) == 1000,
-		  "parameters followed: FCBAD %.0f TRANS %.0f", bm_wp_share(&cfg, BM_WR_FCBAD, 3000),
-		  bm_wp_share(&cfg, BM_WR_TRANS, 3000));
-	CHECK(bm_wp_covers_all(&cfg, BM_WR_SUMMER) && bm_wp_covers_all(&cfg, BM_WR_FC) && !bm_wp_covers_all(&cfg, BM_WR_TRANS)
-		  && !bm_wp_covers_all(&cfg, BM_WR_FCBAD) && !bm_wp_covers_all(&cfg, BM_WR_WINTER), "WPPV rows: SUMMER, FC");
-}
-
-static void test_forecast_bad_caps_wp(void)
+static void test_forecast_target_ignored(void)
 {
 	struct run r;
-	struct plant pl = BASE(.house = 500, .wp = 1600, .r290_hz = 60, .season = BM_TRANSITION, .season_age_h = 1,
+	struct plant pl = BASE(.house = 500, .wp = 4000, .r290_hz = 60, .season = BM_WINTER, .season_age_h = 1,
 						   .soc = {50, 50});
-	simulate(&r, &pl, local_time(2026, 10, 10, 2, 0), 60);       /* no forecast: WP fully from the stacks (< 1900 W) */
-	print_state("transition, no forecast, WP 1.6 kW", &r);
-	CHECK(!r.out.fc_bad && abs(sum_sp(&r) + 2100) <= 60, "house + whole WP, sp sum %d", sum_sp(&r));
-
-	pl.fc_target = 100;                                          /* rain day ahead: free_kwh 0 */
-	simulate(&r, &pl, local_time(2026, 10, 10, 2, 0), 60);
-	print_state("transition, forecast target 100 %, WP 1.6 kW", &r);
-	CHECK(r.out.fc_bad && rule_has(&r, "WP:FCBAD"), "bad forecast flagged");
-	CHECK(abs(sum_sp(&r) + 1300) <= 60, "house + half the WP, sp sum %d", sum_sp(&r));
-
-	pl.wp = 5000;                                                /* 50 % = 2500 W > 1900 W: the transition cap stays */
-	simulate(&r, &pl, local_time(2026, 10, 10, 2, 0), 60);
-	CHECK(abs(sum_sp(&r) + 2400) <= 60, "house + 1900 W, sp sum %d", sum_sp(&r));
-
-	pl.wp = 3000;
-	pl.season = BM_SUMMER;
-	simulate(&r, &pl, local_time(2026, 10, 10, 2, 0), 60);
-	CHECK(abs(sum_sp(&r) + 2000) <= 60, "summer: house + half the WP, sp sum %d", sum_sp(&r));
-
-	pl.fc_target = 90;                                           /* good forecast: whole WP again */
-	simulate(&r, &pl, local_time(2026, 10, 10, 2, 0), 60);
-	CHECK(!r.out.fc_bad && abs(sum_sp(&r) + 3500) <= 60, "target 90 %%: house + whole WP, sp sum %d", sum_sp(&r));
-}
-
-/* 0.45-c: the forecast widens the heat pump scope only (S2); the source stays the measured season's (S3), so the Sofar
-   battery still delivers first and the stacks take over at its DOD, as without a forecast */
-static void test_forecast_keeps_source(void)
-{
-	struct run r;
-	struct plant pl = BASE(.house = 300, .wp = 3000, .r290_hz = 50, .season = BM_WINTER, .season_age_h = 1,
-						   .fc_target = 20, .soc = {50, 50}, .sofar_dis = 0, .sofar_chg = 1, .bat1_soc = 5);
 	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 60);
-	print_state("winter night, WP 3 kW, FC_ACTIVE, Sofar 5 %", &r);
-	CHECK(r.out.fc_active && rule_has(&r, "WP:FC "), "forecast active: the stacks cover the WP");
-	CHECK(rule_has(&r, "SRC:B1W"), "source stays winter + WP (no night floor from the forecast)");
-	CHECK(abs(sum_sp(&r) + 3300) <= 60, "Sofar at its DOD: house + whole WP from the stacks, sp sum %d", sum_sp(&r));
-	CHECK(fabs(r.pcc) <= 60, "PCC near 0, pcc %.0f", r.pcc);
-
-	pl.bat1_soc = -1;                                            /* SOC_Bat1 unknown, Bat1 can discharge: */
-	pl.sofar_dis = 1;                                            /* the Sofar delivers first */
+	int sp0 = sum_sp(&r);
+	pl.fc_target = 20;                                           /* good forecast */
 	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 60);
-	print_state("winter night, WP 3 kW, FC_ACTIVE, Bat1 SoC ?", &r);
-	CHECK(rule_has(&r, "SRC:B1W") && r.bat1 < -2000, "Sofar battery first, bat1 %.0f", r.bat1);
-	CHECK(fabs(sum_sp(&r) + r.bat1 + 3300) <= 60, "stacks + Sofar = house + WP, sp sum %d", sum_sp(&r));
+	CHECK(sum_sp(&r) == sp0, "good forecast: same setpoints, %d vs %d", sum_sp(&r), sp0);
+	pl.fc_target = 100;                                          /* bad forecast */
+	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 60);
+	CHECK(sum_sp(&r) == sp0, "bad forecast: same setpoints, %d vs %d", sum_sp(&r), sp0);
 }
 
 /* 0.46-c / 0.50-c: PCC export above 20 kW for DO4_GRACE_S (120 s) -> one DO4 pulse "curtail WR2", at once above
@@ -772,12 +648,12 @@ static void test_bat1_first(void)
 	CHECK(sum_sp(&r) >= -30, "stacks idle, sp sum %d", sum_sp(&r));
 	CHECK(fabs(r.bat1 + 2100) <= 60 && fabs(r.pcc) <= 60, "Bat1 2.1 kW, no import, bat1 %.0f pcc %.0f", r.bat1, r.pcc);
 
-	pl.house = 1500;                                             /* 4.5 kW > Sofar 2.5 kW: 1.1 kW (WP above 1900 W) from the grid, */
-	pl.wp = 3000;                                                /* the stacks the remaining 0.9 kW */
+	pl.house = 1500;                                             /* 4.5 kW > Sofar 2.5 kW: the stacks the remaining 2 kW */
+	pl.wp = 3000;                                                /* (0.59-c; before: 1.1 kW from the grid) */
 	simulate(&r, &pl, local_time(2026, 10, 10, 2, 0), 60);
 	print_state("night, Sofar 36 %, house 1.5 + WP 3 kW", &r);
 	CHECK(fabs(r.bat1 + 2500) <= 60, "Sofar at its 2.5 kW limit, bat1 %.0f", r.bat1);
-	CHECK(abs(sum_sp(&r) + 900) <= 80 && fabs(r.pcc + 1100) <= 80, "stacks 0.9 kW, grid 1.1 kW, sp sum %d pcc %.0f",
+	CHECK(abs(sum_sp(&r) + 2000) <= 80 && fabs(r.pcc) <= 80, "stacks 2 kW, PCC near 0, sp sum %d pcc %.0f",
 		  sum_sp(&r), r.pcc);
 
 	pl.house = 500;
@@ -964,7 +840,7 @@ int main(void)
 {
 	setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
 	tzset();
-	test_winter_wp_from_grid();
+	test_winter_wp_from_battery();
 	test_winter_wp_5kw();
 	test_summer_wp_from_battery();
 	test_summer_wp_4kw_from_battery();
@@ -972,29 +848,25 @@ int main(void)
 	test_bank_split();
 	test_bms_current_limits();
 	test_winter_night_floor();
-	test_wp_running_no_night_floor();
+	test_wp_running_night_floor();
 	test_day_surplus_to_zero();
 	test_real_charge_ceiling();
-	test_winter_charge_on_z2();
+	test_winter_charge_on_pcc();
 	test_day_sofar_covers_house();
 	test_day_sofar_saturated();
 	test_force_charge();
 	test_discharge_protection();
 	test_stale();
-	test_wp_cap_fallback();
+	test_wp_stale_still_covered();
 	test_balance();
 	test_peak_window_cap();
 	test_peak_window_off();
 	test_season_measured_overrides_months();
 	test_season_stale_falls_back_to_months();
-	test_transition_wp_1900();
+	test_transition_wp_covered();
 	test_param_override();
-	test_forecast_overrides_winter();
+	test_forecast_target_ignored();
 	test_low_soc_no_wp();
-	test_wp_pv_charge();
-	test_wp_matrix_params();
-	test_forecast_bad_caps_wp();
-	test_forecast_keeps_source();
 	test_do4_pulse();
 	test_do4_acout();
 	test_bat1_first();

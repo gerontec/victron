@@ -1,5 +1,5 @@
-/* fuzz_dump: random input sequences through bm_step, one line per cycle (setpoints, rules, wp_eff, surplus, PI,
-   forecast / Sofar-first flags). Compare two logic versions for identical behaviour:  make fuzz-compare REV=<commit>.
+/* fuzz_dump: random input sequences through bm_step, one line per cycle (setpoints, rules, surplus, PI, Sofar-first
+   flag; 0.59-c: wp_eff and the forecast rule flags are gone). Compare two logic versions for identical behaviour:  make fuzz-compare REV=<commit>.
    "fuzz_dump <seed> io" also prints every cycle's inputs (line "IN ...", %.17g = bit exact) before its result, so
    tests/fuzz_replay.py runs the Python port (bm_logic.py) on the same inputs:  make py-compare */
 #include "bm_logic.h"
@@ -18,7 +18,7 @@ int main(int argc, char **argv)
 		struct bm_cfg cfg; struct bm_state st; struct bm_out out; struct bm_in in;
 		bm_cfg_default(&cfg);
 		cfg.pi_armed = ri(4) == 0;
-		cfg.forecast = ri(5) != 0;
+		int fc_flag = ri(5) != 0;                   /* 0.59-c: no forecast rule; drawn to keep the input sequence */
 		bm_init(&st);
 		time_t t0 = 1767225600 + (time_t)ri(365) * 86400 + ri(86400);
 		double now = 1000, soc[2] = {r(0, 100), r(0, 100)}, sb1 = r(0, 100);
@@ -69,7 +69,7 @@ int main(int argc, char **argv)
 			}
 			if (io) {
 				printf("IN %d %d %d %d %.17g %lld %d %d %.17g %.17g %.17g %.17g %.17g %.17g %d %.17g %d %.17g %.17g %.17g "
-					   "%.17g %.17g %d %lld %.17g %lld", run, k, cfg.pi_armed, cfg.forecast, in.now, (long long)in.t,
+					   "%.17g %.17g %d %lld %.17g %lld", run, k, cfg.pi_armed, fc_flag, in.now, (long long)in.t,
 					   in.have_pcc, in.have_pv, in.pcc, in.pv, in.bat1, in.pcc_avg5, in.bat1_avg5, in.inv_time,
 					   in.have_soc_bat1, in.soc_bat1, in.r290_hz, in.r290_time, in.aussen, in.aussen_time, in.wp,
 					   in.wp_time, in.season, (long long)in.season_ts, in.fc_target, (long long)in.fc_ts);
@@ -122,9 +122,9 @@ int main(int argc, char **argv)
 					   (long long)fo.full_at[1], fo.soc_sunset[0], fo.soc_sunset[1], fo.anchor, fo.kt_now, fo.pv_now_w,
 					   fo.rest_kwh, fo.weather);
 			}
-			printf("%d %d %d %d %d\t%s\t%s\t%s\t%.3f %.3f %.3f %.3f %d %d %d %d %d %d\n", run, k, out.sp[0], out.sp[1], out.sp[2],
-				   out.why[0], out.why[1], out.why[2], out.wp_eff, out.surplus, out.pi.u, out.pi.y, out.pi.sp[0], out.pi.sp[1],
-				   out.pi.sp[2], out.fc_active, out.fc_bad, out.bat1_first);
+			printf("%d %d %d %d %d\t%s\t%s\t%s\t%.3f %.3f %.3f %d %d %d %d\n", run, k, out.sp[0], out.sp[1], out.sp[2],
+				   out.why[0], out.why[1], out.why[2], out.surplus, out.pi.u, out.pi.y, out.pi.sp[0], out.pi.sp[1],
+				   out.pi.sp[2], out.bat1_first);
 			if (io)                                         /* the DO4 pulse too (D5 changes no setpoint) */
 				printf("D5 %d %d %d\n", run, k, out.do4_pulse);
 		}

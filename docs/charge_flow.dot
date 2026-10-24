@@ -1,45 +1,18 @@
-// batmonitor 0.58-c: charge path of one cycle as decision matrices, with the summer peak window (D4 LADESPERRE)
+// batmonitor 0.59-c: charge path of one cycle as decision matrices, with the summer peak window (D4 LADESPERRE)
 // that keeps the stacks free in the morning so they take the midday PV and the PCC export stays below 20 kW.
 // render: dot -Tpdf charge_flow.dot -o charge_flow.pdf   (or -Tpng)
 digraph charge {
 	graph [rankdir=TB, fontname="Helvetica", fontsize=11, nodesep=0.35, ranksep=0.35, newrank=true,
-		   label="batmonitor 0.58-c: charge path (every 5 s)   |   blue = pure decision function (bits + state, enumerated by make check)   |   green = matrix / amounts   |   [CBMC] = proved for all inputs",
+		   label="batmonitor 0.59-c: charge path (every 5 s)   |   blue = pure decision function (bits + state, enumerated by make check)   |   green = matrix / amounts   |   [CBMC] = proved for all inputs",
 		   labelloc=t];
 	node [shape=box, style="rounded,filled", fillcolor="#f4f4f4", fontname="Helvetica", fontsize=10];
 	edge [fontname="Helvetica", fontsize=9];
 
 	in [label=<<b>inputs</b><br/>PCC (+ = export), PCC 5 min mean, Sofar Bat1 W (+ = charge), Multis AC-in,<br/>outdoor temperature, BMS SoC / U / CCL, time (local, solar noon)>, fillcolor="#ffffff"];
 
-	surplus [label=<<b>surplus</b> (chain_mode)<br/>Bat1_eff = Bat1 discharge x 1, Bat1 charge x BAT1_CHARGE_FACTOR 0.5<br/>surplus = z2 + Bat1_eff + own_charge - own_discharge (+ D6 share)<br/><font point-size="9">z2 = PCC + WP part the stacks do not cover (S2, as discharge): heat pump matrix below</font>>];
+	surplus [label=<<b>surplus</b> (chain_mode)<br/>Bat1_eff = Bat1 discharge x 1, Bat1 charge x BAT1_CHARGE_FACTOR 0.5<br/>surplus = PCC + Bat1_eff + own_charge - own_discharge<br/><font point-size="9">0.59-c: the real PCC in every season (removed: Z2 winter rule, transition cap, forecast rule, WPPV)</font>>];
 
-	subgraph cluster_d6 {
-		label=<<b>D6 WPPV</b> (0.56-c, user 2026-10-24): heat pump on PV -&gt; half of it into the stacks, the grid buys it as cheap heat power>;
-		style="rounded,filled"; fillcolor="#fdf0e0"; color="#d9822b"; fontsize=11;
-		d6bits [shape=plain, label=<
-			<table border="0" cellborder="1" cellspacing="0" cellpadding="3" bgcolor="#ffffff">
-			<tr><td colspan="2"><b>bm_d6 bits</b></td></tr>
-			<tr><td>enabled</td><td>WP_PV_CHG_SHARE &gt; 0 and WP_PV_GRID_MAX &gt; 0</td></tr>
-			<tr><td>row_pv</td><td>bm_wp_covers_all: row share 100 %, no cap (SUMMER, FC)</td></tr>
-			<tr><td>day, wp_on</td><td>PV &ge; 100 W; heat pump &ge; 300 W, em0 fresh</td></tr>
-			<tr><td>pcc_fresh, no_cap</td><td>PCC there, inverter not stale; D4 export cap not active</td></tr>
-			<tr><td>surplus_gt_on / ge_hold</td><td>surplus without the share &gt; 200 W / &ge; 0 (PV covers house + WP)</td></tr>
-			</table>>];
-		d6 [label=<<b>bm_d6</b>   state: wp_pv<br/>wp_pv = gate and (surplus_gt_on or (wp_pv and surplus_ge_hold))<br/>share = min(WP x WP_PV_CHG_SHARE 50 %, WP_PV_GRID_MAX 2000 W)<br/>chg_ref and surplus += share -&gt; PCC settles at -share<br/>self-holding: own charge +share, PCC -share, surplus unchanged<br/><font point-size="9">[make check: 384 combinations, fixed point; state.json chain.wp_pv_w; rule text WPPV]</font>>, fillcolor="#dbe8fb"];
-		d6bits -> d6;
-	}
 
-	wpm [shape=plain, label=<
-			<table border="0" cellborder="1" cellspacing="0" cellpadding="3" bgcolor="#ffffff">
-			<tr><td colspan="6"><b>heat pump matrix BM_WP_RULE</b> (0.58-c: first match top-down; stacks cover min(share x WP, cap), the rest onto z2) - details wp_matrix.pdf</td></tr>
-			<tr><td><b>row</b></td><td><b>when</b></td><td><b>rule text</b></td><td><b>share %</b></td><td><b>cap W</b></td><td><b>make check</b></td></tr>
-			<tr><td>LOWSOC</td><td>lowest stack &lt; WP_SOC_MIN 21 % (back &ge; 23 %)</td><td>WP:LOWSOC</td><td>0</td><td>-</td><td>221184</td></tr>
-			<tr><td bgcolor="#fde9c8">FC</td><td>good forecast (stacks above target_soc)</td><td>WP:FC</td><td>100</td><td>-</td><td>27648</td></tr>
-			<tr><td>FCBAD</td><td>bad forecast (target_soc 100)</td><td>WP:FCBAD</td><td>WP_BAT_SHARE_BAD 50</td><td>-</td><td>10368</td></tr>
-			<tr><td>WINTER</td><td>season winter</td><td>WP:Z2</td><td>0</td><td>-</td><td>61056</td></tr>
-			<tr><td>TRANS</td><td>season transition</td><td>WP:ALL / T1900</td><td>100</td><td>WP_BAT_MAX_TRANSITION 1900</td><td>61056</td></tr>
-			<tr><td bgcolor="#fde9c8">SUMMER</td><td>season summer</td><td>WP:ALL</td><td>100</td><td>-</td><td>61056</td></tr>
-			<tr><td colspan="6">orange = share 100 %, no cap: <b>D6 WPPV</b> allowed (by day, no D4 cap, PV covers house + WP): z2 += min(50 % WP, 2000 W)</td></tr>
-			</table>>];
 
 	subgraph cluster_d4 {
 		label=<<b>D4 peak window as a forecast export cap</b> (0.49-c: pure function bm_d4)<br/>goal: keep the stacks free for the afternoon peaks, charge only the export above EXPORT_CAP (summer 2026: DO4 on 55 days, 11:45-16:15)>;
@@ -100,7 +73,7 @@ digraph charge {
 			<tr><td>DIS</td><td>discharge amount</td><td>1</td><td>(S4: PROP / IDLE)</td></tr>
 			</table>>];
 		force [label=<<b>FORCE</b>: min(FORCE_CHARGE_W, chg_cap) per phase<br/>from the grid, obeys the BMS CCL (was: 500 W even at CCL 0)<br/>at any time of day: no TOU window (removed 2026-10-11)>, fillcolor="#ffffff"];
-		amount [label=<<b>charge amount</b> (chain_charge, whole watts since 0.48-c)<br/>want = max(0, own_charge + KP_PM 1010 x (chg_ref + Bat1_eff - target) / 1000)<br/>chg_ref = z2 + D6 share (0.56-c)<br/>target = SOYO_TARGET, + EXPORT_CAP while D4 cap_active (0.49-c)<br/>at most the sum of chg_cap over the charging phases<br/><font point-size="9">[CBMC h_charge]</font>>, fillcolor="#ffffff"];
+		amount [label=<<b>charge amount</b> (chain_charge, whole watts since 0.48-c)<br/>want = max(0, own_charge + KP_PM 1010 x (PCC + Bat1_eff - target) / 1000)<br/>target = SOYO_TARGET, + EXPORT_CAP while D4 cap_active (0.49-c)<br/>at most the sum of chg_cap over the charging phases<br/><font point-size="9">[CBMC h_charge]</font>>, fillcolor="#ffffff"];
 		caps [label=<<b>chg_cap</b> per phase (one per stack)<br/>min(CHARGER_A 70 A x U / 0.93, CHARGE_MAX_PHASE 4900, BMS CCL)<br/>~4.0-4.2 kW per phase -&gt; ~12 kW for the three Multis>, fillcolor="#ffffff"];
 		alloc [label=<<b>alloc_levels</b> (0.48-c: one split core for charge and discharge)<br/>charge: one level per stack in CHARGE_PRIORITY order (Stack1, Stack2), the lead stack last,<br/>each up to min(chg_cap, CHARGER_CAP_PHASE); water filling within a level;<br/>only what the caps cut goes on; a rest up to CHARGE_MAX_PHASE on all charging phases<br/><font point-size="9">[CBMC h_charge without bank assumption, h_alloc_discharge]</font>>, fillcolor="#ffffff"];
 		mrule -> force [label=" FORCE"];
@@ -126,7 +99,7 @@ digraph charge {
 			</table>>];
 	}
 
-	out [label=<<b>setpoints</b> per phase (+ = charge) -&gt; Multis<br/>rule text: CHARGE WP:.. SRC:.. BAL/EQ [CAP] [WPPV] [CCL] | LADESPERRE(h) | FULL | FORCE(soc) [LOW]>, fillcolor="#ffffff"];
+	out [label=<<b>setpoints</b> per phase (+ = charge) -&gt; Multis<br/>rule text: CHARGE SRC:.. BAL/EQ [CAP] [CCL] | LADESPERRE(h) | FULL | FORCE(soc) [LOW]>, fillcolor="#ffffff"];
 
 	timeline [shape=plain, label=<
 		<table border="0" cellborder="1" cellspacing="0" cellpadding="4" bgcolor="#ffffff">
@@ -140,12 +113,7 @@ digraph charge {
 		<tr><td>clouds come up</td><td>measured PV low</td><td>anchor drops -&gt; cap ends</td><td>charge at once</td></tr>
 		</table>>];
 
-	in -> surplus;
-	surplus -> d6bits;
-	d6 -> d2 [color="#d9822b", penwidth=2, label=" surplus + share"];
-	d6 -> amount [color="#d9822b", style=dashed, label=" chg_ref + share"];
-	surplus -> wpm [style=dashed, arrowhead=none];
-	d4 -> d6bits [style=dashed, color="#d9822b", label=" cap_active"];
+	in -> surplus -> d2;
 	in -> model;
 	in -> prio [style=dashed, label=" PCC", color="#c0392b"];
 	d4 -> d2 [color="#d9822b", penwidth=2, label=" block"];

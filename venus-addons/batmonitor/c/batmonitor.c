@@ -43,6 +43,11 @@
  *     (transition: its part above 1900 W; summer unchanged). Accepted side effect: while the Sofar can (Bat1 up to
  *     2.5 kW, its own PCC regulation at Z1) it covers the heat pump from Bat1 -> PV into the stacks, Bat1 into the WP
  *     (~15 % extra conversion loss on that part). Only a Sofar CT on Z2 or a Bat1 discharge limit avoids that.
+ *   - PCC near 0 always (0.59-c, user 2026-10-24: "zu kompliziert, pcc nahe 0"): the Z2 rules above (0.19, 0.30-c),
+ *     the transition cap (0.22), the forecast rule and its bad-forecast cap (0.24, 0.37-c), WP_SOC_MIN (0.54-c), WPPV
+ *     (0.56-c) and the WP_CAP fallback are removed. The Z2 tariff saves only 8 ct/kWh (22 ct heat pump vs 30 ct house),
+ *     less than the ~15-20 % charge + discharge loss of storing PV while the grid pays the heat pump, and the Sofar Bat1
+ *     covered the heat pump instead of the grid anyway. The heat pump is house load the stacks cover like any other.
  *   - full_at with the measured charger power (0.31-c, user 2026-10-09): each MultiPlus delivers ~3.6 kW DC at the BMS
  *     at its limit (65-67 A, flat over 53.6-54.6 V; AC-in ~4040 W), not 70 A x U: CHARGER_DC_W caps the forecast.
  *   - full_at (0.32-c, user 2026-10-09): the forecast splits the power each step like alloc_charge and lets the SoC lead
@@ -77,7 +82,7 @@
 #include "bm_logic.h"
 #include "bm_parse.h"
 
-#define VERSION "0.58-c"
+#define VERSION "0.59-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
@@ -565,16 +570,10 @@ static void write_state(const int *sp, char why[][WHY_LEN], double surplus)
 	cJSON_AddStringToObject(js, "season", o_.season == BM_WINTER ? "winter" : o_.season == BM_TRANSITION ? "transition"
 							: "summer");
 	cJSON_AddStringToObject(js, "season_source", o_.season_measured ? "measured" : "months");
-	o = cJSON_AddObjectToObject(js, "forecast_rule");
-	cJSON_AddNumberToObject(o, "active", o_.fc_active);
-	cJSON_AddNumberToObject(o, "bad", o_.fc_bad);
-	cJSON_AddNumberToObject(o, "target_soc", o_.fc_target);
-	cJSON_AddNumberToObject(o, "min_soc", o_.fc_min_soc);
 	cJSON_AddNumberToObject(js, "bat1_first", o_.bat1_first);
-	o = cJSON_AddObjectToObject(js, "chain");                  /* 0.42-c: S2 / S3 reasons, as in the rule text */
-	cJSON_AddStringToObject(o, "wp", o_.wp_why);
+	cJSON_AddNumberToObject(js, "wp_low", o_.wp_low);          /* WP_SOC_MIN: the discharge leaves the WP to the grid */
+	o = cJSON_AddObjectToObject(js, "chain");                  /* 0.42-c: S3 reason, as in the rule text */
 	cJSON_AddStringToObject(o, "src", o_.src_why);
-	cJSON_AddNumberToObject(o, "wp_pv_w", round(o_.wp_pv_w));   /* 0.56-c: D6 WPPV share on the charge point */
 	o = cJSON_AddObjectToObject(js, "pi");
 	cJSON_AddNumberToObject(o, "armed", cfg.pi_armed);
 	cJSON_AddNumberToObject(o, "y_w", round(o_.pi.y));
@@ -751,7 +750,7 @@ static void calc(void)
 			snprintf(spcc, sizeof(spcc), "%.0f", in.pcc);
 		if (in.have_pv)
 			snprintf(spv, sizeof(spv), "%.0f", in.pv);
-		LOG("%spcc %s W wp %.0f W bat1 %.0f W pv %s W -> %s | %s | PI%s u %+.0f W", LIVE ? "" : "DRY ", spcc, o_.wp_eff,
+		LOG("%spcc %s W wp %.0f W bat1 %.0f W pv %s W -> %s | %s | PI%s u %+.0f W", LIVE ? "" : "DRY ", spcc, in.wp,
 			in.bat1, spv, line, eta, cfg.pi_armed ? "" : " shadow", o_.pi.u);
 		strcpy(last_rules, rules);
 		last_log = in.now;
@@ -818,8 +817,6 @@ int main(void)
 	cfg.ladesperre = !l || strcmp(l, "1") == 0;
 	const char *pe = getenv("BATMONITOR_PI");
 	cfg.pi_armed = pe && strcmp(pe, "1") == 0;
-	const char *fe = getenv("BATMONITOR_FORECAST");
-	cfg.forecast = !fe || strcmp(fe, "1") == 0;
 	bm_init(&st);
 	const char *sf = getenv("BATMONITOR_STATE_FILE");
 	if (sf && *sf)

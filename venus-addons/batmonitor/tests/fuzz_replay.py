@@ -53,7 +53,7 @@ def main():
         run, k = int(f[0]), int(f[1])
         if run != run_prev:                       # a new run: fresh cfg and state, as fuzz_dump.c
             cfg = L.Cfg()
-            cfg.pi_armed, cfg.forecast = int(f[2]), int(f[3])
+            cfg.pi_armed = int(f[2])                # f[3]: the old forecast flag, unused since 0.59-c
             st = L.State()
             run_prev = run
         it = iter(f[4:])
@@ -93,9 +93,9 @@ def main():
         n_slots = int(next(it))
         i.fc_slots = [(int(next(it)), float(next(it))) for _ in range(n_slots)]
         o = L.bm_step(cfg, i, st)
-        out_lines.append("%d %d %d %d %d\t%s\t%s\t%s\t%.3f %.3f %.3f %.3f %d %d %d %d %d %d\n" % (
-            run, k, o.sp[0], o.sp[1], o.sp[2], o.why[0], o.why[1], o.why[2], o.wp_eff, o.surplus, o.pi.u, o.pi.y,
-            o.pi.sp[0], o.pi.sp[1], o.pi.sp[2], o.fc_active, o.fc_bad, o.bat1_first))
+        out_lines.append("%d %d %d %d %d\t%s\t%s\t%s\t%.3f %.3f %.3f %d %d %d %d\n" % (
+            run, k, o.sp[0], o.sp[1], o.sp[2], o.why[0], o.why[1], o.why[2], o.surplus, o.pi.u, o.pi.y,
+            o.pi.sp[0], o.pi.sp[1], o.pi.sp[2], o.bat1_first))
         out_lines.append("D5 %d %d %d\n" % (run, k, o.do4_pulse))
     sys.stdout.writelines(out_lines)
 

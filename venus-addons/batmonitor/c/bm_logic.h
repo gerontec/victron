@@ -32,26 +32,20 @@ extern const char *BM_PH[NPH];
 struct bm_cfg {
 	int ladesperre;          /* BATMONITOR_LADESPERRE (default on) */
 	int pi_armed;            /* BATMONITOR_PI=1: the PI replaces the soyo amounts */
-	int forecast;            /* BATMONITOR_FORECAST (default on): forecast target SoC may override the season */
 	/* tunable parameters, defaults and limits in BM_PARAMS (bm_logic.c), env BATMONITOR_<NAME> in batmonitor.c */
 	double w_max, discharge_max_phase, charge_max_phase, charger_cap_phase;
-	double wp_bat_max_transition, wp_cap;
 	double soc_min, soc_min_release, soc_force, soc_force_release, force_charge_w;
 	double dcl_force_a, cell_force_v, cell_force_release_v;   /* LOW force charge: BMS DCL / lowest cell (0.52-c) */
 	double soc_balance_on, soc_balance_off;
 	double soyo_target;
-	double fc_hyst;
 	double sofar_trickle;
 	double charger_a, charge_eff;   /* real charge ceiling per phase = charger_a x BMS voltage / charge_eff (0.29-c) */
 	double charger_dc_w;            /* measured DC at the BMS per MultiPlus at its limit, full_at forecast (0.31-c) */
 	double bat1_soc_min;            /* night: the Sofar battery serves house + WP first while above this % (0.38-c) */
-	double fc_bad_target, wp_bat_share_bad;   /* bad forecast (target_soc >= this): stacks cover at most this % of the WP (0.37-c) */
 	double export_cap, house_est;   /* summer peak window (0.49-c): charge only the export above this W; house load guess */
 	double do4_grace_s, do4_hard_w; /* DO4 only after PCC > 20 kW for this long, at once above this (0.50-c) */
 	double acout_feed_max_w, acout_feed_s;   /* DO4 when PV feeds more than this into one AC-out for this long (0.51-c) */
-	double wp_soc_min;              /* no heat pump support from the stacks while the lowest stack SoC is below (0.54-c) */
-	double wp_pv_chg_share;         /* % of the heat pump W the stacks charge extra while it runs on PV (0.56-c) */
-	double wp_pv_grid_max;          /* W: ... at most this, the grid import it costs (0.56-c) */
+	double wp_soc_min;              /* discharge: no heat pump support while the lowest stack SoC is below (0.54-c) */
 };
 
 /* parameter table: name (env BATMONITOR_<name>), default, allowed range, unit, meaning */
@@ -117,10 +111,8 @@ struct bm_state {
 	int lead;                                    /* bank more than SOC_BALANCE_ON ahead, -1 = none */
 	int soyo_chg_prev, soyo_prop_prev;
 	int ls_yday, peak_today;                     /* local day of the peak window, PCC > 20 kW seen today */
-	int fc_active;                               /* forecast: stacks above the target SoC -> serve everything */
 	int bat1_first;                              /* Sofar Bat1 above BAT1_SOC_MIN: it discharges first (0.38-c) */
 	int wp_low;                                  /* lowest stack below WP_SOC_MIN: no heat pump support (0.54-c) */
-	int wp_pv;                                   /* WPPV latched: heat pump on PV, the stacks charge a share of it (0.56-c) */
 	double do4_last;                             /* monotonic s of the last DO4 pulse, 0 = none (0.46-c) */
 	double do4_over_since;                       /* monotonic s since the PCC is above PCC_PEAK_TH, 0 = not (0.50-c) */
 	double acout_over_since;                     /* monotonic s since an AC-out feeds above ACOUT_FEED_MAX_W (0.51-c) */
@@ -131,14 +123,11 @@ struct bm_state {
 struct bm_out {
 	int sp[NPH];
 	char why[NPH][WHY_LEN];
-	double surplus, wp_eff;
-	double wp_pv_w;                              /* D6 WPPV: W added to the charge point, 0 = rule off (0.56-c) */
+	double surplus;
 	int season, season_measured;                 /* BM_SUMMER/WINTER/TRANSITION used; 1 = from batmonitor/season */
-	int fc_active;
-	int fc_bad;                                  /* forecast fresh and target_soc >= FC_BAD_TARGET: WP share capped */
 	int bat1_first;
-	char wp_why[8], src_why[8];                  /* S2 / S3 reason (0.42-c), see the rule text in bm_logic.c */
-	double fc_target, fc_min_soc;
+	int wp_low;                                  /* WP_SOC_MIN latch: the heat pump is left to the grid (discharge) */
+	char src_why[8];                             /* S3 reason (0.42-c), see the rule text in bm_logic.c */
 	struct bm_ls ls;
 	struct bm_pi pi;
 	int lead_event;                              /* 1 = a bank took the lead, -1 = back within SOC_BALANCE_OFF */
@@ -154,15 +143,14 @@ struct bm_out {
 /* ---- decision layer (0.43-c): the discrete part of the rule chain as pure functions of predicates ("bits", each a
    threshold comparison of the inputs) and the hysteresis state bits; the amounts (W) stay in bm_step. Every
    input / state combination of each function is enumerated by tests/check_matrix.c (make check). */
-enum bm_wp_reason { BM_WP_NA, BM_WP_OFF, BM_WP_FC, BM_WP_FCBAD, BM_WP_Z2, BM_WP_T1900, BM_WP_ALL, BM_WP_LOWSOC, BM_WP_N };
-enum bm_src_reason { BM_SRC_DAY, BM_SRC_B1, BM_SRC_STK, BM_SRC_B1W, BM_SRC_N };
+enum bm_src_reason { BM_SRC_DAY, BM_SRC_B1, BM_SRC_STK, BM_SRC_WPG, BM_SRC_N };
 enum bm_mode { BM_M_BMS_MISSING, BM_M_FORCE, BM_M_STALE, BM_M_LADESPERRE, BM_M_CHARGE, BM_M_FULL, BM_M_PROT,
 			   BM_M_CHARGING, BM_M_DIS, BM_M_N };
-extern const char *BM_WP_NAME[BM_WP_N], *BM_SRC_NAME[BM_SRC_N], *BM_MODE_NAME[BM_M_N];
+extern const char *BM_SRC_NAME[BM_SRC_N], *BM_MODE_NAME[BM_M_N];
 
-/* Discharge matrix (0.45-c): what the two decision axes of D1 mean for the discharge amount, one table row each.
-   The amount code reads nothing else of D1. S3 source -> how the Sofar Bat1 counts, the target, the idle power, the
-   PROP hold; S2 heat pump row -> BM_WP_RULE below. Enumerated by make check */
+/* Discharge matrix (0.45-c): what the S3 source of D1 means for the discharge amount, one table row each: how the
+   Sofar Bat1 counts, the target, the idle power, the PROP hold. Enumerated by make check. 0.59-c: the heat pump axis
+   (S2) is gone - the stacks always regulate on the real PCC, the heat pump is house load like any other */
 struct bm_src_rule {
 	int b1_signed;              /* 1: a Bat1 discharge is house load the stacks take over; 0: only its charge counts */
 	int trickle;                /* target + SOFAR_TRICKLE: the Sofar battery charges a few W steadily */
@@ -177,58 +165,31 @@ enum bm_why { BM_W_NONE, BM_W_NAME, BM_W_SOC, BM_W_PEAK_H, BM_W_POWER, BM_W_CHAI
 struct bm_mode_rule {
 	int action;                 /* enum bm_action: 0 W, FORCE_CHARGE_W, the charge amount, the discharge amount */
 	int capped;                 /* the setpoint is limited by the phase ceiling (chg_cap / dis_cap) */
-	int why;                    /* enum bm_why: rule text NAME, NAME(soc %), NAME(peak h), NAME(BMS W), NAME WP: SRC:,
+	int why;                    /* enum bm_why: rule text NAME, NAME(soc %), NAME(peak h), NAME(BMS W), NAME SRC:,
 								   none (the discharge stage writes it) */
 };
 extern const struct bm_mode_rule BM_MODE_RULE[];
 
-/* Heat pump matrix (0.57-c, user 2026-10-24: "fasse die WP rules zusammen"): who pays the heat pump. D1 picks one row
-   (first match: LOWSOC > FC > FCBAD > WINTER > TRANS > SUMMER), the amounts read only its columns. Before, D1 derived
-   a reason and a kind with two separate chains, and D6 tested the kind; now one row, one table */
-enum bm_wp_row { BM_WR_LOWSOC, BM_WR_FC, BM_WR_FCBAD, BM_WR_WINTER, BM_WR_TRANS, BM_WR_SUMMER, BM_WR_N };
-/* 0.58-c (user 2026-10-24: "simplifiziere"): two number columns instead of a cover kind and a WPPV flag. A cell is a
-   fixed number or a bm_cfg parameter. The stacks cover min(share % x WP, cap) of the heat pump (discharge), the rest
-   goes onto the charge point z2; D6 WPPV only where a row covers all of it (share 100 %, no cap) */
-struct bm_wp_val {
-	double v;                   /* the fixed value */
-	unsigned par;               /* 0, or 1 + offsetof(struct bm_cfg, field): the value of that parameter */
-};
-struct bm_wp_rule {
-	const char *name;           /* the row name (make check, diagrams) */
-	int reason;                 /* enum bm_wp_reason: rule text WP:<..> while the heat pump runs */
-	struct bm_wp_val share;     /* % of the heat pump the stacks cover */
-	struct bm_wp_val cap;       /* W, at most (INFINITY = none) */
-};
-extern const struct bm_wp_rule BM_WP_RULE[BM_WR_N];
-double bm_wp_val(const struct bm_cfg *cfg, struct bm_wp_val x);
-double bm_wp_share(const struct bm_cfg *cfg, int wp_row, double wp);   /* W of the heat pump the stacks cover */
-int bm_wp_covers_all(const struct bm_cfg *cfg, int wp_row);           /* share >= 100 % and no cap: D6 WPPV allowed */
-
-/* D1: forecast rule, S3 source, S2 scope. State: fc_active, bat1_first, wp_low */
+/* D1: S3 source - who delivers first at night - and the one heat pump rule left. State: bat1_first, wp_low.
+   0.59-c (user 2026-10-24: "pcc nahe 0"): the forecast rule, the heat pump matrix (Z2 / transition cap / bad
+   forecast), WPPV and the WP_CAP fallback are gone; they all moved the PCC away from 0 on purpose (the Z2 tariff saves
+   only 8 ct/kWh, less than the ~15-20 % charge + discharge loss, and the Sofar Bat1 covered the heat pump instead of
+   the grid anyway). Kept (user): below WP_SOC_MIN the stacks no longer support the heat pump while discharging (WPLOW);
+   then no night floor while it runs (SRC WPG), else the stacks would take over the Sofar Bat1 that feeds the heat pump */
 struct bm_d1_in {
-	int season;                 /* base season BM_SUMMER / BM_WINTER / BM_TRANSITION (measured, else months) */
 	int night;                  /* have_pv && pv < NIGHT_PV_TH */
-	int wp_fresh;               /* em0/power younger than WP_MAX_AGE */
-	int wp_pos, wp_on;          /* ... and > 0 W / >= WP_ON_TH */
-	int wp_running;             /* R290 compressor > 0 Hz, data fresh */
-	int wp_gt_trans;            /* wp > WP_BAT_MAX_TRANSITION (reason text only) */
-	int fc_share_lt_share;      /* WP_BAT_SHARE_BAD % of wp < the base season's share */
-	int fc_fresh;               /* forecast on, target_soc present, younger than FC_MAX_AGE */
-	int fc_minsoc_ok;           /* lowest stack SoC <= 100 (a BMS present) */
-	int fc_above_on, fc_below_off;   /* lowest SoC > target + FC_HYST / < target */
-	int fc_target_bad;          /* target_soc >= FC_BAD_TARGET */
+	int wp_on;                  /* em0/power younger than WP_MAX_AGE and >= WP_ON_TH */
 	int b1_above_min;           /* SOC_Bat1 present and > BAT1_SOC_MIN */
 	int b1_ge_release;          /* SOC_Bat1 >= BAT1_SOC_MIN + BAT1_FIRST_HYST */
 	int wp_soc_low_on;          /* lowest stack SoC < WP_SOC_MIN (0.54-c) */
 	int wp_soc_low_off;         /* lowest stack SoC >= WP_SOC_MIN + WP_SOC_HYST */
 };
 struct bm_d1_out {
-	int fc_active, bat1_first, wp_low;   /* next state */
-	int fc_ok, fc_bad, season_wp, winter, b1_first, night_floor, wp_fc_capped, wp_cap_armed;
-	int wp_reason, src_reason;
-	int wp_row;                 /* enum bm_wp_row: the heat pump matrix row (0.57-c) */
+	int bat1_first, wp_low;     /* next state */
+	int b1_first, night_floor;
+	int src_reason;
 };
-void bm_d1(const struct bm_d1_in *b, int fc_active, int bat1_first, int wp_low, struct bm_d1_out *o);
+void bm_d1(const struct bm_d1_in *b, int bat1_first, int wp_low, struct bm_d1_out *o);
 
 /* D2: S0 SoC protection / force charge per bank and the S1 mode per bank. State: prot[], force[], low[], chg_prev */
 struct bm_d2_bank {
@@ -244,7 +205,7 @@ struct bm_d2_bank {
 struct bm_d2_in {
 	int stale;                                   /* inverter data older than STALE_SECONDS */
 	int block;                                   /* summer charge block (ladesperre) */
-	int surplus_gt_on, surplus_gt_hold;          /* Z2 surplus > PCC_SURPLUS_TH / > SOYO_HOLD_TH */
+	int surplus_gt_on, surplus_gt_hold;          /* surplus > PCC_SURPLUS_TH / > SOYO_HOLD_TH */
 	struct bm_d2_bank bank[NBANK];
 };
 struct bm_d2_out {
@@ -266,7 +227,7 @@ int bm_dlead(const struct bm_dl_in *b, int lead, int *event);        /* next lea
 /* D3: S4 discharge PROPORTIONAL or IDLE. State: prop_prev */
 struct bm_d3_in {
 	int any_dis;                                 /* a phase discharges (mode DIS) */
-	int house_import;                            /* Z2 house balance < PCC_IMPORT_TH */
+	int house_import;                            /* house balance (PCC + own charge) < PCC_IMPORT_TH */
 	int deficit_gt_hold;                         /* deficit > SOYO_HOLD_TH */
 	int prop_hold;                               /* BM_SRC_RULE[src].prop_hold */
 };
@@ -308,24 +269,6 @@ int bm_d5(const struct bm_d5_in *b);                                  /* 1 = pul
 #define DO4_LOCKOUT 300.0                    /* s between two pulses: WR2 needs its restart after a pulse */
 #define DO4_PCC_MAX_AGE 15.0                 /* s: only a fresh PCC triggers (sofar_fast.py: every 4 s) */
 #define DO4_PULSE_S 3.0                      /* s: DO4=1, then DO4=0 (as fox2db / the ESP: r4 pulse 3) */
-
-/* D6 (0.56-c, user 2026-10-24): heat pump on PV -> the stacks charge WP_PV_CHG_SHARE % of its power on top, the PCC
-   buys it (at most WP_PV_GRID_MAX): grid heat power is cheaper than the stored PV is worth. Only where the stacks
-   would cover all of the heat pump (bm_wp_covers_all: rows SUMMER, FC), by day, without the D4 export cap. On while
-   the surplus without the heat pump share (z2 + Bat1_eff + own charge - own discharge) is above PCC_SURPLUS_TH, i.e.
-   the PV covers house + heat pump and still charges; held down to 0. Charging the share does not change that surplus
-   (own charge up, PCC down by the same W), so the rule holds itself. State: wp_pv */
-struct bm_d6_in {
-	int enabled;                                 /* WP_PV_CHG_SHARE > 0 and WP_PV_GRID_MAX > 0 */
-	int row_pv;                                  /* bm_wp_covers_all(wp_row) (0.58-c; 0.56-c: kind ALL) */
-	int day;                                     /* not night */
-	int wp_on;                                   /* heat pump >= WP_ON_TH, em0/power fresh */
-	int pcc_fresh;                               /* PCC present, inverter data not stale */
-	int no_cap;                                  /* D4 cap not active */
-	int surplus_gt_on;                           /* surplus without the share > PCC_SURPLUS_TH */
-	int surplus_ge_hold;                         /* ... >= 0 */
-};
-int bm_d6(const struct bm_d6_in *b, int wp_pv);                       /* next wp_pv = the rule is active */
 
 void bm_init(struct bm_state *st);
 /* charge ceiling of one phase (W AC): charger_a x BMS voltage of its bank / charge_eff, at most CHARGE_MAX_PHASE;

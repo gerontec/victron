@@ -1,27 +1,15 @@
-// batmonitor 0.58-c: overview of one cycle - a common trunk, then one charge path and one discharge branch.
+// batmonitor 0.59-c: overview of one cycle - a common trunk, then one charge path and one discharge branch.
 // Details: charge_flow.pdf (charge path, peak window) and discharge_flow.pdf (discharge matrix, CBMC coverage).
 // render: dot -Tpdf control_flow.dot -o control_flow.pdf   (or -Tpng)
 digraph control {
 	graph [rankdir=TB, fontname="Helvetica", fontsize=11, nodesep=0.5, ranksep=0.4, newrank=true,
-		   label="batmonitor 0.58-c: one cycle every 5 s   |   blue = decision (bits + state, make check)   |   green = matrix / amount   |   details: charge_flow.pdf, discharge_flow.pdf",
+		   label="batmonitor 0.59-c: one cycle every 5 s   |   blue = decision (bits + state, make check)   |   green = matrix / amount   |   details: charge_flow.pdf, discharge_flow.pdf",
 		   labelloc=t];
 	node [shape=box, style="rounded,filled", fillcolor="#f4f4f4", fontname="Helvetica", fontsize=10];
 	edge [fontname="Helvetica", fontsize=9];
 
-	in [label=<<b>inputs</b> (bm_parse: only valid numbers, else stale)<br/>PCC, Sofar Bat1, PV, heat pump W, R290 Hz, BMS SoC / U / CCL / DCL / lowest cell, season, forecast>, fillcolor="#ffffff"];
-	d1 [label=<<b>D1</b> forecast, B1FIRST, WP_LOW (0.54-c)<br/>-&gt; heat pump row (BM_WP_RULE) LOWSOC / FC / FCBAD / WINTER / TRANS / SUMMER<br/>(z2 = PCC + WP not covered)<br/>-&gt; S3 source DAY / B1 / STK / B1W<br/><font point-size="9">make check: 442368 combinations (16 bits x 3 seasons x 8 states)</font>>, fillcolor="#dbe8fb"];
-	wpm [shape=plain, label=<
-			<table border="0" cellborder="1" cellspacing="0" cellpadding="3" bgcolor="#ffffff">
-			<tr><td colspan="6"><b>heat pump matrix BM_WP_RULE</b> (0.58-c: first match top-down; stacks cover min(share x WP, cap), the rest onto z2) - details wp_matrix.pdf</td></tr>
-			<tr><td><b>row</b></td><td><b>when</b></td><td><b>rule text</b></td><td><b>share %</b></td><td><b>cap W</b></td><td><b>make check</b></td></tr>
-			<tr><td>LOWSOC</td><td>lowest stack &lt; WP_SOC_MIN 21 % (back &ge; 23 %)</td><td>WP:LOWSOC</td><td>0</td><td>-</td><td>221184</td></tr>
-			<tr><td bgcolor="#fde9c8">FC</td><td>good forecast (stacks above target_soc)</td><td>WP:FC</td><td>100</td><td>-</td><td>27648</td></tr>
-			<tr><td>FCBAD</td><td>bad forecast (target_soc 100)</td><td>WP:FCBAD</td><td>WP_BAT_SHARE_BAD 50</td><td>-</td><td>10368</td></tr>
-			<tr><td>WINTER</td><td>season winter</td><td>WP:Z2</td><td>0</td><td>-</td><td>61056</td></tr>
-			<tr><td>TRANS</td><td>season transition</td><td>WP:ALL / T1900</td><td>100</td><td>WP_BAT_MAX_TRANSITION 1900</td><td>61056</td></tr>
-			<tr><td bgcolor="#fde9c8">SUMMER</td><td>season summer</td><td>WP:ALL</td><td>100</td><td>-</td><td>61056</td></tr>
-			<tr><td colspan="6">orange = share 100 %, no cap: <b>D6 WPPV</b> allowed (by day, no D4 cap, PV covers house + WP): z2 += min(50 % WP, 2000 W)</td></tr>
-			</table>>];
+	in [label=<<b>inputs</b> (bm_parse: only valid numbers, else stale)<br/>PCC, Sofar Bat1, PV, heat pump W, R290 Hz, BMS SoC / U / CCL / DCL / lowest cell>, fillcolor="#ffffff"];
+	d1 [label=<<b>D1</b> B1FIRST, WPLOW (bm_d1, 0.59-c)<br/>-&gt; S3 source DAY / B1 / STK / WPG<br/>below WP_SOC_MIN 21 %: the discharge leaves the WP to the grid<br/><font point-size="9">make check: 192 combinations; details wp_matrix.pdf</font>>, fillcolor="#dbe8fb"];
 	gates [label=<<b>S0 caps</b> per stack: chg_cap, dis_cap (charger, BMS CCL / DCL)>];
 	d2 [label=<<b>D2 mode</b> per stack, first match:<br/>BMS_MISSING &gt; FORCE &gt; STALE &gt; LADESPERRE &gt; CHARGE / FULL &gt; PROT &gt; CHARGING &gt; DIS<br/>FORCE = SoC &lt; SOC_FORCE or LOW (DCL 0 / cell &lt; 3.05 V; ends at SOC_MIN_RELEASE, 0.55-c)<br/><font point-size="9">make check: 16128 combinations per stack (84 bit sets x 12 global x 16 states) -&gt; mode:<br/>BMS_MISSING 8064 · FORCE 5760 · STALE 1152 · LADESPERRE 288 · CHARGE 216 ·<br/>PROT 216 · CHARGING 180 · DIS 180 · FULL 72</font>>, fillcolor="#dbe8fb"];
 	lead [label=<<b>D-lead</b>: stack more than SOC_BALANCE_ON ahead>, fillcolor="#dbe8fb"];
@@ -30,9 +18,8 @@ digraph control {
 	subgraph cluster_charge {
 		label=<<b>charge path</b>>; style="rounded,filled"; fillcolor="#eef4fb"; color="#4a7fb5"; fontsize=12;
 		d4 [label=<<b>D4 forecast export cap</b> (May-Aug)<br/>while the forecast expects export &gt; 18 kW:<br/>wait below the cap, charge only above it>, fillcolor="#dbe8fb"];
-		d6 [label=<<b>D6 WPPV</b> (0.56-c)<br/>WP on PV, row covers all, day, no D4 cap:<br/>chg_ref += min(WP_PV_CHG_SHARE 50 % x WP, WP_PV_GRID_MAX 2 kW)<br/>on surplus &gt; 200 W, held while &ge; 0<br/><font point-size="9">make check: 384 combinations</font>>, fillcolor="#dbe8fb"];
 		cforce [label=<<b>FORCE</b>: min(500 W, chg_cap)<br/>any time of day, no TOU window>, fillcolor="#eaf6e6"];
-		camount [label=<<b>charge amount</b><br/>max(0, own + KP x (z2 + Bat1_eff - target))<br/>chg_ref = z2 (+ D6 share); target + EXPORT_CAP while D4 cap;<br/>&le; sum of chg_cap>, fillcolor="#eaf6e6"];
+		camount [label=<<b>charge amount</b><br/>max(0, own + KP x (PCC + Bat1_eff - target))<br/>target + EXPORT_CAP while D4 cap;<br/>&le; sum of chg_cap>, fillcolor="#eaf6e6"];
 		csplit [label=<<b>alloc_levels</b> up to chg_cap<br/>stack by stack in CHARGE_PRIORITY,<br/>lead stack last>, fillcolor="#eaf6e6"];
 		camount -> csplit;
 	}
@@ -41,20 +28,15 @@ digraph control {
 		label=<<b>discharge branch</b>>; style="rounded,filled"; fillcolor="#eef7ec"; color="#5a9e4b"; fontsize=12;
 		src [label=<<b>BM_SRC_RULE[src]</b><br/>STK: Bat1 signed, +trickle, idle 0<br/>else: Bat1 charge only, idle 20 W>, fillcolor="#eaf6e6"];
 		d3 [label=<<b>D3</b> PROP / IDLE>, fillcolor="#dbe8fb"];
-		damount [label=<<b>discharge amount</b><br/>min(PROP ? deficit : idle, W_MAX, WP_CAP)>, fillcolor="#eaf6e6"];
+		damount [label=<<b>discharge amount</b><br/>min(PROP ? deficit : idle, W_MAX)<br/>house = PCC + own charge (+ WP while WPLOW)>, fillcolor="#eaf6e6"];
 		dsplit [label=<<b>alloc_levels</b> up to dis_cap<br/>lead stack first, else<br/>every stack the same share>, fillcolor="#eaf6e6"];
 		src -> d3 -> damount -> dsplit;
 	}
 
 	d5 [label=<<b>D5</b> PCC &gt; 20 kW for 2 min (at once &gt; 23 kW) -&gt; DO4 pulse<br/>pv_relay/DO4 (FoxESS shedding)<br/>first: R290 boost + air conditioning at &ge; 18 kW<br/>grid offline: AC-out feed &gt; 5 kW / unit for 10 s -&gt; at once>, fillcolor="#ffd09a"];
-	out [label=<<b>setpoints</b> per phase -&gt; Multis (+ charge / - discharge)<br/>rule text: mode WP: SRC: split [CAP] [WPPV] [CCL / DCL / WPCAP]<br/>-&gt; state.json -&gt; victron2db.py -&gt; wagodb.pv_victron.bm_l1..3_rule (every minute)>, fillcolor="#ffffff"];
+	out [label=<<b>setpoints</b> per phase -&gt; Multis (+ charge / - discharge)<br/>rule text: mode SRC: split [CAP] [CCL / DCL] [WPLOW]<br/>-&gt; state.json -&gt; victron2db.py -&gt; wagodb.pv_victron.bm_l1..3_rule (every minute)>, fillcolor="#ffffff"];
 
 	in -> d1 -> d2;
-	d1 -> wpm [style=dashed, arrowhead=none, label=" wp_row"];
-	d1 -> d6 [style=dashed, label=" covers all"];
-	d4 -> d6 [style=dashed, color="#d9822b", label=" no cap"];
-	d6 -> camount [color="#d9822b", penwidth=2, label=" + share"];
-	d6 -> d2 [style=dashed, label=" surplus"];
 	in -> gates;
 	gates -> d2 [style=dashed, label=" SoC"];
 	d2 -> lead -> mode;
@@ -65,7 +47,7 @@ digraph control {
 	d4 -> d2 [color="#d9822b", label=" block"];
 	in -> d4 [style=dashed];
 	in -> d5 [style=dashed, color="#d9822b"];
-	d1 -> src [style=dashed, label=" src, z2"];
+	d1 -> src [style=dashed, label=" src, WPLOW"];
 	cforce -> out;
 	csplit -> out;
 	dsplit -> out;

@@ -13,7 +13,6 @@ Environment (service/run exports /data/batmonitor/env):
   BATMONITOR_LIVE=1            writes the setpoints; without: dry run (log + state file only)
   BATMONITOR_LADESPERRE=0      switches the summer charge block off
   BATMONITOR_PI=1              arms the PI prototype (else it only logs to the PI shadow CSV)
-  BATMONITOR_FORECAST=0        ignores batmonitor/forecast
   BATMONITOR_<PARAM>=value     overrides a parameter (bm_logic.BM_PARAMS, logged at start as "params")
   BATMONITOR_MQTT_HOST         default 192.168.178.218
   BATMONITOR_STATE_FILE        default /data/batmonitor/state.json (another path for a dry test run)
@@ -33,7 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bm_logic as L  # noqa: E402
 import bm_parse  # noqa: E402
 
-VERSION = "0.58-py"
+VERSION = "0.59-py"
 INVERTER_TOPIC = "inverter/power_grid_exchange/json"
 R290_TOPIC = "r290/heatpump/all"
 AUSSEN_TOPIC = "aussen/temp"
@@ -76,7 +75,6 @@ class Batmonitor:
         self.cfg = L.Cfg()
         self.cfg.ladesperre = int(os.environ.get("BATMONITOR_LADESPERRE", "1") == "1")
         self.cfg.pi_armed = int(os.environ.get("BATMONITOR_PI") == "1")
-        self.cfg.forecast = int(os.environ.get("BATMONITOR_FORECAST", "1") == "1")
         self.state_file = os.environ.get("BATMONITOR_STATE_FILE") or "/data/batmonitor/state.json"
         self.pi_shadow_file = os.environ.get("BATMONITOR_PI_SHADOW_FILE") or "/data/batmonitor/pi_shadow.csv"
         self.host = os.environ.get("BATMONITOR_MQTT_HOST") or "192.168.178.218"
@@ -348,10 +346,9 @@ class Batmonitor:
                            "peak_today": st.peak_today},
             "season": "winter" if o.season == L.BM_WINTER else "transition" if o.season == L.BM_TRANSITION else "summer",
             "season_source": "measured" if o.season_measured else "months",
-            "forecast_rule": {"active": o.fc_active, "bad": o.fc_bad, "target_soc": o.fc_target,
-                              "min_soc": o.fc_min_soc},
             "bat1_first": o.bat1_first,
-            "chain": {"wp": o.wp_why, "src": o.src_why, "wp_pv_w": c_round(o.wp_pv_w)},
+            "chain": {"src": o.src_why},
+            "wp_low": o.wp_low,
             "pi": {"armed": self.cfg.pi_armed, "y_w": c_round(o.pi.y), "e_w": c_round(o.pi.e),
                    "applied_w": c_round(o.pi.applied), "u_w": c_round(o.pi.u),
                    "sp": {L.BM_PH[p]: o.pi.sp[p] for p in range(L.NPH)}},
@@ -455,7 +452,7 @@ class Batmonitor:
                 eta.append("%s full %s" % (bank.name, time.strftime("%H:%M", time.localtime(full)) if full else "-"))
             line = "  ".join("%s %+d W (%s)" % (L.BM_PH[p], o.sp[p], o.why[p]) for p in range(L.NPH))
             log("%spcc %s W wp %.0f W bat1 %.0f W pv %s W -> %s | %s | PI%s u %+.0f W" % (
-                "" if self.live else "DRY ", "%.0f" % i.pcc if i.have_pcc else "None", o.wp_eff, i.bat1,
+                "" if self.live else "DRY ", "%.0f" % i.pcc if i.have_pcc else "None", i.wp, i.bat1,
                 "%.0f" % i.pv if i.have_pv else "None", line, "  ".join(eta),
                 "" if self.cfg.pi_armed else " shadow", o.pi.u))
             self.last_rules = rules

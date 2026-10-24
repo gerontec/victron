@@ -4,7 +4,7 @@ bm_logic.py - the batmonitor control logic in Python, a 1:1 port of c/bm_logic.c
 One cycle = bm_step(cfg, inp, st) -> Out. Pure: no D-Bus, MQTT, clock or files; batmonitor.py collects the inputs and
 writes the outputs. The names, stages and tables are the ones of the C file, so both can be read side by side:
 
-    inputs -> D1 (forecast, Sofar first; S2 heat pump part, S3 source) -> S0 caps -> D2 mode per stack
+    inputs -> D1 (Sofar first, S3 source, WP_SOC_MIN) -> S0 caps -> D2 mode per stack
            -> D-lead -> mode matrix BM_MODE_RULE -> charge path (D4 charge block, FORCE, charge amount, split)
                                                 -> discharge branch (BM_SRC_RULE, D3, discharge amount, split)
            -> D5 DO4 pulse -> PI shadow
@@ -37,10 +37,9 @@ CHARGING_TH = 200.0
 NIGHT_PV_TH = 100.0
 SUMMER_FROM, SUMMER_TO = 5, 9
 STALE_SECONDS = 180.0
-WP_MAX_AGE = 150.0             # s, older: no Z2 correction, WP_CAP as before
+WP_MAX_AGE = 150.0             # s, older: the heat pump counts as off (B1FIRST, WPLOW)
 WP_ON_TH = 300.0               # W: heat pump counts as running (no night floor)
 SEASON_MAX_AGE = 2 * 86400     # s: older batmonitor/season -> month rule
-FC_MAX_AGE = 3 * 3600          # s: older batmonitor/forecast is ignored
 BAT1_FIRST_HYST = 2.0          # %: Sofar-first back on above BAT1_SOC_MIN + this
 WP_SOC_HYST = 2.0              # %: heat pump support back from WP_SOC_MIN + this (0.54-c)
 BAT1_CHARGE_FACTOR = 0.5
@@ -164,8 +163,6 @@ BM_PARAMS = [
     Param("DISCHARGE_MAX_PHASE", "discharge_max_phase", 3800, 0, 5000, "W", "discharge per phase"),
     Param("CHARGE_MAX_PHASE", "charge_max_phase", 4900, 0, 5000, "W", "PV charge per phase (5000 VA peaks)"),
     Param("CHARGER_CAP_PHASE", "charger_cap_phase", 4200, 0, 5000, "W", "real charger capacity per phase, priority fill"),
-    Param("WP_BAT_MAX_TRANSITION", "wp_bat_max_transition", 1900, 0, 10000, "W", "heat pump share from the batteries in the transition"),
-    Param("WP_CAP", "wp_cap", 1000, 0, 10000, "W", "total discharge with R290 running if em0/power is stale (winter)"),
     Param("SOC_MIN", "soc_min", 5, 0, 50, "%", "no discharge below"),
     Param("SOC_MIN_RELEASE", "soc_min_release", 7, 0, 60, "%", "discharge again from"),
     Param("SOC_FORCE", "soc_force", 3, 0, 30, "%", "grid force charge below"),
@@ -177,13 +174,10 @@ BM_PARAMS = [
     Param("SOC_BALANCE_ON", "soc_balance_on", 3, 0.5, 50, "%", "SoC difference that starts balancing"),
     Param("SOC_BALANCE_OFF", "soc_balance_off", 1, 0, 50, "%", "balancing ends below"),
     Param("SOYO_TARGET", "soyo_target", 0, -500, 500, "W", "PCC target (+ = export)"),
-    Param("FC_HYST", "fc_hyst", 2, 0, 20, "%", "forecast rule back on above target + this"),
     Param("SOFAR_TRICKLE", "sofar_trickle", 30, 0, 500, "W", "night: stacks give this much more than the house needs"),
     Param("CHARGER_A", "charger_a", 70, 0, 70, "A", "MultiPlus-II charger current per unit (DC), ceiling = this x BMS voltage"),
     Param("CHARGE_EFF", "charge_eff", 0.93, 0.7, 1.0, "", "AC-in per DC at the charger limit"),
     Param("BAT1_SOC_MIN", "bat1_soc_min", 5, 0, 101, "%", "night: the Sofar Bat1 serves house + heat pump first down to this SoC; 101 = off"),
-    Param("FC_BAD_TARGET", "fc_bad_target", 100, 0, 101, "%", "bad forecast when target_soc >= this; 101 = off"),
-    Param("WP_BAT_SHARE_BAD", "wp_bat_share_bad", 50, 0, 100, "%", "bad forecast: the stacks cover at most this share of the heat pump"),
     Param("EXPORT_CAP", "export_cap", 18000, 0, 30000, "W", "summer peak window: while the forecast expects export above this, the stacks charge only the export above it (0 = off)"),
     Param("HOUSE_EST", "house_est", 1000, 0, 5000, "W", "summer peak window: house load assumed when turning the PV forecast into export"),
     Param("DO4_GRACE_S", "do4_grace_s", 120, 0, 600, "s", "DO4 (FoxESS shedding) only after the PCC stays above 20 kW this long: R290 boost and air conditioning first"),
@@ -191,9 +185,7 @@ BM_PARAMS = [
     Param("ACOUT_FEED_MAX_W", "acout_feed_max_w", 5000, 0, 10000, "W", "grid offline: DO4 when PV feeds more than this into one MultiPlus AC-out (factor 1.0 rule, 5000 VA; 0 = off)"),
     Param("ACOUT_FEED_S", "acout_feed_s", 10, 0, 120, "s", "... for this long"),
     Param("CHARGER_DC_W", "charger_dc_w", 3600, 500, 5000, "W", "full_at forecast: DC at the BMS per MultiPlus at its limit"),
-    Param("WP_SOC_MIN", "wp_soc_min", 15, 0, 100, "%", "no heat pump support from the stacks while the lowest stack SoC is below this, also with a good forecast; back from + 2 % (0 = off)"),
-    Param("WP_PV_CHG_SHARE", "wp_pv_chg_share", 50, 0, 100, "%", "heat pump on PV (summer, good forecast): the stacks charge this share of its power on top, the PCC buys it (0 = off)"),
-    Param("WP_PV_GRID_MAX", "wp_pv_grid_max", 2000, 0, 10000, "W", "... at most this much (0 = off)"),
+    Param("WP_SOC_MIN", "wp_soc_min", 21, 0, 100, "%", "discharge: no heat pump support from the stacks while the lowest stack SoC is below this, back from + 2 % (0 = off; charging stays on the PCC)"),
 ]
 
 
@@ -203,7 +195,6 @@ class Cfg:
     def __init__(self):
         self.ladesperre = 1    # BATMONITOR_LADESPERRE (default on)
         self.pi_armed = 0      # BATMONITOR_PI=1: the PI replaces the soyo amounts
-        self.forecast = 1      # BATMONITOR_FORECAST (default on)
         for p in BM_PARAMS:
             setattr(self, p.field, float(p.default))
 
@@ -274,10 +265,8 @@ class State:
     soyo_prop_prev: int = 0
     ls_yday: int = -1
     peak_today: int = 0                         # PCC > 20 kW seen today (display)
-    fc_active: int = 0
     bat1_first: int = 0
     wp_low: int = 0                             # lowest stack below WP_SOC_MIN: no heat pump support (0.54-c)
-    wp_pv: int = 0                              # WPPV latched: heat pump on PV, the stacks charge a share of it (0.56-c)
     do4_last: float = 0.0
     do4_over_since: float = 0.0                 # monotonic s since the PCC is above PCC_PEAK_TH, 0 = not (0.50-c)
     acout_over_since: float = 0.0               # monotonic s since an AC-out feeds above ACOUT_FEED_MAX_W (0.51-c)
@@ -315,17 +304,11 @@ class Out:
     sp: list = field(default_factory=lambda: [0] * NPH)          # W per phase, + = charge
     why: list = field(default_factory=lambda: [""] * NPH)        # rule text per phase
     surplus: float = 0.0
-    wp_eff: float = 0.0
-    wp_pv_w: float = 0.0                        # D6 WPPV: W added to the charge point, 0 = rule off (0.56-c)
     season: int = 0
     season_measured: int = 0
-    fc_active: int = 0
-    fc_bad: int = 0
     bat1_first: int = 0
-    wp_why: str = ""
+    wp_low: int = 0                             # WP_SOC_MIN latch: the discharge leaves the heat pump to the grid
     src_why: str = ""
-    fc_target: float = 0.0
-    fc_min_soc: float = 0.0
     ls: Ls = field(default_factory=Ls)
     pi: Pi = field(default_factory=Pi)
     lead_event: int = 0
@@ -506,55 +489,11 @@ def int_caps(caps):
 
 # ---- decision layer: pure functions of predicate bits + state (enumerated by make check in C) ----------------
 
-BM_WP_NA, BM_WP_OFF, BM_WP_FC, BM_WP_FCBAD, BM_WP_Z2, BM_WP_T1900, BM_WP_ALL, BM_WP_LOWSOC = range(8)
-BM_WP_NAME = ["NA", "OFF", "FC", "FCBAD", "Z2", "T1900", "ALL", "LOWSOC"]
-BM_SRC_DAY, BM_SRC_B1, BM_SRC_STK, BM_SRC_B1W = range(4)
-BM_SRC_NAME = ["DAY", "B1", "STK", "B1W"]
+BM_SRC_DAY, BM_SRC_B1, BM_SRC_STK, BM_SRC_WPG = range(4)
+BM_SRC_NAME = ["DAY", "B1", "STK", "WPG"]
 (BM_M_BMS_MISSING, BM_M_FORCE, BM_M_STALE, BM_M_LADESPERRE, BM_M_CHARGE, BM_M_FULL, BM_M_PROT, BM_M_CHARGING,
  BM_M_DIS) = range(9)
 BM_MODE_NAME = ["BMS_MISSING", "FORCE", "STALE", "LADESPERRE", "CHARGE", "FULL", "PROT", "CHARGING", "DIS"]
-# heat pump matrix (0.57-c, 0.58-c two number columns): D1 picks one row, first match LOWSOC > FC > FCBAD > WINTER >
-# TRANS > SUMMER; the amounts read only its columns: reason (rule text WP:<..>, TRANS shows T1900 above
-# WP_BAT_MAX_TRANSITION), share % and cap W: the stacks cover min(share % x WP, cap), the rest goes to the charge point
-# z2. A cell is a number or the name of a Cfg attribute (a parameter). D6 WPPV only where a row covers all of it
-BM_WR_LOWSOC, BM_WR_FC, BM_WR_FCBAD, BM_WR_WINTER, BM_WR_TRANS, BM_WR_SUMMER = range(6)
-
-
-@dataclass(frozen=True)
-class WpRule:
-    name: str
-    reason: int
-    share: object       # % (number or parameter name)
-    cap: object         # W, math.inf = none (number or parameter name)
-
-
-BM_WP_RULE = [
-    WpRule("LOWSOC", BM_WP_LOWSOC, 0, math.inf),                      # stack < WP_SOC_MIN (0.54-c)
-    WpRule("FC", BM_WP_FC, 100, math.inf),                            # good forecast: as summer (0.24)
-    WpRule("FCBAD", BM_WP_FCBAD, "wp_bat_share_bad", math.inf),       # bad forecast: 50 % (0.37-c)
-    WpRule("WINTER", BM_WP_Z2, 0, math.inf),                          # Z2: the grid pays (0.19)
-    WpRule("TRANS", BM_WP_ALL, 100, "wp_bat_max_transition"),         # 1900 W (0.22)
-    WpRule("SUMMER", BM_WP_ALL, 100, math.inf),
-]
-
-
-def bm_wp_val(cfg, x):
-    return getattr(cfg, x) if isinstance(x, str) else x
-
-
-def bm_wp_share(cfg, wp_row, wp):
-    """the one formula: min(share % x WP, cap); share 100 % is the heat pump itself"""
-    r = BM_WP_RULE[wp_row]
-    share = bm_wp_val(cfg, r.share)
-    return fmin(wp if share >= 100 else wp * share / 100.0, bm_wp_val(cfg, r.cap))
-
-
-def bm_wp_covers_all(cfg, wp_row):
-    """share >= 100 % and no cap: D6 WPPV allowed"""
-    r = BM_WP_RULE[wp_row]
-    return int(bm_wp_val(cfg, r.share) >= 100 and math.isinf(bm_wp_val(cfg, r.cap)))
-
-
 @dataclass(frozen=True)
 class SrcRule:
     b1_signed: int      # 1: a Bat1 discharge is house load the stacks take over; 0: only its charge counts
@@ -568,7 +507,7 @@ BM_SRC_RULE = {
     BM_SRC_DAY: SrcRule(0, 0, B_DAY_IDLE, 0),
     BM_SRC_B1:  SrcRule(0, 0, B_DAY_IDLE, 0),
     BM_SRC_STK: SrcRule(1, 1, 0, 1),
-    BM_SRC_B1W: SrcRule(0, 0, B_DAY_IDLE, 0),
+    BM_SRC_WPG: SrcRule(0, 0, B_DAY_IDLE, 0),       # WPLOW at night, heat pump running: the grid pays it
 }
 
 BM_A_ZERO, BM_A_FORCE, BM_A_CHARGE, BM_A_DISCHARGE = range(4)
@@ -596,52 +535,27 @@ BM_MODE_RULE = {
 }
 
 
-def bm_d1(b, fc_active, bat1_first, wp_low):
-    """D1. Forecast: while the lowest stack is above the SoC the next day's PV refills, the stacks serve the heat pump
-    as in summer (on above target + FC_HYST, off below target). Bad forecast: the stacks cover at most WP_BAT_SHARE_BAD %
-    of the heat pump (S2). Sofar first: Bat1 above BAT1_SOC_MIN and the heat pump running -> the Sofar delivers first
-    at night (S3). Low SoC (0.54-c): the lowest stack below WP_SOC_MIN (back from + WP_SOC_HYST) -> the stacks cover
-    none of the heat pump (row LOWSOC). b: dict of the bm_d1_in bits. Returns a dict like bm_d1_out."""
+def bm_d1(b, bat1_first, wp_low):
+    """D1. Sofar first (0.38-c): Bat1 above BAT1_SOC_MIN and the heat pump running -> the Sofar delivers first at night
+    (S3 B1); else at night the stacks take the Sofar over (night floor, S3 STK). 0.59-c (user 2026-10-24): PCC near 0
+    always - the forecast rule, the heat pump matrix, WPPV and WP_CAP are gone. Kept (user): below WP_SOC_MIN (back from
+    + WP_SOC_HYST) the discharge leaves the heat pump to the grid; at night with it running no night floor (S3 WPG).
+    b: dict of the bm_d1_in bits. Returns a dict like bm_d1_out."""
     o = {}
     if b["wp_soc_low_on"]:
         wp_low = 1
     elif b["wp_soc_low_off"]:
         wp_low = 0
     o["wp_low"] = wp_low
-    o["fc_ok"] = b["fc_fresh"] and b["fc_minsoc_ok"]
-    if not o["fc_ok"]:
-        fc_active = 0
-    elif not fc_active and b["fc_above_on"]:
-        fc_active = 1
-    elif fc_active and b["fc_below_off"]:
-        fc_active = 0
-    o["fc_active"] = fc_active
-    o["fc_bad"] = int(bool(b["fc_fresh"] and not fc_active and b["fc_target_bad"]))
-    o["season_wp"] = BM_SUMMER if fc_active else b["season"]
-    o["winter"] = o["season_wp"] != BM_SUMMER       # transition counts as winter for the WP_CAP fallback
     if not b["b1_above_min"]:
         bat1_first = 0
     elif not bat1_first and b["b1_ge_release"]:
         bat1_first = 1
     o["bat1_first"] = bat1_first
     o["b1_first"] = int(bool(bat1_first and b["wp_on"]))
-    # S3 reads the measured season, not season_wp (0.45-c): the forecast only widens the heat pump scope (S2)
-    o["night_floor"] = bool(b["night"] and not o["b1_first"] and (b["season"] != BM_WINTER or not b["wp_on"]))
-    o["wp_fc_capped"] = bool(not wp_low and o["fc_bad"] and b["wp_pos"] and b["fc_share_lt_share"])
-    o["wp_cap_armed"] = bool(not b["wp_fresh"] and o["winter"] and b["wp_running"])
-    o["wp_row"] = (BM_WR_LOWSOC if wp_low else BM_WR_FC if fc_active else BM_WR_FCBAD if o["wp_fc_capped"]
-                   else BM_WR_WINTER if o["season_wp"] == BM_WINTER else BM_WR_TRANS if o["season_wp"] == BM_TRANSITION
-                   else BM_WR_SUMMER)
-    if not b["wp_fresh"]:
-        o["wp_reason"] = BM_WP_NA
-    elif not b["wp_on"]:
-        o["wp_reason"] = BM_WP_OFF
-    elif o["wp_row"] == BM_WR_TRANS and b["wp_gt_trans"]:
-        o["wp_reason"] = BM_WP_T1900
-    else:
-        o["wp_reason"] = BM_WP_RULE[o["wp_row"]].reason
+    o["night_floor"] = bool(b["night"] and not o["b1_first"] and not (wp_low and b["wp_on"]))
     o["src_reason"] = (BM_SRC_DAY if not b["night"] else BM_SRC_B1 if o["b1_first"]
-                       else BM_SRC_STK if o["night_floor"] else BM_SRC_B1W)
+                       else BM_SRC_STK if o["night_floor"] else BM_SRC_WPG)
     return o
 
 
@@ -728,46 +642,31 @@ def bm_d5(pcc_over, grace_over, pcc_hard, lockout_over, acout_over):
     return int(bool(((pcc_over and (grace_over or pcc_hard)) or acout_over) and lockout_over))
 
 
-def bm_d6(b, wp_pv):
-    """D6 WPPV (0.56-c, user 2026-10-24): heat pump on PV -> the stacks charge WP_PV_CHG_SHARE % of it on top, the PCC
-    buys it (at most WP_PV_GRID_MAX). Only rows covering all of the WP (SUMMER, FC), by day, heat pump on, PCC fresh, no D4 cap. On above
-    PCC_SURPLUS_TH, held while the surplus without the share is >= 0. Returns the next wp_pv"""
-    gate = (b["enabled"] and b["row_pv"] and b["day"] and b["wp_on"] and b["pcc_fresh"] and b["no_cap"])
-    return int(bool(gate and (b["surplus_gt_on"] or (wp_pv and b["surplus_ge_hold"]))))
-
-
 # ---- the rule chain: one function per stage, run in this order by bm_step ------------------------------------
-# Rule text per phase: <S1/S4 mode> [WP:<S2>] [SRC:<S3>] [<S5 split>] [<limit>], see bm_logic.c
+# Rule text per phase: <S1/S4 mode> [SRC:<S3>] [<S5 split>] [<limit>], see bm_logic.c
 
 class Chain:
     """what one cycle derives and the later stages read (struct chain)"""
 
     def __init__(self):
-        self.stale = self.wp_running = self.wp_fresh = self.wp_on = self.night = 0
-        self.season_wp = self.winter = 0
+        self.stale = self.wp_on = self.night = 0
         self.own_charge = self.own_discharge = self.multis = 0.0
-        self.wp_eff = 0.0
-        self.wp_fc_capped = 0
-        self.z2 = 0.0
         self.b1_first = self.night_floor = 0
-        self.src = self.wp_row = 0
-        self.wp_cap_armed = 0
+        self.src = 0
+        self.wp_grid = 0.0                      # WPLOW: heat pump W the discharge leaves to the grid
         self.bat1_eff = self.chg_ref = self.surplus = 0.0
         self.block = self.charge_mode = 0
         self.cap_active = 0                     # D4: charge only the export above EXPORT_CAP
-        self.wp_pv_w = 0.0                      # D6 WPPV: W added to the charge point (0.56-c)
         self.discharge = [0] * NPH
         self.charge = [0] * NPH
         self.n_dis = self.n_chg = 0
 
 
 def chain_inputs(inp, out, c):
-    """derived facts: data age, heat pump running, season, night, own AC-in"""
+    """derived facts: data age, heat pump on, season (display), night, own AC-in"""
     month, _, _ = localtime(inp.t)
     c.stale = inp.inv_time == 0 or inp.now - inp.inv_time > STALE_SECONDS
-    c.wp_running = inp.r290_time > 0 and inp.now - inp.r290_time < STALE_SECONDS and inp.r290_hz > 0
-    c.wp_fresh = inp.wp_time > 0 and inp.now - inp.wp_time < WP_MAX_AGE
-    c.wp_on = c.wp_fresh and inp.wp >= WP_ON_TH
+    c.wp_on = inp.wp_time > 0 and inp.now - inp.wp_time < WP_MAX_AGE and inp.wp >= WP_ON_TH
     c.night = bool(inp.have_pv and inp.pv < NIGHT_PV_TH)
     # season from the measured energy (season.py), the months only when that is missing or older than 2 days
     season_ok = bool(inp.season and inp.t - inp.season_ts < SEASON_MAX_AGE)
@@ -792,52 +691,25 @@ def lowest_soc(inp):
     return m
 
 
-def d1_bits(cfg, inp, out, c):
-    """the predicates of bm_d1 from the inputs"""
+def chain_d1(cfg, inp, st, out, c):
+    """S3 source and WP_SOC_MIN"""
     min_soc = lowest_soc(inp)
-    base_share = (0.0 if out.season == BM_WINTER
-                  else fmin(inp.wp, cfg.wp_bat_max_transition) if out.season == BM_TRANSITION else inp.wp)
-    return {
-        "season": out.season,
+    o = bm_d1({
         "night": c.night,
-        "wp_fresh": c.wp_fresh,
-        "wp_pos": c.wp_fresh and inp.wp > 0,
         "wp_on": c.wp_on,
-        "wp_running": c.wp_running,
-        "wp_gt_trans": inp.wp > cfg.wp_bat_max_transition,
-        "fc_share_lt_share": inp.wp * cfg.wp_bat_share_bad / 100.0 < base_share,
-        "fc_fresh": bool(cfg.forecast and inp.fc_target >= 0 and inp.fc_ts > 0 and inp.t - inp.fc_ts < FC_MAX_AGE),
-        "fc_minsoc_ok": min_soc <= 100,
-        "fc_above_on": min_soc > inp.fc_target + cfg.fc_hyst,
-        "fc_below_off": min_soc < inp.fc_target,
-        "fc_target_bad": inp.fc_target >= cfg.fc_bad_target,
         "b1_above_min": bool(inp.have_soc_bat1 and inp.soc_bat1 > cfg.bat1_soc_min),
         "b1_ge_release": inp.soc_bat1 >= cfg.bat1_soc_min + BAT1_FIRST_HYST,
         "wp_soc_low_on": min_soc < cfg.wp_soc_min,
         "wp_soc_low_off": min_soc >= cfg.wp_soc_min + WP_SOC_HYST,
-    }
-
-
-def chain_d1(cfg, inp, st, out, c):
-    """forecast, S3 source, S2 scope; then z2 = PCC + the heat pump part the stacks must NOT cover"""
-    o = bm_d1(d1_bits(cfg, inp, out, c), st.fc_active, st.bat1_first, st.wp_low)
-    st.fc_active = o["fc_active"]
+    }, st.bat1_first, st.wp_low)
     st.bat1_first = o["bat1_first"]
     st.wp_low = o["wp_low"]
-    out.fc_active = o["fc_active"]
-    out.fc_target = inp.fc_target if o["fc_ok"] else -1
-    out.fc_min_soc = lowest_soc(inp)
-    out.fc_bad = o["fc_bad"]
+    out.wp_low = o["wp_low"]
     out.bat1_first = o["b1_first"]
-    c.season_wp, c.winter = o["season_wp"], o["winter"]
-    c.b1_first, c.night_floor = o["b1_first"], o["night_floor"]
-    c.src, c.wp_row = o["src_reason"], o["wp_row"]
-    c.wp_fc_capped, c.wp_cap_armed = o["wp_fc_capped"], o["wp_cap_armed"]
-    out.wp_why = BM_WP_NAME[o["wp_reason"]]
+    c.b1_first, c.night_floor, c.src = o["b1_first"], o["night_floor"], o["src_reason"]
     out.src_why = BM_SRC_NAME[o["src_reason"]]
-    if c.wp_fresh and inp.wp > 0:
-        c.wp_eff = inp.wp - bm_wp_share(cfg, c.wp_row, inp.wp)
-    c.z2 = inp.pcc + c.wp_eff
+    if o["wp_low"] and inp.wp_time > 0 and inp.now - inp.wp_time < WP_MAX_AGE and inp.wp > 0:
+        c.wp_grid = inp.wp
 
 
 def chain_gates(cfg, inp, st, out):
@@ -938,25 +810,10 @@ def chain_mode(cfg, inp, st, out, c):
     # a Sofar Bat1 discharge is no surplus; its charging counts with BAT1_CHARGE_FACTOR. The own discharge is
     # subtracted: else the night floor, partly going into the Sofar battery, counted as PV surplus
     c.bat1_eff = inp.bat1 if inp.bat1 < 0 else inp.bat1 * BAT1_CHARGE_FACTOR
-    # charging on the Z2 point too (0.30-c): in winter the PV goes into the stacks, the heat pump takes the Z1 grid
-    c.chg_ref = c.z2 if inp.have_pcc else 0.0
+    # the charge point is the real PCC (0.59-c; 0.30-c..0.58-c: PCC + the heat pump part the grid should pay)
+    c.chg_ref = inp.pcc if inp.have_pcc else 0.0
     c.surplus = c.chg_ref + c.bat1_eff + c.own_charge - c.own_discharge
     c.block = ladesperre(cfg, inp, st, out, c.stale, c.multis, c.surplus, c)
-    # D6 WPPV (0.56-c): the heat pump runs on PV -> charge a share of it on top, the PCC buys it
-    st.wp_pv = bm_d6({
-        "enabled": cfg.wp_pv_chg_share > 0 and cfg.wp_pv_grid_max > 0,
-        "row_pv": bm_wp_covers_all(cfg, c.wp_row),
-        "day": not c.night,
-        "wp_on": c.wp_on,
-        "pcc_fresh": inp.have_pcc and not c.stale,
-        "no_cap": not c.cap_active,
-        "surplus_gt_on": c.surplus > PCC_SURPLUS_TH,
-        "surplus_ge_hold": c.surplus >= 0,
-    }, st.wp_pv)
-    if st.wp_pv:
-        c.wp_pv_w = fmin(inp.wp * cfg.wp_pv_chg_share / 100.0, cfg.wp_pv_grid_max)
-        c.chg_ref += c.wp_pv_w
-        c.surplus += c.wp_pv_w
     d = {
         "stale": c.stale,
         "block": c.block,
@@ -989,7 +846,7 @@ def chain_mode(cfg, inp, st, out, c):
             elif r.why == BM_W_POWER:
                 out.why[p] = "%s(%.0fW)" % (name, inp.power[b])
             elif r.why == BM_W_CHAIN:
-                out.why[p] = "%s WP:%s SRC:%s" % (name, out.wp_why, out.src_why)
+                out.why[p] = "%s SRC:%s" % (name, out.src_why)
             if mode[b] == BM_M_FORCE and st.low[b]:
                 out.why[p] += " LOW"
 
@@ -1002,21 +859,17 @@ def chain_lead(cfg, st, out):
         out.lead_diff = abs(diff)
 
 
-def dis_amount(prop, deficit, idle_w, w_max, wp_cap_armed, wp_cap):
-    """S4 amount, the one formula: w = min(PROP ? max(deficit, 0) : idle_w, W_MAX, WP_CAP while armed).
-    Returns (w, capped by WP_CAP)"""
+def dis_amount(prop, deficit, idle_w, w_max):
+    """S4 amount, the one formula: w = min(PROP ? max(deficit, 0) : idle_w, W_MAX)"""
     w = (deficit if deficit > 0 else 0) if prop else idle_w
-    if w > w_max:
-        w = w_max
-    capped = bool(wp_cap_armed and w > wp_cap)
-    return (wp_cap if capped else w), capped
+    return w_max if w > w_max else w
 
 
 def chain_discharge(cfg, inp, st, out, c):
     """S4 + S5 discharge: deficit = what the Multis already give (minus what goes into the Sofar battery) + the import
     still left; the own charging (force charge of the other stack) is no house load"""
     r = BM_SRC_RULE[c.src]
-    house = watt(c.z2 + c.own_charge)
+    house = watt(inp.pcc + c.wp_grid + c.own_charge)
     bat1 = watt(inp.bat1)
     # b1_signed (night floor): the Sofar Bat1 counts signed, so both regulators do not fight and the PCC stays near 0
     b1_def = bat1 if r.b1_signed else (bat1 if bat1 > 0 else 0)
@@ -1025,17 +878,17 @@ def chain_discharge(cfg, inp, st, out, c):
     deficit = watt(c.own_discharge) - b1_def - c_div(KP_PM * (house - target), 1000)
     prop = bm_d3(1, house < PCC_IMPORT_TH, deficit > SOYO_HOLD_TH, r.prop_hold, st.soyo_prop_prev)
     st.soyo_prop_prev = prop
-    w, wp_cap = dis_amount(prop, deficit, r.idle_w, int(cfg.w_max), c.wp_cap_armed, int(cfg.wp_cap))
-    rule = "%s WP:%s SRC:%s" % ("PROP" if prop else "IDLE", out.wp_why, out.src_why)
+    w = dis_amount(prop, deficit, r.idle_w, int(cfg.w_max))
+    rule = "%s SRC:%s" % ("PROP" if prop else "IDLE", out.src_why)
     alloc_discharge(st.lead, w, c.discharge, int_caps(out.dis_cap), rule, out.sp, out.why)
-    if wp_cap:
+    if c.wp_grid > 0:
         for p in range(NPH):
             if c.discharge[p]:
-                out.why[p] = (out.why[p] + " WPCAP")[:WHY_LEN - 1]
+                out.why[p] = (out.why[p] + " WPLOW")[:WHY_LEN - 1]
 
 
 def chain_charge(cfg, st, out, c):
-    """S4 + S5 charge: own charge + KP x (Z2 surplus incl. the Sofar charge share), at most the phase ceilings, never
+    """S4 + S5 charge: own charge + KP x (PCC surplus incl. the Sofar charge share), at most the phase ceilings, never
     below 0"""
     cap = int_caps(out.chg_cap)
     cap_sum = sum(cap[p] for p in range(NPH) if c.charge[p])
@@ -1050,8 +903,6 @@ def chain_charge(cfg, st, out, c):
             out.why[p] = (out.why[p] + (" BAL" if st.lead >= 0 else " EQ"))[:WHY_LEN - 1]
             if c.cap_active:
                 out.why[p] = (out.why[p] + " CAP")[:WHY_LEN - 1]
-            if c.wp_pv_w > 0:
-                out.why[p] = (out.why[p] + " WPPV")[:WHY_LEN - 1]
 
 
 def chain_pi(cfg, inp, st, out, c):
@@ -1074,20 +925,20 @@ def chain_pi(cfg, inp, st, out, c):
         if pi_ok[p]:
             applied += st.setpoints[p]
     b1 = inp.bat1 * BAT1_CHARGE_FACTOR if inp.bat1 > 0 else (inp.bat1 if (applied > 0 or c.night_floor) else 0.0)
-    y = (c.z2 if inp.have_pcc else 0.0) + b1
+    y = (inp.pcc if inp.have_pcc else 0.0) + b1
     e = y - PI_TARGET
     if abs(e) < PI_DEADBAND:
         e = 0
     dt = fmin(fmax(inp.now - st.pi_t_prev, 1.0), 30.0) if st.pi_t_prev > 0 else CYCLE_SECONDS
     u = applied + (PI_KP * (e - st.pi_e_prev) if st.pi_t_prev > 0 else 0) + PI_KI * dt * e
-    dis_cap = cfg.wp_cap if (not c.wp_fresh and c.winter and c.wp_running) else cfg.w_max
+    dis_cap = cfg.w_max
     u_max = 0.0
     u_min = -dis_cap if n_pidis else 0
     for p in range(NPH):
         if pi_chg[p]:
             u_max += out.chg_cap[p]
     if applied <= 0 and u > 0:               # crossing into charging: never more than the surplus at the Z2 point
-        u = fmax(0.0, fmin(u, (c.z2 if inp.have_pcc else 0.0) + b1 - PI_TARGET))
+        u = fmax(0.0, fmin(u, (inp.pcc if inp.have_pcc else 0.0) + b1 - PI_TARGET))
     u = fmax(u_min, fmin(u_max, u))
     st.pi_e_prev = e
     st.pi_t_prev = inp.now
@@ -1154,8 +1005,6 @@ def bm_step(cfg, inp, st):
         st.do4_last = inp.now
     chain_pi(cfg, inp, st, out, c)
     out.surplus = c.surplus
-    out.wp_eff = c.wp_eff
-    out.wp_pv_w = c.wp_pv_w
     st.setpoints = list(out.sp)
     return out
 
