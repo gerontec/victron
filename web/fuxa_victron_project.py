@@ -119,9 +119,29 @@ def weather_icon(cx, cy):
 
 
 weather_icon(762, 29)
-box(1250, 14, 180, 28, '#16263a', 6)
-text(1340, 33, '◂ Heat pump', 13, 'bold', 'middle', '#93c5fd')
-click_tile(1250, 14, 180, 28, 'nav_ww', {'action': 'onOpenTab', 'actparam': 'https://fuxa.heissa.de/', 'actoptions': {'newTab': False}})
+def dyn_text(x, y, s, key, ranges, size=13, weight='bold', anchor='start', fill=FG):
+    """text whose fill follows the value of key (FUXA shapes ranges set fill on the node; 'none' hides it)"""
+    sid = nid()
+    svg.append(f'<text id="{sid}" x="{x}" y="{y}" font-size="{size}" font-weight="{weight}" text-anchor="{anchor}" '
+               f'font-family="sans-serif" fill="{fill}" stroke-width="0" xml:space="preserve">{escape(s, quote=False)}</text>')
+    items[sid] = {'id': sid, 'type': 'svg-ext-shapes-text', 'name': key, 'label': 'Shapes',
+                  'property': {'variableId': 't_' + key, 'variableSrc': DEV, 'events': [], 'actions': [], 'ranges': ranges}}
+
+
+def on_off(off, on):
+    """fill ranges for a 0/1 value: off below 0.5, on from 0.5"""
+    return [{'type': 2, 'min': -1, 'max': 0.5, 'color': off, 'stroke': ''}, {'type': 2, 'min': 0.5, 'max': 2, 'color': on, 'stroke': ''}]
+
+
+# heat pump tile (user 2026-10-25): text red and a flame + ON while the heat pump runs (wp_on, SDM72D >= 300 W), else OFF
+WP_BLUE, WP_RED = '#93c5fd', '#ef4444'
+box(1220, 14, 210, 28, '#16263a', 6)
+dyn_text(1232, 33, '◂ Heat pump', 'wp_on', on_off(WP_BLUE, WP_RED), fill=WP_BLUE)
+shape('path', {'d': 'M1374,38 c-5,0 -7,-4 -6,-8 c1,-3 3,-4 3,-8 c3,2 4,4 4,6 c1,-1 2,-3 2,-5 c3,3 4,6 4,9 c0,4 -3,6 -7,6 Z',
+               'fill': 'none', 'stroke': 'none'}, 'wp_on', on_off('none', WP_RED))
+dyn_text(1388, 33, 'ON', 'wp_on', on_off('none', WP_RED), fill='none')
+dyn_text(1388, 33, 'OFF', 'wp_on', on_off(MUTED, 'none'), fill=MUTED)
+click_tile(1220, 14, 210, 28, 'nav_ww', {'action': 'onOpenTab', 'actparam': 'https://fuxa.heissa.de/', 'actoptions': {'newTab': False}})
 
 # ---- Pi 4 / Venus (far left) --------------------------------------------------------------------
 box(30, 60, 310, 150, '#1e1b3a')

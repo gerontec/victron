@@ -14,11 +14,15 @@ $self = 'https://heissa.de/web1/victron_api.php';
 $errors = [];
 $r = null;
 $ext = [];
+$wp = null;
 try {
     $pdo = new PDO("mysql:host=$db_host;dbname=$db_name;charset=utf8mb4", $db_user, $db_pass, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
     $r = $pdo->query("SELECT * FROM pv_victron ORDER BY ts DESC LIMIT 1")->fetch(PDO::FETCH_ASSOC) ?: null;
     $ext = $pdo->query("SELECT MIN(soc) AS s2_min, MAX(soc) AS s2_max, MIN(a_soc) AS s1_min, MAX(a_soc) AS s1_max
         FROM pv_victron WHERE ts >= NOW() - INTERVAL 24 HOUR")->fetch(PDO::FETCH_ASSOC) ?: [];
+    // heat pump: SDM72D meter of the R290, last reading of the last 3 min (batmonitor: running from 300 W)
+    $wp = $pdo->query("SELECT total_active_power AS w FROM sdm72d WHERE timestamp >= NOW() - INTERVAL 3 MINUTE
+        ORDER BY timestamp DESC LIMIT 1")->fetch(PDO::FETCH_ASSOC) ?: null;
 } catch (Exception $e) {
     $errors[] = 'database: ' . $e->getMessage();
 }
@@ -157,6 +161,9 @@ if ($r) {
         's2_discharge_blocked' => v(isset($r['bm_s2_prot']) ? (bool)$r['bm_s2_prot'] : null, 'bool', 'Stack2 discharge protection (SoC < 5 % until 7 %)', 'pv_victron.bm_s2_prot'),
         's1_forced_charge' => v(isset($r['bm_s1_force']) ? (bool)$r['bm_s1_force'] : null, 'bool', 'Stack1 forced grid charge (SoC < 3 % until 5 %)', 'pv_victron.bm_s1_force'),
         's2_forced_charge' => v(isset($r['bm_s2_force']) ? (bool)$r['bm_s2_force'] : null, 'bool', 'Stack2 forced grid charge (SoC < 3 % until 5 %)', 'pv_victron.bm_s2_force'),
+        // heat pump
+        'wp_w' => v($wp ? round($wp['w']) : null, 'W', 'Heat pump (R290) electrical power, SDM72D, last reading of the last 3 min; null = no reading', 'sdm72d.total_active_power'),
+        'wp_on' => v($wp ? ($wp['w'] >= 300 ? 1 : 0) : null, '', '1 = heat pump running (>= 300 W, the batmonitor threshold: winter heat pump rule WPMAX), 0 = off', 'derived: wp_w'),
         // weather
         'sun_h_tomorrow' => v($sun_h, 'h', 'Forecast sunshine hours tomorrow: OWM 3 h slots, daylight part * (1 - cloudiness)', 'weather_data.cloudiness'),
         'sunny_tomorrow' => v($sun_h === null ? null : ($sun_h > 3 ? 1 : 0), '', '1 = more than 3 h of sun forecast for tomorrow (sun icon), 0 = cloud icon', 'derived: sun_h_tomorrow'),
