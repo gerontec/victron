@@ -116,7 +116,10 @@ ALTER TABLE pv_victron
   ADD COLUMN bm_d1_id TINYINT UNSIGNED NULL COMMENT 'batmonitor D1 cell (0.60-c): bit0 night, 1 wp_on, 2 Bat1 > BAT1_SOC_MIN, 3 Bat1 >= release, 4 stack < WP_SOC_MIN, 5 stack >= WP_SOC_MIN+2, 6 bat1_first, 7 wp_low (state before the cycle)' AFTER bm_surplus_w,
   ALGORITHM=INSTANT;
 
--- 2026-10-25: batmonitor 0.61-c redefines the bm_d1_id bits (WP_SOC_MIN gone, winter heat pump rule); comment only
+-- 2026-10-25: batmonitor 0.61-c redefines the bm_d1_id bits (WP_SOC_MIN gone, winter heat pump rule). The 0.60-c
+-- values (2026-10-24 13:28 .. 2026-10-25 09:24, 1197 rows) were set to NULL (user): a D1 evaluation only makes sense
+-- within one matrix version, so every non-NULL bm_d1_id is a 0.61-c cell.
+UPDATE pv_victron SET bm_d1_id = NULL WHERE ts < '2026-10-25 09:25:00' AND ts >= '2026-10-24 00:00:00' AND bm_d1_id IS NOT NULL;
 ALTER TABLE pv_victron
-  MODIFY COLUMN bm_d1_id TINYINT UNSIGNED NULL COMMENT 'batmonitor D1 cell: bit0 night, 1 wp_on, 2 Bat1 > BAT1_SOC_MIN, 3 Bat1 >= release, 4 winter Oct-Mar, 5 Bat1 discharging (< -100 W), 6 bat1_first (state before the cycle); 0.60-c until 2026-10-25: 4 stack < WP_SOC_MIN, 5 stack >= WP_SOC_MIN+2, 7 wp_low',
+  MODIFY COLUMN bm_d1_id TINYINT UNSIGNED NULL COMMENT 'batmonitor D1 cell, matrix 0.61-c from 2026-10-25 09:25 (older rows NULL): bit0 night, 1 wp_on, 2 Bat1 > BAT1_SOC_MIN, 3 Bat1 >= release, 4 winter Oct-Mar, 5 Bat1 discharging (< -100 W), 6 bat1_first (state before the cycle)',
   ALGORITHM=INSTANT;
