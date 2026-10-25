@@ -27,7 +27,9 @@
 #define WP_ON_TH 300.0          /* W: heat pump counts as running (no night floor) */
 #define SEASON_MAX_AGE (2 * 86400)   /* s: older batmonitor/season -> month rule */
 #define BAT1_FIRST_HYST 2.0          /* %: Sofar-first back on above BAT1_SOC_MIN + this */
-#define WP_SOC_HYST 2.0              /* %: heat pump support back from WP_SOC_MIN + this (0.54-c) */
+#define WINTER_FROM 10               /* winter half-year October..March: the heat pump rule (0.61-c) */
+#define WINTER_TO 3
+#define B1_DIS_TH 100.0              /* W: the Sofar Bat1 counts as discharging below -this (0.61-c) */
 /* batmonitor */
 #define BAT1_CHARGE_FACTOR 0.5
 /* charge block, 1:1 from waveshare/fox2db_logic.h (fox2db v2.9) and sofar_waveshare.yaml */
@@ -103,7 +105,7 @@ const struct bm_param BM_PARAMS[] = {
 	{"DO4_HARD_W",            P(do4_hard_w),                23000,   20000,   40000,   "W", "DO4 at once above this PCC export"},
 	{"ACOUT_FEED_MAX_W",      P(acout_feed_max_w),          5000,    0,       10000,   "W", "grid offline: DO4 when PV feeds more than this into one MultiPlus AC-out (factor 1.0 rule, 5000 VA; 0 = off)"},
 	{"ACOUT_FEED_S",          P(acout_feed_s),              10,      0,       120,     "s", "... for this long"},
-	{"WP_SOC_MIN",            P(wp_soc_min),                21,      0,       100,     "%", "discharge: no heat pump support from the stacks while the lowest stack SoC is below this, back from + 2 % (0 = off; charging stays on the PCC)"},
+	{"WP_WINTER_W",           P(wp_winter_w),               1000,    0,       12000,   "W", "winter half-year (October..March), heat pump running: the stacks discharge nothing while the Sofar Bat1 discharges, else at most this (heat pump off: PCC near 0)"},
 	{"CHARGER_DC_W",          P(charger_dc_w),              3600,    500,     5000,    "W", "full_at forecast: DC at the BMS per MultiPlus at its limit (measured 2026-10-09: ~3.6 kW, 65-67 A, flat over 53.6-54.6 V)"},
 };
 const int BM_NPARAMS = sizeof(BM_PARAMS) / sizeof(BM_PARAMS[0]);
@@ -444,16 +446,16 @@ const char *BM_MODE_NAME[BM_M_N] = {"BMS_MISSING", "FORCE", "STALE", "LADESPERRE
 /* D1. Sofar first (0.38-c): Bat1 above BAT1_SOC_MIN (on again from + BAT1_FIRST_HYST) and the heat pump running ->
    the Sofar delivers first at night (S3 B1); else at night the stacks take the Sofar over (night floor, S3 STK).
    0.59-c (user 2026-10-24): PCC near 0 always - the forecast rule, the heat pump matrix, WPPV and WP_CAP are gone, the
-   heat pump is house load the stacks cover like any other. Kept (user): below WP_SOC_MIN (back from + WP_SOC_HYST) the
-   stacks leave the heat pump to the grid while discharging; at night with the heat pump running that is SRC WPG (no
-   night floor, as B1W before) */
+   heat pump is house load the stacks cover like any other. 0.61-c (user 2026-10-25): WP_SOC_MIN is gone; in the winter
+   half-year with the heat pump running the stacks give 0 W while the Sofar Bat1 discharges, else at most WP_WINTER_W
+   (wp_cap); at night that is SRC B1 resp. WPG (no night floor) */
 /* the discharge matrix rows (bm_logic.h): only the night floor (SRC STK) takes the Sofar battery over */
 const struct bm_src_rule BM_SRC_RULE[BM_SRC_N] = {
 	/*               b1_signed trickle idle_w      prop_hold */
 	[BM_SRC_DAY] = {0,        0,      B_DAY_IDLE, 0},
 	[BM_SRC_B1]  = {0,        0,      B_DAY_IDLE, 0},
 	[BM_SRC_STK] = {1,        1,      0,          1},
-	[BM_SRC_WPG] = {0,        0,      B_DAY_IDLE, 0},   /* WPLOW at night, heat pump running: the grid pays it */
+	[BM_SRC_WPG] = {0,        0,      B_DAY_IDLE, 0},   /* winter night, heat pump running, no B1FIRST */
 };
 /* the mode matrix rows (bm_logic.h) */
 const struct bm_mode_rule BM_MODE_RULE[BM_M_N] = {
@@ -469,28 +471,25 @@ const struct bm_mode_rule BM_MODE_RULE[BM_M_N] = {
 	[BM_M_DIS]         = {BM_A_DISCHARGE, 1,      BM_W_NONE},
 };
 
-void bm_d1(const struct bm_d1_in *b, int bat1_first, int wp_low, struct bm_d1_out *o)
+void bm_d1(const struct bm_d1_in *b, int bat1_first, struct bm_d1_out *o)
 {
 	memset(o, 0, sizeof(*o));
-	if (b->wp_soc_low_on)
-		wp_low = 1;
-	else if (b->wp_soc_low_off)
-		wp_low = 0;
-	o->wp_low = wp_low;
+	int wp_win = b->winter && b->wp_on;
 	if (!b->b1_above_min)
 		bat1_first = 0;
 	else if (!bat1_first && b->b1_ge_release)
 		bat1_first = 1;
 	o->bat1_first = bat1_first;
 	o->b1_first = bat1_first && b->wp_on;
-	o->night_floor = b->night && !o->b1_first && !(wp_low && b->wp_on);
+	o->night_floor = b->night && !o->b1_first && !wp_win;
 	o->src_reason = !b->night ? BM_SRC_DAY : o->b1_first ? BM_SRC_B1 : o->night_floor ? BM_SRC_STK : BM_SRC_WPG;
+	o->wp_cap = !wp_win ? BM_WP_NONE : b->b1_dis ? BM_WP_ZERO : BM_WP_MAX;
 }
 
-int bm_d1_id(const struct bm_d1_in *b, int bat1_first, int wp_low)
+int bm_d1_id(const struct bm_d1_in *b, int bat1_first)
 {
 	return (b->night != 0) | (b->wp_on != 0) << 1 | (b->b1_above_min != 0) << 2 | (b->b1_ge_release != 0) << 3
-		   | (b->wp_soc_low_on != 0) << 4 | (b->wp_soc_low_off != 0) << 5 | (bat1_first != 0) << 6 | (wp_low != 0) << 7;
+		   | (b->winter != 0) << 4 | (b->b1_dis != 0) << 5 | (bat1_first != 0) << 6;
 }
 
 /* D2. Per bank: SoC protection and force charge with hysteresis (only while the BMS reports), then the mode, first
@@ -597,17 +596,19 @@ int bm_d5(const struct bm_d5_in *b)
    Rule text per phase (0.42-c, one reason per stage, at most 48 characters for pv_victron.bm_lX_rule):
      <S1/S4 mode> [SRC:<S3>] [<S5 split>] [<limit>]
      mode   BMS_MISSING  FORCE(soc)  STALE  LADESPERRE(peak h)  CHARGE  FULL  PROT(soc)  CHARGING(W)  PROP  IDLE
-     SRC    DAY  STK (night floor: stacks take over the Sofar)  B1 (Sofar first, B1FIRST)  WPG (WPLOW, WP running)
+     SRC    DAY  STK (night floor: stacks take over the Sofar)  B1 (Sofar first, B1FIRST)  WPG (winter, WP running,
+            no B1FIRST)
      split  EQ (same power per stack)  BAL (lead stack alone / charged last)  SPILL (lead at its cap, rest to the
             others)  WAIT (the other stack while the lead discharges)
-     limit  CCL  DCL  WPLOW (discharge: the heat pump is left to the grid below WP_SOC_MIN)
+     limit  CCL  DCL  WPMAX(W) (discharge: winter heat pump rule, 0 W while the Sofar discharges, else WP_WINTER_W)
      PI(+u) when the PI prototype is armed */
 struct chain {
-	int stale, wp_on, night;
+	int stale, wp_on, night, winter;
 	double own_charge, own_discharge, multis;
 	int b1_first, night_floor;         /* S3 */
 	int src;                           /* the discharge matrix row: enum bm_src_reason */
-	double wp_grid;                    /* WPLOW: heat pump W the discharge leaves to the grid (0 = none) */
+	int dis_max;                       /* S4 discharge ceiling W: W_MAX, or the winter heat pump rule (0.61-c) */
+	int wp_max;                        /* that rule's ceiling W, -1 = none */
 	double bat1_eff, chg_ref, surplus;
 	int block, charge_mode;
 	int cap_active;                    /* D4: charge only the export above EXPORT_CAP */
@@ -622,6 +623,7 @@ static void chain_inputs(const struct bm_in *in, struct bm_out *out, struct chai
 	c->stale = in->inv_time == 0 || in->now - in->inv_time > STALE_SECONDS;
 	c->wp_on = in->wp_time > 0 && in->now - in->wp_time < WP_MAX_AGE && in->wp >= WP_ON_TH;
 	c->night = in->have_pv && in->pv < NIGHT_PV_TH;
+	c->winter = month >= WINTER_FROM || month <= WINTER_TO;
 	/* Winter/summer from the measured energy (season.py on .218: summer when export > 2 x heat pump over 7 days,
 	   winter below 1 x, 0.21), the months only when that is missing or older than 2 days. 0.59-c: display only */
 	int season_ok = in->season && in->t - in->season_ts < SEASON_MAX_AGE;
@@ -643,21 +645,15 @@ static void chain_inputs(const struct bm_in *in, struct bm_out *out, struct chai
 static void chain_d1(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *st, struct bm_out *out,
 					 struct chain *c)
 {
-	double min_soc = 101;
-	for (int k = 0; k < NBANK; k++)
-		if (in->bms_ok[k] && in->soc[k] < min_soc)
-			min_soc = in->soc[k];
 	struct bm_d1_in b = {c->night, c->wp_on, in->have_soc_bat1 && in->soc_bat1 > cfg->bat1_soc_min,
-						 in->soc_bat1 >= cfg->bat1_soc_min + BAT1_FIRST_HYST, min_soc < cfg->wp_soc_min,
-						 min_soc >= cfg->wp_soc_min + WP_SOC_HYST};
+						 in->soc_bat1 >= cfg->bat1_soc_min + BAT1_FIRST_HYST, c->winter, !c->stale && in->bat1 < -B1_DIS_TH};
 	struct bm_d1_out o;
-	out->d1_id = bm_d1_id(&b, st->bat1_first, st->wp_low);
-	bm_d1(&b, st->bat1_first, st->wp_low, &o);
+	out->d1_id = bm_d1_id(&b, st->bat1_first);
+	bm_d1(&b, st->bat1_first, &o);
 	st->bat1_first = o.bat1_first;
-	st->wp_low = o.wp_low;
-	out->wp_low = o.wp_low;
-	if (o.wp_low && in->wp_time > 0 && in->now - in->wp_time < WP_MAX_AGE && in->wp > 0)
-		c->wp_grid = in->wp;
+	c->wp_max = o.wp_cap == BM_WP_ZERO ? 0 : o.wp_cap == BM_WP_MAX ? (int)cfg->wp_winter_w : -1;
+	c->dis_max = c->wp_max >= 0 && c->wp_max < (int)cfg->w_max ? c->wp_max : (int)cfg->w_max;
+	out->wp_max_w = c->wp_max;
 	out->bat1_first = o.b1_first;
 	c->b1_first = o.b1_first;
 	c->night_floor = o.night_floor;
@@ -800,7 +796,7 @@ static void chain_discharge(const struct bm_cfg *cfg, const struct bm_in *in, st
 {
 	const struct bm_src_rule *r = &BM_SRC_RULE[c->src];
 	char rule[64];
-	int house = watt(in->pcc + c->wp_grid + c->own_charge), bat1 = watt(in->bat1), dcap[NPH];
+	int house = watt(in->pcc + c->own_charge), bat1 = watt(in->bat1), dcap[NPH];
 	/* b1_signed, the night floor (0.25, user 2026-10-08: PCC near 0): the Sofar Bat1 counts signed. Its discharge is
 	   house load the stacks take over, its charge is our own overshoot. pcc + bat1 is the load behind the Sofar however
 	   the Sofar splits it, so both regulators do not fight; the Sofar battery idles, the PCC stays near 0 */
@@ -811,14 +807,17 @@ static void chain_discharge(const struct bm_cfg *cfg, const struct bm_in *in, st
 	int deficit = watt(c->own_discharge) - b1_def - (int)((long)KP_PM * (house - target) / 1000);
 	struct bm_d3_in d = {1, house < PCC_IMPORT_TH, deficit > SOYO_HOLD_TH, r->prop_hold};
 	int prop = bm_d3(&d, st->soyo_prop_prev, &st->soyo_prop_prev);
-	int w = dis_amount(prop, deficit, r->idle_w, (int)cfg->w_max);
+	int w = dis_amount(prop, deficit, r->idle_w, c->dis_max);
 	snprintf(rule, sizeof(rule), "%s SRC:%s", prop ? "PROP" : "IDLE", out->src_why);
 	dis_caps(out, dcap);
 	alloc_discharge(st->lead, w, c->discharge, dcap, rule, out->sp, out->why);
-	if (c->wp_grid > 0)
+	if (c->wp_max >= 0) {
+		char tag[24];
+		snprintf(tag, sizeof(tag), " WPMAX(%d)", c->wp_max);
 		for (int p = 0; p < NPH; p++)
 			if (c->discharge[p])
-				strncat(out->why[p], " WPLOW", WHY_LEN - 1 - strlen(out->why[p]));
+				strncat(out->why[p], tag, WHY_LEN - 1 - strlen(out->why[p]));
+	}
 }
 
 /* S4 + S5 charge: own charge + KP x (PCC surplus incl. the Sofar charge share), at most the phase ceilings, never
@@ -879,8 +878,8 @@ static void chain_pi(const struct bm_cfg *cfg, const struct bm_in *in, struct bm
 		e = 0;
 	double dt = st->pi_t_prev > 0 ? fmin(fmax(in->now - st->pi_t_prev, 1.0), 30.0) : CYCLE_SECONDS;
 	double u = applied + (st->pi_t_prev > 0 ? PI_KP * (e - st->pi_e_prev) : 0) + PI_KI * dt * e;
-	double dis_cap = cfg->w_max;
-	double u_max = 0, u_min = n_pidis ? -dis_cap : 0;
+	double dis_cap = c->dis_max;          /* W_MAX or the winter heat pump rule (0.61-c) */
+	double u_max = 0, u_min = n_pidis && dis_cap > 0 ? -dis_cap : 0;   /* no -0.0 under WPMAX(0) */
 	for (int p = 0; p < NPH; p++)
 		if (pi_chg[p])
 			u_max += out->chg_cap[p];

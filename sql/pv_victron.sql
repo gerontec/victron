@@ -115,3 +115,8 @@ ALTER TABLE pv_victron
 ALTER TABLE pv_victron
   ADD COLUMN bm_d1_id TINYINT UNSIGNED NULL COMMENT 'batmonitor D1 cell (0.60-c): bit0 night, 1 wp_on, 2 Bat1 > BAT1_SOC_MIN, 3 Bat1 >= release, 4 stack < WP_SOC_MIN, 5 stack >= WP_SOC_MIN+2, 6 bat1_first, 7 wp_low (state before the cycle)' AFTER bm_surplus_w,
   ALGORITHM=INSTANT;
+
+-- 2026-10-25: batmonitor 0.61-c redefines the bm_d1_id bits (WP_SOC_MIN gone, winter heat pump rule); comment only
+ALTER TABLE pv_victron
+  MODIFY COLUMN bm_d1_id TINYINT UNSIGNED NULL COMMENT 'batmonitor D1 cell: bit0 night, 1 wp_on, 2 Bat1 > BAT1_SOC_MIN, 3 Bat1 >= release, 4 winter Oct-Mar, 5 Bat1 discharging (< -100 W), 6 bat1_first (state before the cycle); 0.60-c until 2026-10-25: 4 stack < WP_SOC_MIN, 5 stack >= WP_SOC_MIN+2, 7 wp_low',
+  ALGORITHM=INSTANT;

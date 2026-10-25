@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bm_logic as L  # noqa: E402
 import bm_parse  # noqa: E402
 
-VERSION = "0.60-py"
+VERSION = "0.61-py"
 INVERTER_TOPIC = "inverter/power_grid_exchange/json"
 R290_TOPIC = "r290/heatpump/all"
 AUSSEN_TOPIC = "aussen/temp"
@@ -348,7 +348,7 @@ class Batmonitor:
             "season_source": "measured" if o.season_measured else "months",
             "bat1_first": o.bat1_first,
             "chain": {"src": o.src_why},
-            "wp_low": o.wp_low,
+            "wp_max_w": o.wp_max_w,
             "d1_id": o.d1_id,
             "pi": {"armed": self.cfg.pi_armed, "y_w": c_round(o.pi.y), "e_w": c_round(o.pi.e),
                    "applied_w": c_round(o.pi.applied), "u_w": c_round(o.pi.u),

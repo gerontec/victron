@@ -45,7 +45,8 @@ struct bm_cfg {
 	double export_cap, house_est;   /* summer peak window (0.49-c): charge only the export above this W; house load guess */
 	double do4_grace_s, do4_hard_w; /* DO4 only after PCC > 20 kW for this long, at once above this (0.50-c) */
 	double acout_feed_max_w, acout_feed_s;   /* DO4 when PV feeds more than this into one AC-out for this long (0.51-c) */
-	double wp_soc_min;              /* discharge: no heat pump support while the lowest stack SoC is below (0.54-c) */
+	double wp_winter_w;             /* winter half-year, heat pump running: discharge at most this, only with the Sofar
+	                                   Bat1 empty (0.61-c) */
 };
 
 /* parameter table: name (env BATMONITOR_<name>), default, allowed range, unit, meaning */
@@ -112,7 +113,6 @@ struct bm_state {
 	int soyo_chg_prev, soyo_prop_prev;
 	int ls_yday, peak_today;                     /* local day of the peak window, PCC > 20 kW seen today */
 	int bat1_first;                              /* Sofar Bat1 above BAT1_SOC_MIN: it discharges first (0.38-c) */
-	int wp_low;                                  /* lowest stack below WP_SOC_MIN: no heat pump support (0.54-c) */
 	double do4_last;                             /* monotonic s of the last DO4 pulse, 0 = none (0.46-c) */
 	double do4_over_since;                       /* monotonic s since the PCC is above PCC_PEAK_TH, 0 = not (0.50-c) */
 	double acout_over_since;                     /* monotonic s since an AC-out feeds above ACOUT_FEED_MAX_W (0.51-c) */
@@ -126,7 +126,7 @@ struct bm_out {
 	double surplus;
 	int season, season_measured;                 /* BM_SUMMER/WINTER/TRANSITION used; 1 = from batmonitor/season */
 	int bat1_first;
-	int wp_low;                                  /* WP_SOC_MIN latch: the heat pump is left to the grid (discharge) */
+	int wp_max_w;                                /* winter heat pump rule (0.61-c): discharge ceiling W, -1 = none */
 	int d1_id;                                   /* bm_d1_id: the D1 cell of this cycle, 0..255 (0.60-c) */
 	char src_why[8];                             /* S3 reason (0.42-c), see the rule text in bm_logic.c */
 	struct bm_ls ls;
@@ -171,30 +171,34 @@ struct bm_mode_rule {
 };
 extern const struct bm_mode_rule BM_MODE_RULE[];
 
-/* D1: S3 source - who delivers first at night - and the one heat pump rule left. State: bat1_first, wp_low.
+/* D1: S3 source - who delivers first at night - and the one heat pump rule left. State: bat1_first.
    0.59-c (user 2026-10-24: "pcc nahe 0"): the forecast rule, the heat pump matrix (Z2 / transition cap / bad
-   forecast), WPPV and the WP_CAP fallback are gone; they all moved the PCC away from 0 on purpose (the Z2 tariff saves
-   only 8 ct/kWh, less than the ~15-20 % charge + discharge loss, and the Sofar Bat1 covered the heat pump instead of
-   the grid anyway). Kept (user): below WP_SOC_MIN the stacks no longer support the heat pump while discharging (WPLOW);
-   then no night floor while it runs (SRC WPG), else the stacks would take over the Sofar Bat1 that feeds the heat pump */
+   forecast), WPPV and the WP_CAP fallback are gone; they all moved the PCC away from 0 on purpose.
+   0.61-c (user 2026-10-25): WP_SOC_MIN is gone (supporting the 22 ct heat pump tariff and charging back from the grid at
+   30 ct loses money). Winter half-year (October..March) with the heat pump running (wp_win): the stacks give nothing
+   while the Sofar Bat1 discharges (b1_dis), else at most WP_WINTER_W; heat pump off: PCC near 0 as before. No night
+   floor with wp_win (SRC B1 resp. WPG), else the stacks would take over the Sofar Bat1 and the heat pump behind it */
+enum bm_wp_cap { BM_WP_NONE, BM_WP_ZERO, BM_WP_MAX };   /* wp_cap: no rule, 0 W, at most WP_WINTER_W */
 struct bm_d1_in {
 	int night;                  /* have_pv && pv < NIGHT_PV_TH */
 	int wp_on;                  /* em0/power younger than WP_MAX_AGE and >= WP_ON_TH */
 	int b1_above_min;           /* SOC_Bat1 present and > BAT1_SOC_MIN */
 	int b1_ge_release;          /* SOC_Bat1 >= BAT1_SOC_MIN + BAT1_FIRST_HYST */
-	int wp_soc_low_on;          /* lowest stack SoC < WP_SOC_MIN (0.54-c) */
-	int wp_soc_low_off;         /* lowest stack SoC >= WP_SOC_MIN + WP_SOC_HYST */
+	int winter;                 /* local month October..March (0.61-c) */
+	int b1_dis;                 /* fresh inverter data and Bat1 < -B1_DIS_TH: the Sofar battery discharges (0.61-c) */
 };
 struct bm_d1_out {
-	int bat1_first, wp_low;     /* next state */
+	int bat1_first;             /* next state */
 	int b1_first, night_floor;
 	int src_reason;
+	int wp_cap;                 /* enum bm_wp_cap (0.61-c) */
 };
-void bm_d1(const struct bm_d1_in *b, int bat1_first, int wp_low, struct bm_d1_out *o);
-/* D1 cell as one byte (0.60-c, user 2026-10-24): bit 0 night, 1 wp_on, 2 b1_above_min, 3 b1_ge_release,
-   4 wp_soc_low_on, 5 wp_soc_low_off (the inputs in struct order), bit 6 bat1_first, bit 7 wp_low (the state before the
-   cycle). Exactly the combination make check enumerates; written to state.json d1_id and pv_victron.bm_d1_id */
-int bm_d1_id(const struct bm_d1_in *b, int bat1_first, int wp_low);
+void bm_d1(const struct bm_d1_in *b, int bat1_first, struct bm_d1_out *o);
+/* D1 cell as one byte (0.60-c, user 2026-10-24): bit 0 night, 1 wp_on, 2 b1_above_min, 3 b1_ge_release, 4 winter,
+   5 b1_dis (the inputs in struct order; 0.54-c..0.60-c: 4/5 the WP_SOC_MIN bits), bit 6 bat1_first (the state before
+   the cycle); bit 7 is 0 since 0.61-c (was wp_low). Exactly the combination make check enumerates;
+   written to state.json d1_id and pv_victron.bm_d1_id */
+int bm_d1_id(const struct bm_d1_in *b, int bat1_first);
 
 /* D2: S0 SoC protection / force charge per bank and the S1 mode per bank. State: prot[], force[], low[], chg_prev */
 struct bm_d2_bank {

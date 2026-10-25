@@ -75,36 +75,36 @@ static void check_mode_table(void)
 static void check_d1(void)
 {
 	/* 0.59-c: only the S3 source is left (B1FIRST latch, night floor); the forecast rule and the heat pump matrix are
-	   gone, the stacks regulate on the real PCC */
-	long combos = 0, reach[BM_SRC_N] = {0};
+	   gone, the stacks regulate on the real PCC. 0.61-c: WP_SOC_MIN gone, the winter heat pump rule (wp_cap) */
+	long combos = 0, reach[BM_SRC_N] = {0}, reach_cap[3] = {0};
 	for (unsigned v = 0; v < 64; v++)
-		for (int st = 0; st < 4; st++) {
+		for (int bf = 0; bf < 2; bf++) {
 			struct bm_d1_in b = {BIT(v, 0), BIT(v, 1), BIT(v, 2), BIT(v, 3), BIT(v, 4), BIT(v, 5)};
-			if (b.wp_soc_low_on && b.wp_soc_low_off)    /* SoC < WP_SOC_MIN excludes SoC >= WP_SOC_MIN + 2 */
-				continue;
-			int bf = st & 1, wl = st >> 1;
 			struct bm_d1_out o, o2;
-			bm_d1(&b, bf, wl, &o);
+			bm_d1(&b, bf, &o);
 			combos++;
-			INV(bm_d1_id(&b, bf, wl) == (int)(v | (unsigned)st << 6), "d1_id = the enumerated cell (inputs | state << 6)");
+			INV(bm_d1_id(&b, bf) == (int)(v | (unsigned)bf << 6), "d1_id = the enumerated cell (inputs | state << 6)");
 			reach[o.src_reason]++;
+			reach_cap[o.wp_cap]++;
+			int wp_win = b.winter && b.wp_on;
 			INV(o.bat1_first == (b.b1_above_min && (bf || b.b1_ge_release)), "B1FIRST latch: on from min + hyst, off at min");
 			INV(o.b1_first == (o.bat1_first && b.wp_on), "B1FIRST acts only with the WP running");
-			INV(o.wp_low == (b.wp_soc_low_on || (wl && !b.wp_soc_low_off)), "WP_LOW latch: on below, off from + hyst");
-			INV(o.night_floor == (b.night && !o.b1_first && !(o.wp_low && b.wp_on)),
-				"night floor at night without B1FIRST, not while the grid pays the WP");
-			INV((o.src_reason == BM_SRC_WPG) == (b.night && !o.b1_first && o.wp_low && b.wp_on), "SRC WPG exactly then");
+			INV(o.wp_cap == (!wp_win ? BM_WP_NONE : b.b1_dis ? BM_WP_ZERO : BM_WP_MAX),
+				"winter + WP: 0 W while the Sofar discharges, else WP_WINTER_W; no rule otherwise");
+			INV(o.night_floor == (b.night && !o.b1_first && !wp_win),
+				"night floor at night without B1FIRST, not with the winter heat pump rule");
+			INV((o.src_reason == BM_SRC_WPG) == (b.night && !o.b1_first && wp_win), "SRC WPG exactly then");
 			INV((o.src_reason == BM_SRC_DAY) == !b.night, "SRC DAY exactly by day");
 			INV((o.src_reason == BM_SRC_B1) == (b.night && o.b1_first), "SRC B1 exactly at night with B1FIRST");
 			INV((o.src_reason == BM_SRC_STK) == o.night_floor, "SRC STK exactly with the night floor");
 			INV(BM_SRC_RULE[o.src_reason].b1_signed == o.night_floor, "Bat1 signed exactly with the night floor");
-			bm_d1(&b, o.bat1_first, o.wp_low, &o2);
-			INV(o2.bat1_first == o.bat1_first && o2.wp_low == o.wp_low && o2.src_reason == o.src_reason,
-				"D1 state fixed after one step");
+			bm_d1(&b, o.bat1_first, &o2);
+			INV(o2.bat1_first == o.bat1_first && o2.src_reason == o.src_reason, "D1 state fixed after one step");
 		}
-	printf("\nD1 source + WP_SOC_MIN: %ld consistent combinations (6 bits x 2 states):", combos);
+	printf("\nD1 source + winter heat pump rule: %ld consistent combinations (6 bits x 2 states):", combos);
 	for (int s = 0; s < BM_SRC_N; s++)
 		printf(" %s %ld", BM_SRC_NAME[s], reach[s]);
+	printf(", wp_cap none %ld zero %ld max %ld", reach_cap[0], reach_cap[1], reach_cap[2]);
 	putchar('\n');
 }
 
@@ -400,8 +400,11 @@ static void check_amounts(void)
 					INV(sp == (int)fmin(cfg.force_charge_w, out.chg_cap[p]), "force charge min(FORCE_CHARGE_W, chg_cap %.0f), "
 						"got %d", out.chg_cap[p], sp);
 				INV(!strstr(w, "WP:") && !strstr(w, "WPCAP") && !strstr(w, "WPPV"), "0.59-c: no heat pump rule, got %s", w);
+				INV(sp >= 0 || out.wp_max_w < 0 || strstr(w, "WPMAX("), "0.61-c: a discharge under the WP rule is tagged, got %s", w);
 			}
 			INV(dis_sum <= cfg.w_max + NPH, "total discharge %d <= W_MAX", dis_sum);
+			INV(out.wp_max_w < 0 || dis_sum <= out.wp_max_w + NPH, "0.61-c: winter heat pump rule caps the discharge at "
+				"%d, got %d", out.wp_max_w, dis_sum);
 		}
 	}
 	printf("\namounts: %ld random bm_step cycles, properties checked (discharge / charge only in their modes, phase and\n"

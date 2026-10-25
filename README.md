@@ -170,7 +170,7 @@ Without data for 120 s the service exits and only registers again with fresh dat
   | `SOC_FORCE` / `SOC_FORCE_RELEASE` / `FORCE_CHARGE_W` | 3 / 5 % / 500 W | grid force charge per phase (Lenggries env since 2026-10-24: `SOC_FORCE=0` = off, see below) |
   | `DCL_FORCE_A` | 1 A | LOW force charge while the BMS discharge limit is below this, no discharge (0 = off; 0.52-c) |
   | `CELL_FORCE_V` / `CELL_FORCE_RELEASE_V` | 3.00 / 3.25 V | LOW force charge while the lowest cell is below this; ends when DCL is back and the cell has reached the release value (0.52-c; since 0.55-c LOW also waits for `SOC_MIN_RELEASE`, otherwise the cell recovers within minutes under the force charge current and LOW and discharge take turns; Lenggries env since 2026-10-24: `CELL_FORCE_V=3.05`, so batmonitor stops before the 49 V ESS cut-off, where the weakest MUST cell was already at 2.997 V) |
-  | `WP_SOC_MIN` | 21 % | discharge only: no heat pump support from the stacks while the lowest stack is below this (rule text `WPLOW`, at night with the heat pump running `SRC:WPG`); back from + 2 %; 0 = off; charging stays on the PCC (0.54-c, since 0.59-c default 21 %) |
+  | `WP_WINTER_W` | 1000 W | winter half-year (October..March) with the heat pump running (>= 300 W): the stacks discharge 0 W while the Sofar Bat1 discharges (< -100 W), else at most this; rule text `WPMAX(W)`, state.json `wp_max_w` (-1 = not active); heat pump off or summer half-year: PCC near 0; charging unchanged (0.61-c, replaces `WP_SOC_MIN`) |
   | `SOC_BALANCE_ON` / `SOC_BALANCE_OFF` | 3 / 1 % | SoC balancing between the stacks |
   | `SOYO_TARGET` | 0 W | PCC target |
   | `B_NIGHT` | 936 W | night base discharge |
@@ -178,8 +178,9 @@ Without data for 120 s the service exits and only registers again with fresh dat
   house load like any other. Removed: the Z2 rules (winter: the grid pays the heat pump, 0.19 / 0.30-c), the transition
   cap (1900 W), the forecast rule with its bad-forecast cap, WPPV and the `WP_CAP` fallback. Reason: the heat pump tariff
   (22 ct) saves only 8 ct/kWh against the house (30 ct), less than the ~15-20 % charge + discharge loss of storing PV
-  while the grid pays the heat pump, and the Sofar Bat1 covered the heat pump instead of the grid anyway. Kept:
-  `WP_SOC_MIN` (see the table). The season (`readers/season.py`) is only shown in `state.json`.
+  while the grid pays the heat pump, and the Sofar Bat1 covered the heat pump instead of the grid anyway. 0.61-c
+  (2026-10-25): `WP_SOC_MIN` replaced by the winter heat pump rule `WP_WINTER_W` (see the table): supporting the 22 ct
+  heat pump and charging back from the grid at 30 ct loses money. The season (`readers/season.py`) is only shown in `state.json`.
 - Several days without sun (Lenggries settings, 2026-10-24): there is no time-based force charge (the TOU window was
   removed on 2026-10-11), so the stacks are simply parked:
   1. The stacks discharge down to `SOC_MIN` (8 %) and then stop; from there the house runs on the grid.

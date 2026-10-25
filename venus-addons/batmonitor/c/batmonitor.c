@@ -48,6 +48,11 @@
  *     (0.56-c) and the WP_CAP fallback are removed. The Z2 tariff saves only 8 ct/kWh (22 ct heat pump vs 30 ct house),
  *     less than the ~15-20 % charge + discharge loss of storing PV while the grid pays the heat pump, and the Sofar Bat1
  *     covered the heat pump instead of the grid anyway. The heat pump is house load the stacks cover like any other.
+ *   - winter heat pump rule (0.61-c, user 2026-10-25: "wir unterstuetzen die wp mit 22ct/kwh und laden dann aus dem netz
+ *     fuer 30ct/kwh"; "wenn sofar entlaedt und wp laeuft, dann 0W"): WP_SOC_MIN is removed. October..March with the
+ *     heat pump running the stacks give 0 W while the Sofar Bat1 discharges (Bat1 < -100 W) and at most WP_WINTER_W
+ *     (1000 W) otherwise; heat pump off: PCC near 0 as before. Rule text WPMAX(W), state.json wp_max_w (-1 = rule not
+ *     active). Charging and FORCE / LOW are unchanged.
  *   - full_at with the measured charger power (0.31-c, user 2026-10-09): each MultiPlus delivers ~3.6 kW DC at the BMS
  *     at its limit (65-67 A, flat over 53.6-54.6 V; AC-in ~4040 W), not 70 A x U: CHARGER_DC_W caps the forecast.
  *   - full_at (0.32-c, user 2026-10-09): the forecast splits the power each step like alloc_charge and lets the SoC lead
@@ -82,7 +87,7 @@
 #include "bm_logic.h"
 #include "bm_parse.h"
 
-#define VERSION "0.60-c"
+#define VERSION "0.61-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
@@ -571,7 +576,7 @@ static void write_state(const int *sp, char why[][WHY_LEN], double surplus)
 							: "summer");
 	cJSON_AddStringToObject(js, "season_source", o_.season_measured ? "measured" : "months");
 	cJSON_AddNumberToObject(js, "bat1_first", o_.bat1_first);
-	cJSON_AddNumberToObject(js, "wp_low", o_.wp_low);          /* WP_SOC_MIN: the discharge leaves the WP to the grid */
+	cJSON_AddNumberToObject(js, "wp_max_w", o_.wp_max_w);      /* 0.61-c: winter heat pump rule, discharge ceiling W, -1 none */
 	cJSON_AddNumberToObject(js, "d1_id", o_.d1_id);            /* 0.60-c: the D1 cell, bit mask see bm_d1_id */
 	o = cJSON_AddObjectToObject(js, "chain");                  /* 0.42-c: S3 reason, as in the rule text */
 	cJSON_AddStringToObject(o, "src", o_.src_why);

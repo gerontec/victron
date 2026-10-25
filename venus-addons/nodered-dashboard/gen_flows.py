@@ -47,7 +47,7 @@ const g = k => (v[k] === undefined ? null : v[k]);
 const STATE = {0:'Off',1:'Low power',2:'Fault',3:'Bulk',4:'Absorption',5:'Float',6:'Storage',7:'Equalize',8:'Passthru',
 	9:'Inverting',10:'Power assist',11:'Power supply',244:'Sustain',252:'External control'};
 const MODE = {1:'Charger only',2:'Inverter only',3:'On',4:'Off'};
-const D1 = ['night','wp_on','Bat1>min','Bat1>=release','stack<WP_SOC_MIN','stack>=WP_SOC_MIN+2','bat1_first','wp_low'];
+const D1 = ['night','wp_on','Bat1>min','Bat1>=release','winter (Oct-Mar)','Bat1 discharging','bat1_first','-'];
 const sum = ks => ks.reduce((s, k) => (g(k) === null ? s : s + g(k)), 0);
 const phases = [1, 2, 3].map(p => ({
 	name: 'L' + p,
@@ -80,7 +80,7 @@ const snap = {
 	bm: { version: bm.version, season: bm.season, season_source: bm.season_source, src: (bm.chain || {}).src,
 		method: (bm.forecast || {}).method, kt: (bm.forecast || {}).kt_now, pv_rest_kwh: (bm.forecast || {}).pv_rest_kwh,
 		pv_model_w: (bm.forecast || {}).pv_model_w, d1_id: bm.d1_id, d1, balance_lead: bm.balance_lead,
-		ladesperre: (bm.ladesperre || {}).active, bat1_first: bm.bat1_first, wp_low: bm.wp_low },
+		ladesperre: (bm.ladesperre || {}).active, bat1_first: bm.bat1_first, wp_max_w: bm.wp_max_w },
 };
 // history: one point per minute, 6 h
 const h = flow.get('hist') || [];
@@ -152,7 +152,7 @@ TEMPLATE = r"""<template>
         <tr><td>Flags</td><td>
           <span class="pill" :class="d.bm.ladesperre ? 'warn' : 'off'">charge block</span>
           <span class="pill" :class="d.bm.bat1_first ? 'on' : 'off'">Bat1 first</span>
-          <span class="pill" :class="d.bm.wp_low ? 'warn' : 'off'">WP low</span>
+          <span class="pill" :class="d.bm.wp_max_w >= 0 ? 'warn' : 'off'">WP max {{ d.bm.wp_max_w >= 0 ? d.bm.wp_max_w + ' W' : '–' }}</span>
           <span class="pill" :class="d.bm.balance_lead ? 'warn' : 'off'">lead {{ d.bm.balance_lead || '–' }}</span></td></tr>
         <tr><td>state.json age</td><td :class="d.bm_age_s > 30 ? 'bad' : ''">{{ d.bm_age_s }} s</td></tr>
       </table>
