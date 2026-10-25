@@ -146,3 +146,21 @@ INSERT INTO dim_bm_matrix VALUES
   'night', 'wp_on', 'Bat1 > BAT1_SOC_MIN', 'Bat1 >= release', 'winter Oct-Mar', 'Bat1 discharging (< -100 W)', 'bat1_first', NULL,
   1, 'winter heat pump rule: WP on -> 0 W while the Sofar discharges, else WPMAX(1000)')
 ON DUPLICATE KEY UPDATE git_commit = VALUES(git_commit), valid_from = VALUES(valid_from), valid_to = VALUES(valid_to);
+
+-- 2026-10-25: the bits of each matrix version as rows: bitmask = 2^bit, so bm_d1_id = SUM(bitmask) of the set bits
+-- (e.g. 94 = 2+4+8+16+64). Decode: SELECT meaning FROM dim_bm_matrix_bit WHERE matrix_version = .. AND bm_d1_id & bitmask
+CREATE TABLE IF NOT EXISTS dim_bm_matrix_bit (
+  matrix_version VARCHAR(16) NOT NULL COMMENT 'dim_bm_matrix.matrix_version',
+  bit_no         TINYINT UNSIGNED NOT NULL COMMENT '0..7',
+  bitmask        TINYINT UNSIGNED NOT NULL COMMENT '2^bit_no, the integer value of this bit in bm_d1_id',
+  meaning        VARCHAR(40) NULL COMMENT 'NULL = unused in this version',
+  PRIMARY KEY (matrix_version, bit_no),
+  CONSTRAINT fk_bm_matrix_bit FOREIGN KEY (matrix_version) REFERENCES dim_bm_matrix (matrix_version)
+) ENGINE=InnoDB COMMENT='bits of pv_victron.bm_d1_id per D1 matrix version';
+INSERT INTO dim_bm_matrix_bit (matrix_version, bit_no, bitmask, meaning)
+SELECT m.matrix_version, b.n, 1 << b.n,
+       ELT(b.n + 1, m.bit0, m.bit1, m.bit2, m.bit3, m.bit4, m.bit5, m.bit6, m.bit7)
+FROM dim_bm_matrix m
+JOIN (SELECT 0 n UNION SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5 UNION SELECT 6
+      UNION SELECT 7) b ON 1 = 1
+ON DUPLICATE KEY UPDATE bitmask = VALUES(bitmask), meaning = VALUES(meaning);
