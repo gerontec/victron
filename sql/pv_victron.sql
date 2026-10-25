@@ -123,3 +123,26 @@ UPDATE pv_victron SET bm_d1_id = NULL WHERE ts < '2026-10-25 09:25:00' AND ts >=
 ALTER TABLE pv_victron
   MODIFY COLUMN bm_d1_id TINYINT UNSIGNED NULL COMMENT 'batmonitor D1 cell, matrix 0.61-c from 2026-10-25 09:25 (older rows NULL): bit0 night, 1 wp_on, 2 Bat1 > BAT1_SOC_MIN, 3 Bat1 >= release, 4 winter Oct-Mar, 5 Bat1 discharging (< -100 W), 6 bat1_first (state before the cycle)',
   ALGORITHM=INSTANT;
+
+-- 2026-10-25: matrix versions of bm_d1_id (one row per D1 matrix build; user: an evaluation only within one version).
+-- Join: pv_victron.ts >= valid_from AND (valid_to IS NULL OR ts < valid_to). New row on every D1 matrix change.
+CREATE TABLE IF NOT EXISTS dim_bm_matrix (
+  matrix_version VARCHAR(16) NOT NULL PRIMARY KEY COMMENT 'batmonitor build (VERSION in c/batmonitor.c)',
+  git_commit     CHAR(7) NOT NULL COMMENT 'gerontec/victron commit of that build',
+  valid_from     DATETIME NOT NULL COMMENT 'first batmonitor cycle of the build (local time, as pv_victron.ts)',
+  valid_to       DATETIME NULL COMMENT 'restart into the next build, NULL = current',
+  d1_cells       SMALLINT UNSIGNED NOT NULL COMMENT 'consistent D1 cells enumerated by make check',
+  d1_outcomes    SMALLINT UNSIGNED NOT NULL COMMENT 'distinct D1 outputs',
+  bit0 VARCHAR(40) NULL, bit1 VARCHAR(40) NULL, bit2 VARCHAR(40) NULL, bit3 VARCHAR(40) NULL,
+  bit4 VARCHAR(40) NULL, bit5 VARCHAR(40) NULL, bit6 VARCHAR(40) NULL, bit7 VARCHAR(40) NULL,
+  rows_kept      TINYINT(1) NOT NULL COMMENT '0 = its pv_victron.bm_d1_id values were set to NULL',
+  note           VARCHAR(255) NULL
+) ENGINE=InnoDB COMMENT='batmonitor D1 matrix versions for pv_victron.bm_d1_id';
+INSERT INTO dim_bm_matrix VALUES
+ ('0.60-c', '29a3b48', '2026-10-24 13:28:00', '2026-10-25 09:24:42', 192, 13,
+  'night', 'wp_on', 'Bat1 > BAT1_SOC_MIN', 'Bat1 >= release', 'stack < WP_SOC_MIN', 'stack >= WP_SOC_MIN+2', 'bat1_first', 'wp_low',
+  0, 'WP_SOC_MIN rule (WPLOW / SRC:WPG); values deleted 2026-10-25'),
+ ('0.61-c', 'c446b5f', '2026-10-25 09:24:42', NULL, 128, 14,
+  'night', 'wp_on', 'Bat1 > BAT1_SOC_MIN', 'Bat1 >= release', 'winter Oct-Mar', 'Bat1 discharging (< -100 W)', 'bat1_first', NULL,
+  1, 'winter heat pump rule: WP on -> 0 W while the Sofar discharges, else WPMAX(1000)')
+ON DUPLICATE KEY UPDATE git_commit = VALUES(git_commit), valid_from = VALUES(valid_from), valid_to = VALUES(valid_to);
