@@ -1,8 +1,8 @@
 // batmonitor 0.45-c: decision flow of one cycle (bm_step), the discharge matrix highlighted.
 // render: dot -Tpdf discharge_flow.dot -o discharge_flow.pdf   (or -Tpng)
 digraph batmonitor {
-	graph [rankdir=TB, fontname="Helvetica", fontsize=11, nodesep=0.35, ranksep=0.35, newrank=true,
-		   label="batmonitor 0.59-c: one cycle (bm_step, every 5 s)   |   blue = pure decision function (bits + state, enumerated by make check)   |   green = discharge matrix   |   [CBMC] = proved for all inputs",
+	graph [rankdir=TB, compound=true, fontname="Helvetica", fontsize=11, nodesep=0.35, ranksep=0.35, newrank=true,
+		   label="batmonitor 0.65-c: one cycle (bm_step, every 5 s)   |   max persistent decision states 36864 (0.62-c: 3072) = D1 2 x D2 128 x lead 3 x D3 2 x D4 2 x D6 4 x unit 3   |   blue = pure decision function (bits + state, enumerated by make check)   |   green = discharge matrix   |   [CBMC] = proved for all inputs",
 		   labelloc=t];
 	node [shape=box, style="rounded,filled", fillcolor="#f4f4f4", fontname="Helvetica", fontsize=10];
 	edge [fontname="Helvetica", fontsize=9];
@@ -39,12 +39,39 @@ digraph batmonitor {
 		d3 [label=<<b>D3</b> bm_d3   state: prop_prev<br/>PROP = import (&lt; -100 W) or<br/>((prop_prev or prop_hold) and deficit &gt; 20 W)>, fillcolor="#dbe8fb"];
 		amount [label=<<b>dis_amount</b>: w = min(PROP ? max(deficit, 0) : idle_w, W_MAX)<br/><font point-size="9">[CBMC h_dis_amount]</font>>, fillcolor="#ffffff"];
 		alloc [label=<<b>alloc_discharge</b> on <b>alloc_levels</b> (0.48-c: one split core for charge and discharge)<br/>lead: level 0 = lead stack (BAL), level 1 = only what its caps cut (SPILL / WAIT)<br/>no lead: one level, every stack the same share (EQ)<br/>within a level: water filling up to dis_cap<br/><font point-size="9">[CBMC h_alloc_discharge: within caps, total &le; w, lead first, equal per stack]</font>>, fillcolor="#ffffff"];
-		rule -> deficit -> d3 -> amount -> alloc;
+		subgraph cluster_one {
+			label=<<b>D6</b> bm_d6 + S5a single_phase (0.63-c / 0.65-c): one MultiPlus while the grid is there   <font point-size="9">[make check: 96 combinations (5 bits x 4 states), 14 one unit, 4 states reachable]</font>>; style="rounded,filled"; fillcolor="#dbe8fb"; color="#c99a2e"; fontsize=10;
+			why1 [shape=plain, label=<<font point-size="9">why: a MP2 loses ~30-40 W fixed + poor efficiency at low power; pv_victron 18.-26.10.2026:<br/>discharge &lt; 2 kW total lost 14 %, 2-8 kW 4-5 %, &gt; 80 % of the minutes &lt; 2 kW.<br/>Grid there: the meter nets the phases -&gt; one unit feeds, the others STBY (unbalanced on purpose).<br/>Off-grid (emergency power): every phase carries its own load -&gt; all units feed synchronously.</font>>];
+			sm [shape=plain, label=<
+				<table border="0" cellborder="1" cellspacing="0" cellpadding="3" bgcolor="#ffffff">
+				<tr><td colspan="5"><b>state</b> single_all, single_over_since   (W = SINGLE_DIS_W 3000, H = SINGLE_DIS_HYST_W 500, T = SINGLE_DIS_UP_S 60 s)</td></tr>
+				<tr><td><b>grid_ok</b></td><td><b>W &gt; 0</b></td><td><b>amount w</b></td><td><b>next state</b></td><td><b>split</b></td></tr>
+				<tr><td>0</td><td>-</td><td>-</td><td>unchanged</td><td bgcolor="#cfe8c6">ALL (synchronous, off-grid)</td></tr>
+				<tr><td>1</td><td>0</td><td>-</td><td>unchanged</td><td bgcolor="#cfe8c6">ALL (= 0.62-c)</td></tr>
+				<tr><td>1</td><td>1</td><td>w &lt; W - H</td><td>ONE, over 0</td><td bgcolor="#fde9c8">1PH</td></tr>
+				<tr><td>1</td><td>1</td><td>W - H &le; w &le; W</td><td>kept, over 0</td><td>1PH if ONE, ALL if ALL</td></tr>
+				<tr><td>1</td><td>1</td><td>w &gt; W, &lt; T s</td><td>kept, over runs</td><td bgcolor="#fde9c8">1PH if ONE (up to dis_cap)</td></tr>
+				<tr><td>1</td><td>1</td><td>w &gt; W, &ge; T s</td><td>ALL</td><td bgcolor="#cfe8c6">ALL</td></tr>
+				<tr><td colspan="4">1PH but w &gt; dis_cap of that phase (3800 W / BMS DCL)</td><td bgcolor="#cfe8c6">ALL this cycle</td></tr>
+				</table>>];
+			states [shape=plain, label=<
+				<table border="0" cellborder="1" cellspacing="0" cellpadding="3" bgcolor="#ffffff">
+				<tr><td bgcolor="#fde9c8"><b>ONE</b><br/>single_all 0<br/>over 0</td><td>-- w &gt; W --&gt;<br/>&lt;-- w &le; W --</td><td bgcolor="#fde9c8"><b>OVER</b><br/>single_all 0<br/>over_since set</td><td>-- T s --&gt;</td><td bgcolor="#cfe8c6"><b>ALL</b><br/>single_all 1</td></tr>
+				<tr><td colspan="5">ALL -- w &lt; W - H --&gt; ONE     (ALL with W - H &le; w stays ALL; ALL + over while w &gt; W)</td></tr>
+				<tr><td colspan="5"><font point-size="9">invariants (make check): one unit only with grid + W on; off-grid all phases, state untouched;<br/>all phases only after T s above W; back only below W - H; fixed point after one step (no flapping)</font></td></tr>
+				</table>>];
+			pick [label=<<b>which unit</b> (state single_ph)<br/>lead stack (D-lead) -&gt; its first phase<br/>else the kept one while its SoC &ge; other - SOC_BALANCE_OFF<br/>else the fuller stack (equal SoC: Stack1)<br/>Stack1 -&gt; L1, Stack2 -&gt; L2 (first discharging phase)<br/>rule tags: <b>1PH</b> (feeds w) / <b>STBY</b> (0 W)>, fillcolor="#ffffff"];
+			why1 -> sm [style=invis];
+			sm -> states -> pick [style=invis];
+		}
+		rule -> deficit -> d3 -> amount;
+		amount -> sm [lhead=cluster_one];
+		pick -> alloc [label=" ALL"];
 	}
 
 	chg [label=<<b>charge</b> (chain_charge)<br/>want = max(0, own_charge + KP x surplus)<br/>alloc_charge: CHARGE_PRIORITY, lead stack last, up to chg_cap<br/><font point-size="9">[CBMC h_charge]</font>>];
 
-	out [label=<<b>setpoints</b> per phase -&gt; Multis (ESS AcPowerSetpoint)<br/>rule text: &lt;mode&gt; SRC:&lt;src&gt; &lt;split&gt; [CCL/DCL] [WPLOW]<br/><font point-size="9">[CBMC h_discharge: whole discharge path]</font>>, fillcolor="#ffffff"];
+	out [label=<<b>setpoints</b> per phase -&gt; Multis (ESS AcPowerSetpoint)<br/>rule text: &lt;mode&gt; SRC:&lt;src&gt; &lt;split: EQ/BAL/SPILL/WAIT/1PH/STBY&gt; [CCL/DCL] [WPLOW]<br/><font point-size="9">[CBMC h_discharge: whole discharge path]</font>>, fillcolor="#ffffff"];
 	pi [label="PI prototype (shadow, not armed)", fillcolor="#eeeeee", fontcolor="#777777", style="rounded,filled,dashed"];
 
 	in -> d1;
@@ -63,6 +90,8 @@ digraph batmonitor {
 	gates -> alloc [style=dashed, label=" dis_cap"];
 	lead -> alloc [style=dashed, label=" lead"];
 	alloc -> out;
+	pick -> out [label=" 1PH / STBY", color="#c99a2e", fontcolor="#8a6716"];
+	in -> sm [style=dashed, label=" grid_ok (vebus ActiveIn)"];
 	chg -> out;
 	other -> out;
 	out -> pi [style=dashed, arrowhead=none];

@@ -3,7 +3,7 @@
 // render: dot -Tpdf control_flow.dot -o control_flow.pdf   (or -Tpng)
 digraph control {
 	graph [rankdir=TB, fontname="Helvetica", fontsize=11, nodesep=0.5, ranksep=0.4, newrank=true,
-		   label="batmonitor 0.59-c: one cycle every 5 s   |   blue = decision (bits + state, make check)   |   green = matrix / amount   |   details: charge_flow.pdf, discharge_flow.pdf",
+		   label="batmonitor 0.65-c: one cycle every 5 s   |   max decision states 36864 (0.62-c: 3072)   |   blue = decision (bits + state, make check)   |   green = matrix / amount   |   details: charge_flow.pdf, discharge_flow.pdf",
 		   labelloc=t];
 	node [shape=box, style="rounded,filled", fillcolor="#f4f4f4", fontname="Helvetica", fontsize=10];
 	edge [fontname="Helvetica", fontsize=9];
@@ -29,7 +29,7 @@ digraph control {
 		src [label=<<b>BM_SRC_RULE[src]</b><br/>STK: Bat1 signed, +trickle, idle 0<br/>else: Bat1 charge only, idle 20 W>, fillcolor="#eaf6e6"];
 		d3 [label=<<b>D3</b> PROP / IDLE>, fillcolor="#dbe8fb"];
 		damount [label=<<b>discharge amount</b><br/>min(PROP ? deficit : idle, W_MAX)<br/>house = PCC + own charge (+ WP while WPLOW)>, fillcolor="#eaf6e6"];
-		dsplit [label=<<b>alloc_levels</b> up to dis_cap<br/>lead stack first, else<br/>every stack the same share>, fillcolor="#eaf6e6"];
+		dsplit [label=<<b>D6 single_phase</b> (0.63-c): grid there and w &le; 3000 W<br/>(or above for &lt; 60 s) -&gt; one unit (1PH, others STBY);<br/>else / off-grid: <b>alloc_levels</b> up to dis_cap,<br/>lead stack first, else every stack the same share>, fillcolor="#eaf6e6"];
 		src -> d3 -> damount -> dsplit;
 	}
 

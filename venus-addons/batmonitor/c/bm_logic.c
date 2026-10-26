@@ -598,6 +598,27 @@ int bm_d5(const struct bm_d5_in *b)
 	return ((b->pcc_over && (b->grace_over || b->pcc_hard)) || b->acout_over) && b->lockout_over;
 }
 
+/* D6. Grid there and SINGLE_DIS_W on: above it the timer runs and after SINGLE_DIS_UP_S all phases, below
+   SINGLE_DIS_W - SINGLE_DIS_HYST_W back to one unit, in between the state holds; off-grid or off: all phases, state
+   untouched */
+int bm_d6(const struct bm_d6_in *b, int all, int over, int *all_next, int *over_next)
+{
+	*all_next = all;
+	*over_next = over;
+	if (!b->grid_ok || !b->on)
+		return 0;
+	if (b->w_gt_on) {
+		*over_next = 1;
+		if (b->over_long)
+			*all_next = 1;
+	} else {
+		*over_next = 0;
+		if (b->w_lt_off)
+			*all_next = 0;
+	}
+	return !*all_next;
+}
+
 /* ---- the rule chain (0.41-c): one function per stage, run in this order by bm_step ---------------------------------
    inputs     derived facts: data age, heat pump on, season (display), night, own AC-in
    S0 gates   per bank: SoC protection / force charge state, charge and discharge ceilings (charger, BMS CCL/DCL)
@@ -812,7 +833,7 @@ static int dis_amount(int prop, int deficit, int idle_w, int w_max)
 	return w > w_max ? w_max : w;
 }
 
-/* S5 one MultiPlus (0.63-c, user 2026-10-26).
+/* S5 one MultiPlus (0.63-c, user 2026-10-26; the decision is bm_d6 since 0.65-c).
    Why only one unit discharges: a MultiPlus-II has a fixed loss of some 30-40 W (transformer, electronics) plus a
    poor efficiency at low power. Three units sharing a small load each run in that bad range. Measured in
    wagodb.pv_victron 18.-26.10.2026 (AC-in vs. BMS DC): discharge below 2 kW total (= below ~670 W per unit) lost
@@ -831,19 +852,17 @@ static int dis_amount(int prop, int deficit, int idle_w, int w_max)
 static int single_phase(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *st, const struct chain *c,
 						int w, const int *dcap)
 {
-	if (!in->grid_ok || cfg->single_dis_w <= 0)
-		return -1;
-	if (w > cfg->single_dis_w) {
-		if (st->single_over_since <= 0)
-			st->single_over_since = in->now;
-		if (in->now - st->single_over_since >= cfg->single_dis_up_s)
-			st->single_all = 1;
-	} else {
+	int over = st->single_over_since > 0, all_next, over_next;
+	struct bm_d6_in d = {in->grid_ok, cfg->single_dis_w > 0, w > cfg->single_dis_w,
+						 w < cfg->single_dis_w - cfg->single_dis_hyst_w,
+						 (over ? in->now - st->single_over_since : 0) >= cfg->single_dis_up_s};
+	int one_unit = bm_d6(&d, st->single_all, over, &all_next, &over_next);
+	st->single_all = all_next;
+	if (!over_next)
 		st->single_over_since = 0;
-		if (w < cfg->single_dis_w - cfg->single_dis_hyst_w)
-			st->single_all = 0;
-	}
-	if (st->single_all)
+	else if (!over)
+		st->single_over_since = in->now;
+	if (!one_unit)
 		return -1;
 	int first[NBANK];
 	for (int b = 0; b < NBANK; b++) {

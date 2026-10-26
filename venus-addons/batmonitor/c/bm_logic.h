@@ -292,6 +292,19 @@ int bm_d5(const struct bm_d5_in *b);                                  /* 1 = pul
 #define DO4_PCC_MAX_AGE 15.0                 /* s: only a fresh PCC triggers (sofar_fast.py: every 4 s) */
 #define DO4_PULSE_S 3.0                      /* s: DO4=1, then DO4=0 (as fox2db / the ESP: r4 pulse 3) */
 
+/* D6 (0.63-c, decision function 0.65-c): one MultiPlus or all phases for the discharge. Why: a MP2 loses ~30-40 W
+   fixed plus poor efficiency at low power (pv_victron 18.-26.10.2026: 14 % loss below 2 kW total, 4-5 % above); with
+   the grid there the meter nets the phases, so one unit may feed alone (unbalanced on purpose); off-grid every phase
+   carries its own load, all units feed synchronously. State: all (single_all), over (single_over_since set) */
+struct bm_d6_in {
+	int grid_ok;                                 /* vebus /Ac/ActiveIn/Connected */
+	int on;                                      /* SINGLE_DIS_W > 0 */
+	int w_gt_on;                                 /* discharge amount w > SINGLE_DIS_W */
+	int w_lt_off;                                /* w < SINGLE_DIS_W - SINGLE_DIS_HYST_W */
+	int over_long;                               /* w above since at least SINGLE_DIS_UP_S (over set before) */
+};
+int bm_d6(const struct bm_d6_in *b, int all, int over, int *all_next, int *over_next);   /* 1 = one unit, 0 = all */
+
 void bm_init(struct bm_state *st);
 /* charge ceiling of one phase (W AC): charger_a x BMS voltage of its bank / charge_eff, at most CHARGE_MAX_PHASE;
    without a plausible voltage CHARGER_CAP_PHASE (no spill above it any more) */

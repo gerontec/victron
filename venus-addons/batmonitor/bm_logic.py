@@ -667,6 +667,24 @@ def bm_d5(pcc_over, grace_over, pcc_hard, lockout_over, acout_over):
     return int(bool(((pcc_over and (grace_over or pcc_hard)) or acout_over) and lockout_over))
 
 
+def bm_d6(grid_ok, on, w_gt_on, w_lt_off, over_long, all_, over):
+    """D6 (0.63-c, decision function 0.65-c): one MultiPlus (1) or all phases (0) for the discharge; returns
+    (one_unit, all_next, over_next). Grid there and SINGLE_DIS_W on: above it the timer runs and after SINGLE_DIS_UP_S
+    all phases, below SINGLE_DIS_W - SINGLE_DIS_HYST_W back to one unit, in between the state holds; off-grid or
+    off: all phases, state untouched"""
+    if not grid_ok or not on:
+        return 0, all_, over
+    if w_gt_on:
+        over = 1
+        if over_long:
+            all_ = 1
+    else:
+        over = 0
+        if w_lt_off:
+            all_ = 0
+    return int(not all_), all_, over
+
+
 # ---- the rule chain: one function per stage, run in this order by bm_step ------------------------------------
 # Rule text per phase: <S1/S4 mode> [SRC:<S3>] [<S5 split>] [<limit>], see bm_logic.c
 
@@ -889,7 +907,7 @@ def dis_amount(prop, deficit, idle_w, w_max):
 
 
 def single_phase(cfg, inp, st, c, w, dcap):
-    """S5 one MultiPlus (0.63-c, user 2026-10-26).
+    """S5 one MultiPlus (0.63-c, user 2026-10-26; the decision is bm_d6 since 0.65-c).
     Why only one unit discharges: a MultiPlus-II has a fixed loss of some 30-40 W (transformer, electronics) plus a
     poor efficiency at low power. Three units sharing a small load each run in that bad range. Measured in
     wagodb.pv_victron 18.-26.10.2026 (AC-in vs. BMS DC): discharge below 2 kW total (= below ~670 W per unit) lost
@@ -905,18 +923,15 @@ def single_phase(cfg, inp, st, c, w, dcap):
     The unit: the lead bank, else the one kept while its stack is not more than SOC_BALANCE_OFF behind, else the
     fuller stack (so both stacks still drain alike over time); in a bank its first phase. Returns that phase,
     -1 = all phases (off-grid, SINGLE_DIS_W 0, above it, or w beyond that phase's cap)"""
-    if not inp.grid_ok or cfg.single_dis_w <= 0:
-        return -1
-    if w > cfg.single_dis_w:
-        if st.single_over_since <= 0:
-            st.single_over_since = inp.now
-        if inp.now - st.single_over_since >= cfg.single_dis_up_s:
-            st.single_all = 1
-    else:
+    over = int(st.single_over_since > 0)
+    one_unit, st.single_all, over_next = bm_d6(
+        inp.grid_ok, cfg.single_dis_w > 0, w > cfg.single_dis_w, w < cfg.single_dis_w - cfg.single_dis_hyst_w,
+        (inp.now - st.single_over_since if over else 0) >= cfg.single_dis_up_s, st.single_all, over)
+    if not over_next:
         st.single_over_since = 0.0
-        if w < cfg.single_dis_w - cfg.single_dis_hyst_w:
-            st.single_all = 0
-    if st.single_all:
+    elif not over:
+        st.single_over_since = inp.now
+    if not one_unit:
         return -1
     first = [next((p for p in bank.phases if c.discharge[p]), -1) for bank in BM_BANKS]
     keep = bank_of(st.single_ph) if st.single_ph >= 0 and c.discharge[st.single_ph] else -1
