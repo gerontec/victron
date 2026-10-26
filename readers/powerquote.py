@@ -124,7 +124,7 @@ def quote(ac_wh, dc_wh, seconds):
 		return None, None, None
 	if ac_wh > 0:
 		return 'charge', dc_wh / ac_wh, (ac_wh - dc_wh) * 3600 / seconds
-	return 'discharge', ac_wh / dc_wh, (dc_wh - ac_wh) * 3600 / seconds   # both negative: |AC| / |DC|
+	return 'discharge', ac_wh / dc_wh, (ac_wh - dc_wh) * 3600 / seconds   # both negative: |AC| / |DC|, |DC| - |AC|
 
 
 def new_day():
