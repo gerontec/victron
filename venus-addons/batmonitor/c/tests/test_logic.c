@@ -283,6 +283,12 @@ static void test_single_unit(void)
 		  "L2 alone (Stack2 fuller), got %d %d %d", r.out.sp[0], r.out.sp[1], r.out.sp[2]);
 
 	pl = BASE(.house = 3400, .season = BM_SUMMER, .season_age_h = 1);
+	simulate(&r, &pl, local_time(2026, 7, 15, 23, 0), 8);        /* 0.64-c: 40 s above, one unit carries it */
+	print_state("house 3.4 kW for 40 s: one unit", &r);
+	CHECK(abs(r.out.sp[0] + 3400) <= 40 && r.out.sp[1] == 0 && r.out.sp[2] == 0 && !r.st.single_all,
+		  "below SINGLE_DIS_UP_S one unit up to its cap, got %d %d %d", r.out.sp[0], r.out.sp[1], r.out.sp[2]);
+
+	pl = BASE(.house = 3400, .season = BM_SUMMER, .season_age_h = 1);
 	simulate(&r, &pl, local_time(2026, 7, 15, 23, 0), 60);
 	print_state("house 3.4 kW: all units", &r);
 	CHECK(r.out.sp[0] < 0 && r.out.sp[1] < 0 && r.out.sp[2] < 0 && r.st.single_all,

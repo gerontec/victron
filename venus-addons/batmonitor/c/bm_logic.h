@@ -49,6 +49,7 @@ struct bm_cfg {
 	                                   Bat1 empty (0.61-c) */
 	double force_full_hold_min;     /* force_full_from_pv ends once its stack held 100 % SoC this long (0.62-c) */
 	double single_dis_w, single_dis_hyst_w;   /* grid there: one MultiPlus discharges up to this total (0.63-c) */
+	double single_dis_up_s;                   /* ... all phases only after this long above it (0.64-c) */
 };
 
 /* parameter table: name (env BATMONITOR_<name>), default, allowed range, unit, meaning */
@@ -124,6 +125,7 @@ struct bm_state {
 	double ff_full_since;                        /* monotonic s since the force_full stack is at 100 %, 0 = not (0.62-c) */
 	int single_ph;                               /* the one discharging phase with the grid there, -1 = none (0.63-c) */
 	int single_all;                              /* the discharge is above SINGLE_DIS_W: all phases (0.63-c) */
+	double single_over_since;                    /* monotonic s since the discharge is above SINGLE_DIS_W, 0 = not (0.64-c) */
 	int setpoints[NPH];                          /* sent last cycle (the PI's u_applied) */
 };
 

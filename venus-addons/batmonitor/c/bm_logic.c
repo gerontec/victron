@@ -110,6 +110,7 @@ const struct bm_param BM_PARAMS[] = {
 	{"FORCE_FULL_HOLD_MIN",   P(force_full_hold_min),       60,      0,       1440,    "min", "force_full_from_pv: the command ends once its stack held 100 % SoC this long (BMS cell balancing)"},
 	{"SINGLE_DIS_W",          P(single_dis_w),              3000,    0,       5000,    "W", "grid there: discharge through one MultiPlus only up to this total (unbalanced phases, the meter nets them; less idle loss), above it all phases (0 = off)"},
 	{"SINGLE_DIS_HYST_W",     P(single_dis_hyst_w),         500,     0,       3000,    "W", "back to one MultiPlus below SINGLE_DIS_W minus this"},
+	{"SINGLE_DIS_UP_S",       P(single_dis_up_s),           60,      0,       600,     "s", "all phases only after the discharge stayed above SINGLE_DIS_W this long (one unit carries up to its cap meanwhile)"},
 };
 const int BM_NPARAMS = sizeof(BM_PARAMS) / sizeof(BM_PARAMS[0]);
 
@@ -822,7 +823,8 @@ static int dis_amount(int prop, int deficit, int idle_w, int w_max)
    unbalanced phases). Off-grid (emergency power, user 2026-10-26: feed synchronously) every phase must carry its
    own loads and nothing nets them, so then all units feed together as before, never a single one.
    Up to SINGLE_DIS_W one unit, above it all phases (one MultiPlus near its limit is again less efficient and the
-   house load may need more), back below SINGLE_DIS_W - SINGLE_DIS_HYST_W so it does not flap around 3 kW.
+   house load may need more), only after it stayed above for SINGLE_DIS_UP_S (first day 26.10.2026: a house load
+   swinging 2.1-3.6 kW flapped every 15-25 s), back below SINGLE_DIS_W - SINGLE_DIS_HYST_W.
    The unit: the lead bank, else the one kept while its stack is not more than SOC_BALANCE_OFF behind, else the
    fuller stack (so both stacks still drain alike over time); in a bank its first phase. Returns that phase,
    -1 = all phases (off-grid, SINGLE_DIS_W 0, above it, or w beyond that phase's cap) */
@@ -831,10 +833,16 @@ static int single_phase(const struct bm_cfg *cfg, const struct bm_in *in, struct
 {
 	if (!in->grid_ok || cfg->single_dis_w <= 0)
 		return -1;
-	if (w > cfg->single_dis_w)
-		st->single_all = 1;
-	else if (w < cfg->single_dis_w - cfg->single_dis_hyst_w)
-		st->single_all = 0;
+	if (w > cfg->single_dis_w) {
+		if (st->single_over_since <= 0)
+			st->single_over_since = in->now;
+		if (in->now - st->single_over_since >= cfg->single_dis_up_s)
+			st->single_all = 1;
+	} else {
+		st->single_over_since = 0;
+		if (w < cfg->single_dis_w - cfg->single_dis_hyst_w)
+			st->single_all = 0;
+	}
 	if (st->single_all)
 		return -1;
 	int first[NBANK];
