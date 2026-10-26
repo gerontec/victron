@@ -108,6 +108,8 @@ const struct bm_param BM_PARAMS[] = {
 	{"WP_WINTER_W",           P(wp_winter_w),               1000,    0,       12000,   "W", "winter half-year (October..March), heat pump running: the stacks discharge nothing while the Sofar Bat1 discharges, else at most this (heat pump off: PCC near 0)"},
 	{"CHARGER_DC_W",          P(charger_dc_w),              3600,    500,     5000,    "W", "full_at forecast: DC at the BMS per MultiPlus at its limit (measured 2026-10-09: ~3.6 kW, 65-67 A, flat over 53.6-54.6 V)"},
 	{"FORCE_FULL_HOLD_MIN",   P(force_full_hold_min),       60,      0,       1440,    "min", "force_full_from_pv: the command ends once its stack held 100 % SoC this long (BMS cell balancing)"},
+	{"SINGLE_DIS_W",          P(single_dis_w),              3000,    0,       5000,    "W", "grid there: discharge through one MultiPlus only up to this total (unbalanced phases, the meter nets them; less idle loss), above it all phases (0 = off)"},
+	{"SINGLE_DIS_HYST_W",     P(single_dis_hyst_w),         500,     0,       3000,    "W", "back to one MultiPlus below SINGLE_DIS_W minus this"},
 };
 const int BM_NPARAMS = sizeof(BM_PARAMS) / sizeof(BM_PARAMS[0]);
 
@@ -136,6 +138,7 @@ void bm_init(struct bm_state *st)
 {
 	memset(st, 0, sizeof(*st));
 	st->lead = -1;
+	st->single_ph = -1;
 	st->ls_yday = -1;
 }
 
@@ -808,6 +811,58 @@ static int dis_amount(int prop, int deficit, int idle_w, int w_max)
 	return w > w_max ? w_max : w;
 }
 
+/* S5 one MultiPlus (0.63-c, user 2026-10-26).
+   Why only one unit discharges: a MultiPlus-II has a fixed loss of some 30-40 W (transformer, electronics) plus a
+   poor efficiency at low power. Three units sharing a small load each run in that bad range. Measured in
+   wagodb.pv_victron 18.-26.10.2026 (AC-in vs. BMS DC): discharge below 2 kW total (= below ~670 W per unit) lost
+   14 % (124 W on average), 2-8 kW only 4-5 %; more than 80 % of the discharge minutes were below 2 kW, which made the
+   ~10 % daily discharge loss. One unit at 2 kW instead of three at 670 W works in its good range.
+   Why that is allowed: with the grid there the German meter (and the Sofar PCC) nets the three phases, so it does not
+   matter on which phase the stacks feed; the unit exports on its phase what the other phases import (deliberately
+   unbalanced phases). Off-grid (emergency power, user 2026-10-26: feed synchronously) every phase must carry its
+   own loads and nothing nets them, so then all units feed together as before, never a single one.
+   Up to SINGLE_DIS_W one unit, above it all phases (one MultiPlus near its limit is again less efficient and the
+   house load may need more), back below SINGLE_DIS_W - SINGLE_DIS_HYST_W so it does not flap around 3 kW.
+   The unit: the lead bank, else the one kept while its stack is not more than SOC_BALANCE_OFF behind, else the
+   fuller stack (so both stacks still drain alike over time); in a bank its first phase. Returns that phase,
+   -1 = all phases (off-grid, SINGLE_DIS_W 0, above it, or w beyond that phase's cap) */
+static int single_phase(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *st, const struct chain *c,
+						int w, const int *dcap)
+{
+	if (!in->grid_ok || cfg->single_dis_w <= 0)
+		return -1;
+	if (w > cfg->single_dis_w)
+		st->single_all = 1;
+	else if (w < cfg->single_dis_w - cfg->single_dis_hyst_w)
+		st->single_all = 0;
+	if (st->single_all)
+		return -1;
+	int first[NBANK];
+	for (int b = 0; b < NBANK; b++) {
+		first[b] = -1;
+		for (int i = 0; i < BM_BANKS[b].nph && first[b] < 0; i++)
+			if (c->discharge[BM_BANKS[b].ph[i]])
+				first[b] = BM_BANKS[b].ph[i];
+	}
+	int keep = st->single_ph >= 0 && c->discharge[st->single_ph] ? bank_of(st->single_ph) : -1, pick = -1;
+	if (st->lead >= 0 && first[st->lead] >= 0)
+		pick = st->lead;
+	else {
+		for (int b = 0; b < NBANK; b++)
+			if (first[b] >= 0 && (pick < 0 || st->soc[b] > st->soc[pick]))
+				pick = b;
+		if (keep >= 0 && st->soc[keep] >= st->soc[pick] - cfg->soc_balance_off)
+			pick = keep;
+	}
+	if (pick < 0)
+		return -1;
+	int ph = pick == keep ? st->single_ph : first[pick];
+	if (w > dcap[ph])
+		return -1;
+	st->single_ph = ph;
+	return ph;
+}
+
 /* S4 + S5 discharge: deficit = what the Multis already give (minus what of it goes into the Sofar battery) + the
    import still left (0.18); the own charging (force charge of the other stack) is no house load (0.20) */
 static void chain_discharge(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *st, struct bm_out *out,
@@ -829,7 +884,16 @@ static void chain_discharge(const struct bm_cfg *cfg, const struct bm_in *in, st
 	int w = dis_amount(prop, deficit, r->idle_w, c->dis_max);
 	snprintf(rule, sizeof(rule), "%s SRC:%s", prop ? "PROP" : "IDLE", out->src_why);
 	dis_caps(out, dcap);
-	alloc_discharge(st->lead, w, c->discharge, dcap, rule, out->sp, out->why);
+	int one = single_phase(cfg, in, st, c, w, dcap);
+	if (one >= 0)
+		for (int p = 0; p < NPH; p++) {
+			if (!c->discharge[p])
+				continue;
+			out->sp[p] = p == one ? -w : 0;
+			snprintf(out->why[p], WHY_LEN, "%s%s", rule, p == one ? " 1PH" : " STBY");
+		}
+	else
+		alloc_discharge(st->lead, w, c->discharge, dcap, rule, out->sp, out->why);
 	if (c->wp_max >= 0) {
 		char tag[24];
 		snprintf(tag, sizeof(tag), " WPMAX(%d)", c->wp_max);

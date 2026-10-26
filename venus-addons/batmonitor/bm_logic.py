@@ -188,6 +188,8 @@ BM_PARAMS = [
     Param("CHARGER_DC_W", "charger_dc_w", 3600, 500, 5000, "W", "full_at forecast: DC at the BMS per MultiPlus at its limit"),
     Param("WP_WINTER_W", "wp_winter_w", 1000, 0, 12000, "W", "winter half-year (October..March), heat pump running: the stacks discharge nothing while the Sofar Bat1 discharges, else at most this (heat pump off: PCC near 0)"),
     Param("FORCE_FULL_HOLD_MIN", "force_full_hold_min", 60, 0, 1440, "min", "force_full_from_pv: the command ends once its stack held 100 % SoC this long (BMS cell balancing)"),
+    Param("SINGLE_DIS_W", "single_dis_w", 3000, 0, 5000, "W", "grid there: discharge through one MultiPlus only up to this total (unbalanced phases, the meter nets them; less idle loss), above it all phases (0 = off)"),
+    Param("SINGLE_DIS_HYST_W", "single_dis_hyst_w", 500, 0, 3000, "W", "back to one MultiPlus below SINGLE_DIS_W minus this"),
 ]
 
 
@@ -275,6 +277,8 @@ class State:
     pi_e_prev: float = 0.0
     pi_t_prev: float = 0.0
     ff_full_since: float = 0.0                  # monotonic s since the force_full stack is at 100 %, 0 = not (0.62-c)
+    single_ph: int = -1                         # the one discharging phase with the grid there, -1 = none (0.63-c)
+    single_all: int = 0                         # the discharge is above SINGLE_DIS_W: all phases (0.63-c)
     setpoints: list = field(default_factory=lambda: [0] * NPH)
 
 
@@ -882,6 +886,50 @@ def dis_amount(prop, deficit, idle_w, w_max):
     return w_max if w > w_max else w
 
 
+def single_phase(cfg, inp, st, c, w, dcap):
+    """S5 one MultiPlus (0.63-c, user 2026-10-26).
+    Why only one unit discharges: a MultiPlus-II has a fixed loss of some 30-40 W (transformer, electronics) plus a
+    poor efficiency at low power. Three units sharing a small load each run in that bad range. Measured in
+    wagodb.pv_victron 18.-26.10.2026 (AC-in vs. BMS DC): discharge below 2 kW total (= below ~670 W per unit) lost
+    14 % (124 W on average), 2-8 kW only 4-5 %; more than 80 % of the discharge minutes were below 2 kW, which made the
+    ~10 % daily discharge loss. One unit at 2 kW instead of three at 670 W works in its good range.
+    Why that is allowed: with the grid there the German meter (and the Sofar PCC) nets the three phases, so it does not
+    matter on which phase the stacks feed; the unit exports on its phase what the other phases import (deliberately
+    unbalanced phases). Off-grid (emergency power, user 2026-10-26: feed synchronously) every phase must carry its
+    own loads and nothing nets them, so then all units feed together as before, never a single one.
+    Up to SINGLE_DIS_W one unit, above it all phases (one MultiPlus near its limit is again less efficient and the
+    house load may need more), back below SINGLE_DIS_W - SINGLE_DIS_HYST_W so it does not flap around 3 kW.
+    The unit: the lead bank, else the one kept while its stack is not more than SOC_BALANCE_OFF behind, else the
+    fuller stack (so both stacks still drain alike over time); in a bank its first phase. Returns that phase,
+    -1 = all phases (off-grid, SINGLE_DIS_W 0, above it, or w beyond that phase's cap)"""
+    if not inp.grid_ok or cfg.single_dis_w <= 0:
+        return -1
+    if w > cfg.single_dis_w:
+        st.single_all = 1
+    elif w < cfg.single_dis_w - cfg.single_dis_hyst_w:
+        st.single_all = 0
+    if st.single_all:
+        return -1
+    first = [next((p for p in bank.phases if c.discharge[p]), -1) for bank in BM_BANKS]
+    keep = bank_of(st.single_ph) if st.single_ph >= 0 and c.discharge[st.single_ph] else -1
+    pick = -1
+    if st.lead >= 0 and first[st.lead] >= 0:
+        pick = st.lead
+    else:
+        for b in range(NBANK):
+            if first[b] >= 0 and (pick < 0 or st.soc[b] > st.soc[pick]):
+                pick = b
+        if keep >= 0 and st.soc[keep] >= st.soc[pick] - cfg.soc_balance_off:
+            pick = keep
+    if pick < 0:
+        return -1
+    ph = st.single_ph if pick == keep else first[pick]
+    if w > dcap[ph]:
+        return -1
+    st.single_ph = ph
+    return ph
+
+
 def chain_discharge(cfg, inp, st, out, c):
     """S4 + S5 discharge: deficit = what the Multis already give (minus what goes into the Sofar battery) + the import
     still left; the own charging (force charge of the other stack) is no house load"""
@@ -897,7 +945,15 @@ def chain_discharge(cfg, inp, st, out, c):
     st.soyo_prop_prev = prop
     w = dis_amount(prop, deficit, r.idle_w, c.dis_max)
     rule = "%s SRC:%s" % ("PROP" if prop else "IDLE", out.src_why)
-    alloc_discharge(st.lead, w, c.discharge, int_caps(out.dis_cap), rule, out.sp, out.why)
+    dcap = int_caps(out.dis_cap)
+    one = single_phase(cfg, inp, st, c, w, dcap)
+    if one >= 0:
+        for p in range(NPH):
+            if c.discharge[p]:
+                out.sp[p] = -w if p == one else 0
+                out.why[p] = (rule + (" 1PH" if p == one else " STBY"))[:WHY_LEN - 1]
+    else:
+        alloc_discharge(st.lead, w, c.discharge, dcap, rule, out.sp, out.why)
     if c.wp_max >= 0:
         for p in range(NPH):
             if c.discharge[p]:
