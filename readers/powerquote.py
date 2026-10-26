@@ -19,15 +19,21 @@ Every minute, retained, JSON to MQTT_OUT_HOST (Pi .218 kellertreppe broker) topi
    "multi_dc_wh"}, "day": {"S1": {"charge": {"ac_wh", "dc_wh", "quote", "minutes"}, "discharge": ...}, ...},
    "since", "stale"}
 rule = the batmonitor split tag of the bank's phase (1PH / STBY / EQ ...) from /data/batmonitor/state.json.
+Every minute the day totals also go to wagodb.pv_victron_quote (sql/pv_victron_quote.sql) as an upsert, one row per
+day, bank and direction; a minute belongs to the day it starts in. On start the rows of today are read back, so a
+restart continues the day instead of starting it again. A DB error is logged and retried next minute.
 Runs as powerquote.service (host/powerquote.service) as user pi.
 """
 
 import json
+import os
 import re
+import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import paho.mqtt.client as mqtt
+import pymysql
 
 MQTT_HOST = '127.0.0.1'
 MQTT_OUT_HOST = '192.168.178.218'
@@ -38,6 +44,8 @@ KEEPALIVE_S = 30
 BM_STATE = '/data/batmonitor/state.json'
 SPLIT_TAGS = ('1PH', 'STBY', 'EQ', 'BAL', 'SPILL', 'WAIT')
 BANKS = ('S1', 'S2', 'ALL')
+DB_CNF = os.path.expanduser('~/.victron2db.cnf')
+TABLE = 'pv_victron_quote'
 
 # (service, path suffix) -> key; battery instances are told apart by ProductName
 AC_KEYS = {f'Ac/ActiveIn/L{p}/P': f'in{p}' for p in (1, 2, 3)}
@@ -131,6 +139,51 @@ def new_day():
 	return {b: {d: {'ac_wh': 0.0, 'dc_wh': 0.0, 'minutes': 0} for d in ('charge', 'discharge')} for b in BANKS}
 
 
+def day_quote(d, z):
+	if not z['ac_wh'] or not z['dc_wh']:
+		return None
+	return z['dc_wh'] / z['ac_wh'] if d == 'charge' else z['ac_wh'] / z['dc_wh']
+
+
+def db_load(today):
+	"""(day totals, since) of today from the table; (None, None) when there is no row or the DB is away"""
+	try:
+		con = pymysql.connect(read_default_file=DB_CNF, connect_timeout=10)
+		with con.cursor() as c:
+			c.execute(f"SELECT bank, direction, ac_wh, dc_wh, minutes, since FROM {TABLE} WHERE day = %s", (today,))
+			rows = c.fetchall()
+		con.close()
+	except pymysql.Error as e:
+		print(f"db_load: {e}", file=sys.stderr, flush=True)
+		return None, None
+	if not rows:
+		return None, None
+	day, since = new_day(), None
+	for bank, d, ac, dc, n, s in rows:
+		day[bank][d] = {'ac_wh': float(ac), 'dc_wh': float(dc), 'minutes': int(n)}
+		since = s if s and (since is None or s < since) else since
+	return day, since.isoformat(timespec='seconds') if since else None
+
+
+def db_store(today, day, since):
+	try:
+		con = pymysql.connect(read_default_file=DB_CNF, connect_timeout=10)
+		with con.cursor() as c:
+			for b in BANKS:
+				for d, z in day[b].items():
+					q = day_quote(d, z)
+					c.execute(f"""INSERT INTO {TABLE} (day, bank, direction, ac_wh, dc_wh, quote, minutes, since)
+						VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+						ON DUPLICATE KEY UPDATE ac_wh = VALUES(ac_wh), dc_wh = VALUES(dc_wh), quote = VALUES(quote),
+							minutes = VALUES(minutes), since = VALUES(since)""",
+						(today, b, d, round(z['ac_wh'], 1), round(z['dc_wh'], 1),
+						 round(q, 4) if q is not None else None, z['minutes'], since))
+		con.commit()
+		con.close()
+	except pymysql.Error as e:
+		print(f"db_store: {e}", file=sys.stderr, flush=True)
+
+
 def main():
 	vals = Values()
 	portal = fallback_portal_id()
@@ -146,7 +199,10 @@ def main():
 	out.connect_async(MQTT_OUT_HOST, 1883, 60)
 	out.loop_start()
 
-	day, since, today = new_day(), datetime.now().isoformat(timespec='seconds'), datetime.now().date()
+	today = datetime.now().date()
+	day, since = db_load(today)
+	if day is None:
+		day, since = new_day(), datetime.now().isoformat(timespec='seconds')
 	acc = {b: [0.0, 0.0, 0] for b in BANKS}      # ac Ws, dc Ws, valid seconds
 	multi_dc, stale = 0.0, 0
 	last_keepalive = 0.0
@@ -173,8 +229,9 @@ def main():
 			continue
 		minute = m
 		ts = datetime.now().replace(second=0, microsecond=0)
-		if ts.date() != today:
-			day, since, today = new_day(), ts.isoformat(timespec='seconds'), ts.date()
+		start = ts - timedelta(minutes=1)                  # the minute just integrated belongs to its start day
+		if start.date() != today:
+			day, since, today = new_day(), ts.replace(hour=0).isoformat(timespec='seconds'), start.date()
 		tags = rule_tags()
 		msg = {'ts': ts.isoformat(timespec='seconds'), 'minute': {}, 'day': {}, 'since': since, 'stale': stale}
 		for b in BANKS:
@@ -193,11 +250,11 @@ def main():
 		for b in BANKS:
 			msg['day'][b] = {}
 			for d, z in day[b].items():
-				q = (z['dc_wh'] / z['ac_wh'] if d == 'charge' else z['ac_wh'] / z['dc_wh']) \
-					if z['ac_wh'] and z['dc_wh'] else None
+				q = day_quote(d, z)
 				msg['day'][b][d] = {'ac_wh': round(z['ac_wh']), 'dc_wh': round(z['dc_wh']),
 									'quote': round(q, 4) if q is not None else None, 'minutes': z['minutes']}
 		out.publish(TOPIC_OUT, json.dumps(msg, separators=(',', ':')), retain=True)
+		db_store(today, day, since)
 		acc = {b: [0.0, 0.0, 0] for b in BANKS}
 		multi_dc, stale = 0.0, 0
 
