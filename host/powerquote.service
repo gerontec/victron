@@ -1,0 +1,17 @@
+# Power quote of the MultiPlus banks (readers/powerquote.py): integrates AC / DC every second from the local Venus
+# broker, publishes every minute to 192.168.178.218 victron/powerquote (retained JSON). Install on the Pi host:
+#   cp readers/powerquote.py /home/pi/python/ && sudo cp host/powerquote.service /etc/systemd/system/ &&
+#   sudo systemctl daemon-reload && sudo systemctl enable --now powerquote
+[Unit]
+Description=MultiPlus power quote (AC vs BMS DC per bank) to MQTT .218
+After=venus.service network-online.target
+Wants=venus.service
+
+[Service]
+User=pi
+ExecStart=/usr/bin/python3 /home/pi/python/powerquote.py
+Restart=always
+RestartSec=20
+
+[Install]
+WantedBy=multi-user.target
