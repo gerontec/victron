@@ -148,6 +148,8 @@ void h_charge(void)
 	c.own_charge = in_range(0, 15000);
 	c.chg_ref = in_range(-20000, 30000);
 	c.cap_active = bit();                               /* 0.49-c: charge target + EXPORT_CAP */
+	c.ff = nondet_int();                                /* 0.62-c: force_full_from_pv off / S1 / S2 */
+	__CPROVER_assume(c.ff >= -1 && c.ff <= 1);
 	c.bat1_eff = in_range(-2500, 1250);
 	for (int p = 0; p < NPH; p++) {
 		c.charge[p] = bit();

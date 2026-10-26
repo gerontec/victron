@@ -53,6 +53,12 @@
  *     heat pump running the stacks give 0 W while the Sofar Bat1 discharges (Bat1 < -100 W) and at most WP_WINTER_W
  *     (1000 W) otherwise; heat pump off: PCC near 0 as before. Rule text WPMAX(W), state.json wp_max_w (-1 = rule not
  *     active). Charging and FORCE / LOW are unchanged.
+ *   - force_full_from_pv (0.62-c, user 2026-10-26: "damit ich balancing forcieren kann"): retained MQTT
+ *     FORCE_FULL_TOPIC "S1" / "S2" names a stack that is charged first from the PV surplus (rule text FF), stays in
+ *     CHARGE at 100 % so the BMS can balance its cells (its CCL tapers the current) and never discharges while the
+ *     command is on (HOLD without surplus); the other stack covers the house. No grid charging. BMS_MISSING, FORCE /
+ *     LOW, STALE and the summer charge block keep their priority. After FORCE_FULL_HOLD_MIN (60 min) at 100 % SoC the
+ *     command ends by itself: batmonitor publishes "off" retained. "off" ends it at once. state.json force_full_from_pv.
  *   - full_at with the measured charger power (0.31-c, user 2026-10-09): each MultiPlus delivers ~3.6 kW DC at the BMS
  *     at its limit (65-67 A, flat over 53.6-54.6 V; AC-in ~4040 W), not 70 A x U: CHARGER_DC_W caps the forecast.
  *   - full_at (0.32-c, user 2026-10-09): the forecast splits the power each step like alloc_charge and lets the SoC lead
@@ -87,7 +93,7 @@
 #include "bm_logic.h"
 #include "bm_parse.h"
 
-#define VERSION "0.61-c"
+#define VERSION "0.62-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
@@ -98,6 +104,7 @@
 #define PEAK_MODEL_SECONDS 60.0
 #define DO4_LAST_TOPIC "batmonitor/do4_last"   /* out, retained: {"ts", "pcc_w"} of the last DO4 pulse, for r290_boost
                                                  and hantech (they run once a minute and miss the 3 s pulse) */
+#define FORCE_FULL_TOPIC "batmonitor/force_full_from_pv"   /* in + out, retained: "S1" / "S2" / "off" (0.62-c) */
 #define DO4_TOPIC "pv_relay/DO4"      /* out, not retained: "1" for DO4_PULSE_S, then "0" (relay: curtail WR2, 0.46-c) */
 #define STATE_FILE_DEFAULT "/data/batmonitor/state.json"
 #define TZ_BERLIN "CET-1CEST,M3.5.0,M10.5.0/3"   /* Europe/Berlin without a zoneinfo file */
@@ -135,6 +142,7 @@ static struct {
 	int fc_n;
 	time_t fc_slot_t[BM_FC_SLOTS];
 	double fc_slot_kt[BM_FC_SLOTS];
+	int force_full;                                 /* 0 off, 1 = S1, 2 = S2 (0.62-c) */
 } mq;
 
 static double setpoint_time;
@@ -292,6 +300,7 @@ static void on_connect(struct mosquitto *m, void *ud, int rc)
 		mosquitto_subscribe(m, NULL, WP_TOPIC, 0);
 		mosquitto_subscribe(m, NULL, SEASON_TOPIC, 0);
 		mosquitto_subscribe(m, NULL, FORECAST_TOPIC, 0);
+		mosquitto_subscribe(m, NULL, FORCE_FULL_TOPIC, 0);
 	}
 }
 
@@ -346,6 +355,20 @@ static void on_message(struct mosquitto *m, void *ud, const struct mosquitto_mes
 		mq.have_pcc = 1;
 		mq.inv_time = mono();
 		pthread_mutex_unlock(&mq_lock);
+		return;
+	}
+	if (strcmp(msg->topic, FORCE_FULL_TOPIC) == 0) {
+		int ff = bm_parse_force_full(buf);
+		if (ff < 0) {
+			LOGE("force_full_from_pv: \"%.40s\" ignored (S1, S2 or off)", buf);
+			return;
+		}
+		pthread_mutex_lock(&mq_lock);
+		int old = mq.force_full;
+		mq.force_full = ff;
+		pthread_mutex_unlock(&mq_lock);
+		if (ff != old)
+			LOG("force_full_from_pv: %s", ff ? BM_BANKS[ff - 1].name : "off");
 		return;
 	}
 	if (strcmp(msg->topic, R290_TOPIC) == 0) {
@@ -454,6 +477,7 @@ static void run_full_forecast(const struct bm_in *in)
 	fi.have_pv = in->have_pv && in->now - in->inv_time < 180.0;
 	fi.pv_sofar = in->pv;
 	fi.lead = st.lead;
+	fi.force_full = in->force_full;
 	for (int b = 0; b < NBANK; b++) {
 		double s = 0;
 		fi.volt_ok[b] = in->volt_ok[b];
@@ -578,6 +602,18 @@ static void write_state(const int *sp, char why[][WHY_LEN], double surplus)
 	cJSON_AddNumberToObject(js, "bat1_first", o_.bat1_first);
 	cJSON_AddNumberToObject(js, "wp_max_w", o_.wp_max_w);      /* 0.61-c: winter heat pump rule, discharge ceiling W, -1 none */
 	cJSON_AddNumberToObject(js, "d1_id", o_.d1_id);            /* 0.60-c: the D1 cell, bit mask see bm_d1_id */
+	o = cJSON_AddObjectToObject(js, "force_full_from_pv");     /* 0.62-c: stack null = off; held_min at 100 % SoC */
+	if (in_last.force_full >= 1 && in_last.force_full <= NBANK) {
+		cJSON_AddStringToObject(o, "stack", BM_BANKS[in_last.force_full - 1].name);
+		if (st.ff_full_since > 0)
+			cJSON_AddNumberToObject(o, "held_min", round((in_last.now - st.ff_full_since) / 6.0) / 10);
+		else
+			cJSON_AddNullToObject(o, "held_min");
+	} else {
+		cJSON_AddNullToObject(o, "stack");
+		cJSON_AddNullToObject(o, "held_min");
+	}
+	cJSON_AddNumberToObject(o, "hold_min", cfg.force_full_hold_min);
 	o = cJSON_AddObjectToObject(js, "chain");                  /* 0.42-c: S3 reason, as in the rule text */
 	cJSON_AddStringToObject(o, "src", o_.src_why);
 	o = cJSON_AddObjectToObject(js, "pi");
@@ -677,6 +713,7 @@ static void calc(void)
 		memcpy(in.fc_slot_t, mq.fc_slot_t, sizeof(in.fc_slot_t));
 		memcpy(in.fc_slot_kt, mq.fc_slot_kt, sizeof(in.fc_slot_kt));
 	}
+	in.force_full = mq.force_full;
 	pthread_mutex_unlock(&mq_lock);
 	const char *vb = vebus();
 	double conn_in;
@@ -718,6 +755,18 @@ static void calc(void)
 			int n = snprintf(js, sizeof(js), "{\"ts\":%ld,\"pcc_w\":%.0f}", (long)time(NULL), in.pcc);
 			if (mosq_g)
 				mosquitto_publish(mosq_g, NULL, DO4_LAST_TOPIC, n, js, 1, true);
+		}
+	}
+	if (o_.ff_done) {
+		LOG("force_full_from_pv: %s held 100 %% SoC for %.0f min, done%s", BM_BANKS[in.force_full - 1].name,
+			cfg.force_full_hold_min, LIVE ? "" : " (dry run, command kept)");
+		if (LIVE) {                               /* a dry run (NCR fallback) never ends the live command */
+			pthread_mutex_lock(&mq_lock);
+			mq.force_full = 0;
+			pthread_mutex_unlock(&mq_lock);
+			st.ff_full_since = 0;
+			if (!mosq_g || mosquitto_publish(mosq_g, NULL, FORCE_FULL_TOPIC, 3, "off", 1, true) != MOSQ_ERR_SUCCESS)
+				LOGE("force_full_from_pv: publish off failed");
 		}
 	}
 	if (o_.lead_event > 0)

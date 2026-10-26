@@ -23,4 +23,8 @@ int bm_parse_r290(const char *json, int *hz);
 /* plain number topics (em0/power, outdoor temperature): the whole text one number in lo..hi; 1 = valid */
 int bm_parse_number(const char *text, double lo, double hi, double *v);
 
+/* batmonitor/force_full_from_pv (0.62-c): "S1" / "S2" (case and whitespace ignored) -> 1 / 2, "off", "0" or empty
+   (a cleared retained message) -> 0; anything else -1 (ignored, the command stays) */
+int bm_parse_force_full(const char *text);
+
 #endif

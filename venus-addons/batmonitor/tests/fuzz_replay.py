@@ -33,6 +33,7 @@ def replay_forecast(cfg, f):
         fi.avg[b] = float(next(it))
         fi.volt_ok[b] = int(next(it))
         fi.volt[b] = float(next(it))
+    fi.force_full = int(next(it))
     o = L.bm_full_forecast(cfg, fi)
     return "FC %d %d %d %d %.6f %.6f %.6f %.6f %.3f %.6f %d\n" % (
         run, k, o.full_at[0], o.full_at[1], o.soc_sunset[0], o.soc_sunset[1], o.anchor, o.kt_now, o.pv_now_w,
@@ -92,11 +93,12 @@ def main():
         i.fc_corr = float(next(it))
         n_slots = int(next(it))
         i.fc_slots = [(int(next(it)), float(next(it))) for _ in range(n_slots)]
+        i.force_full = int(next(it))
         o = L.bm_step(cfg, i, st)
         out_lines.append("%d %d %d %d %d\t%s\t%s\t%s\t%.3f %.3f %.3f %d %d %d %d\n" % (
             run, k, o.sp[0], o.sp[1], o.sp[2], o.why[0], o.why[1], o.why[2], o.surplus, o.pi.u, o.pi.y,
             o.pi.sp[0], o.pi.sp[1], o.pi.sp[2], o.bat1_first))
-        out_lines.append("D5 %d %d %d %d\n" % (run, k, o.do4_pulse, o.d1_id))
+        out_lines.append("D5 %d %d %d %d %d\n" % (run, k, o.do4_pulse, o.d1_id, o.ff_done))
     sys.stdout.writelines(out_lines)
 
 

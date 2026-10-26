@@ -47,6 +47,7 @@ struct bm_cfg {
 	double acout_feed_max_w, acout_feed_s;   /* DO4 when PV feeds more than this into one AC-out for this long (0.51-c) */
 	double wp_winter_w;             /* winter half-year, heat pump running: discharge at most this, only with the Sofar
 	                                   Bat1 empty (0.61-c) */
+	double force_full_hold_min;     /* force_full_from_pv ends once its stack held 100 % SoC this long (0.62-c) */
 };
 
 /* parameter table: name (env BATMONITOR_<name>), default, allowed range, unit, meaning */
@@ -99,6 +100,8 @@ struct bm_in {
 	double ccl[NBANK], dcl[NBANK];                          /* A DC (CAN 0x351 of the MUST: 100 A, tapering to 0 near full) */
 	int cell_ok[NBANK];
 	double cell_min[NBANK];                                 /* BMS /System/MinCellVoltage V (0.52-c) */
+	int force_full;                                         /* batmonitor/force_full_from_pv (0.62-c): 0 off, 1 = S1
+	                                                           (STACK1), 2 = S2 (STACK2); memset 0 = off */
 };
 
 struct bm_ls { int active, cap, peak_h, win_end_h; double dc, ratio, ratio_now, noon_h; };   /* active = waiting below the cap */
@@ -117,6 +120,7 @@ struct bm_state {
 	double do4_over_since;                       /* monotonic s since the PCC is above PCC_PEAK_TH, 0 = not (0.50-c) */
 	double acout_over_since;                     /* monotonic s since an AC-out feeds above ACOUT_FEED_MAX_W (0.51-c) */
 	double pi_e_prev, pi_t_prev;
+	double ff_full_since;                        /* monotonic s since the force_full stack is at 100 %, 0 = not (0.62-c) */
 	int setpoints[NPH];                          /* sent last cycle (the PI's u_applied) */
 };
 
@@ -139,6 +143,8 @@ struct bm_out {
 	double chg_cap[NPH];                         /* W AC: charge ceiling per phase used this cycle */
 	double dis_cap[NPH];                         /* W AC: discharge ceiling per phase used this cycle */
 	int ccl_bind[NPH], dcl_bind[NPH];            /* 1 = the BMS current limit is below the charger / phase limit */
+	int ff_done;                                 /* 1 = the force_full stack held 100 % for FORCE_FULL_HOLD_MIN, end the
+	                                                command (0.62-c) */
 };
 
 /* ---- decision layer (0.43-c): the discrete part of the rule chain as pure functions of predicates ("bits", each a
@@ -146,7 +152,7 @@ struct bm_out {
    input / state combination of each function is enumerated by tests/check_matrix.c (make check). */
 enum bm_src_reason { BM_SRC_DAY, BM_SRC_B1, BM_SRC_STK, BM_SRC_WPG, BM_SRC_N };
 enum bm_mode { BM_M_BMS_MISSING, BM_M_FORCE, BM_M_STALE, BM_M_LADESPERRE, BM_M_CHARGE, BM_M_FULL, BM_M_PROT,
-			   BM_M_CHARGING, BM_M_DIS, BM_M_N };
+			   BM_M_CHARGING, BM_M_DIS, BM_M_HOLD, BM_M_N };   /* HOLD appended (0.62-c), the older indices stay */
 extern const char *BM_SRC_NAME[BM_SRC_N], *BM_MODE_NAME[BM_M_N];
 
 /* Discharge matrix (0.45-c): what the S3 source of D1 means for the discharge amount, one table row each: how the
@@ -210,6 +216,8 @@ struct bm_d2_bank {
 	int low_on;                                  /* DCL < DCL_FORCE_A or lowest cell < CELL_FORCE_V (0.52-c) */
 	int low_off;                                 /* DCL >= DCL_FORCE_A (or not sent) and the lowest cell >=
 	                                                CELL_FORCE_RELEASE_V (or not sent) */
+	int ff;                                      /* force_full_from_pv names this bank (0.62-c): CHARGE also at 100 %,
+	                                                HOLD (no discharge) without surplus */
 };
 struct bm_d2_in {
 	int stale;                                   /* inverter data older than STALE_SECONDS */
@@ -310,6 +318,7 @@ struct bm_fc_in {
 	double slot_kt[BM_FC_SLOTS];
 	double corr;                        /* forecast.py correction, <= 0 = none */
 	int lead;                           /* bm_state.lead: charged last */
+	int force_full;                     /* bm_in.force_full: that stack charged first (0.62-c) */
 };
 struct bm_fc_out {
 	time_t full_at[NBANK];              /* 0 = not full before sunset (or no forecast) */

@@ -37,6 +37,7 @@ struct plant {
 	double fc_kt;                  /* OWM kt of every 3 h slot (correction 1.0), 0 = no slots */
 	double acout_feed[NPH];        /* W PV feeding back into each AC-out (FoxESS on AC-out1), 0 = none */
 	int grid_off;                  /* 1 = grid offline (island, transfer relay open) */
+	int force_full;                /* batmonitor/force_full_from_pv: 0 off, 1 = S1, 2 = S2 (0.62-c) */
 };
 
 static double r_override_w_max;     /* > 0: W_MAX for the next simulate() (parameter test) */
@@ -106,6 +107,7 @@ static void simulate(struct run *r, const struct plant *pl, time_t t0, int n)
 		}
 		in->inv_time = pl->stale_inv ? 1.0 : now;
 		in->grid_ok = !pl->grid_off;
+		in->force_full = pl->force_full;
 		in->r290_hz = pl->r290_hz;
 		in->r290_time = now;
 		in->aussen = pl->aussen;
@@ -413,6 +415,63 @@ static void test_force_charge(void)
 	simulate(&r, &pl, local_time(2026, 1, 15, 14, 0), 30);
 	CHECK(r.out.sp[0] == 279, "CCL 5 A: force charge 279 W, got %d", r.out.sp[0]);
 	CHECK(strstr(r.out.why[0], "FORCE(") != NULL, "still rule FORCE, got %s", r.out.why[0]);
+}
+
+/* 0.62-c (user 2026-10-26: force balancing): force_full_from_pv S1 charges Stack1 first from the PV even when it is
+   the SoC lead, keeps it in CHARGE at 100 %, never discharges it and ends after FORCE_FULL_HOLD_MIN at 100 % */
+static void test_force_full_from_pv(void)
+{
+	struct run r;
+	struct plant pl = BASE(.pv = 2500, .house = 500, .wp = 0, .soc = {60, 30});
+	simulate(&r, &pl, local_time(2026, 1, 15, 12, 0), 60);
+	print_state("2 kW surplus, Stack1 ahead, no force_full", &r);
+	CHECK(r.out.sp[0] == 0 && rule_has(&r, " BAL"), "without: the lead Stack1 charges last, L1 %d", r.out.sp[0]);
+	pl.force_full = 1;
+	simulate(&r, &pl, local_time(2026, 1, 15, 12, 0), 60);
+	print_state("2 kW surplus, force_full S1", &r);
+	CHECK(abs(r.out.sp[0] - 2000) <= 60 && r.out.sp[1] + r.out.sp[2] <= 30, "S1: the surplus into Stack1 first, "
+		  "sp %d %d %d", r.out.sp[0], r.out.sp[1], r.out.sp[2]);
+	CHECK(strstr(r.out.why[0], "CHARGE SRC:DAY FF") != NULL, "rule text FF, got %s", r.out.why[0]);
+	CHECK(fabs(r.pcc) <= 60, "PCC near 0, pcc %.0f", r.pcc);
+
+	pl.pv = 6500;                                                /* more than one charger: the rest to Stack2 */
+	pl.volt[0] = pl.volt[1] = 53.0;
+	simulate(&r, &pl, local_time(2026, 1, 15, 12, 0), 60);
+	CHECK(r.out.sp[0] >= 3980 && r.out.sp[1] + r.out.sp[2] >= 1900, "S1 at its charger, the rest to Stack2, sp %d %d %d",
+		  r.out.sp[0], r.out.sp[1], r.out.sp[2]);
+
+	pl.pv = 2500;
+	pl.soc[0] = 100;                                             /* full: stays in CHARGE for the cell balancing */
+	simulate(&r, &pl, local_time(2026, 1, 15, 12, 0), 60);
+	print_state("Stack1 at 100 %, force_full S1", &r);
+	CHECK(strstr(r.out.why[0], "CHARGE") == r.out.why[0] && r.out.sp[0] > 0, "100 %%: CHARGE, not FULL, got %d %s",
+		  r.out.sp[0], r.out.why[0]);
+	CHECK(!r.out.ff_done, "not done after 5 min at 100 %%");
+	simulate(&r, &pl, local_time(2026, 1, 15, 12, 0), 60 * 12 - 2);   /* 59.8 min */
+	CHECK(!r.out.ff_done, "not done before FORCE_FULL_HOLD_MIN 60 min");
+	simulate(&r, &pl, local_time(2026, 1, 15, 12, 0), 60 * 12 + 1);
+	CHECK(r.out.ff_done, "done after 60 min at 100 %%");
+
+	pl.pv = 0;                                                   /* evening, no surplus: HOLD, Stack2 covers the house */
+	pl.house = 1500;
+	pl.soc[0] = 97;
+	simulate(&r, &pl, local_time(2026, 1, 15, 19, 0), 60);
+	print_state("evening 1.5 kW, force_full S1", &r);
+	CHECK(r.out.sp[0] == 0 && strstr(r.out.why[0], "HOLD(97.0%)"), "Stack1 HOLDs, got %d %s", r.out.sp[0], r.out.why[0]);
+	CHECK(abs(r.out.sp[1] + r.out.sp[2] + 1530) <= 40, "Stack2 covers the house, L2+L3 %d", r.out.sp[1] + r.out.sp[2]);
+	CHECK(!r.out.ff_done, "below 100 %%: not done");
+
+	pl.force_full = 2;                                           /* S2: the other way round */
+	simulate(&r, &pl, local_time(2026, 1, 15, 19, 0), 60);
+	CHECK(r.out.sp[1] == 0 && r.out.sp[2] == 0 && strstr(r.out.why[1], "HOLD("), "S2: Stack2 HOLDs, got %d %d %s",
+		  r.out.sp[1], r.out.sp[2], r.out.why[1]);
+	CHECK(abs(r.out.sp[0] + 1530) <= 40, "Stack1 covers the house, L1 %d", r.out.sp[0]);
+
+	pl.force_full = 1;                                           /* LOW / FORCE keep their priority */
+	pl.soc[0] = 2;
+	simulate(&r, &pl, local_time(2026, 1, 15, 19, 0), 30);
+	CHECK(r.out.sp[0] == 500 && strstr(r.out.why[0], "FORCE("), "force charge first, got %d %s", r.out.sp[0],
+		  r.out.why[0]);
 }
 
 static void test_discharge_protection(void)
@@ -885,6 +944,7 @@ int main(void)
 	test_day_sofar_covers_house();
 	test_day_sofar_saturated();
 	test_force_charge();
+	test_force_full_from_pv();
 	test_discharge_protection();
 	test_stale();
 	test_wp_stale_still_covered();

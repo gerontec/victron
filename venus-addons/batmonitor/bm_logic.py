@@ -187,6 +187,7 @@ BM_PARAMS = [
     Param("ACOUT_FEED_S", "acout_feed_s", 10, 0, 120, "s", "... for this long"),
     Param("CHARGER_DC_W", "charger_dc_w", 3600, 500, 5000, "W", "full_at forecast: DC at the BMS per MultiPlus at its limit"),
     Param("WP_WINTER_W", "wp_winter_w", 1000, 0, 12000, "W", "winter half-year (October..March), heat pump running: the stacks discharge nothing while the Sofar Bat1 discharges, else at most this (heat pump off: PCC near 0)"),
+    Param("FORCE_FULL_HOLD_MIN", "force_full_hold_min", 60, 0, 1440, "min", "force_full_from_pv: the command ends once its stack held 100 % SoC this long (BMS cell balancing)"),
 ]
 
 
@@ -251,6 +252,7 @@ class In:
     dcl: list = field(default_factory=lambda: [0.0] * NBANK)
     cell_ok: list = field(default_factory=lambda: [0] * NBANK)
     cell_min: list = field(default_factory=lambda: [0.0] * NBANK)  # BMS /System/MinCellVoltage V (0.52-c)
+    force_full: int = 0                         # batmonitor/force_full_from_pv (0.62-c): 0 off, 1 = S1, 2 = S2
 
 
 @dataclass
@@ -272,6 +274,7 @@ class State:
     acout_over_since: float = 0.0               # monotonic s since an AC-out feeds above ACOUT_FEED_MAX_W (0.51-c)
     pi_e_prev: float = 0.0
     pi_t_prev: float = 0.0
+    ff_full_since: float = 0.0                  # monotonic s since the force_full stack is at 100 %, 0 = not (0.62-c)
     setpoints: list = field(default_factory=lambda: [0] * NPH)
 
 
@@ -321,6 +324,7 @@ class Out:
     dis_cap: list = field(default_factory=lambda: [0.0] * NPH)
     ccl_bind: list = field(default_factory=lambda: [0] * NPH)
     dcl_bind: list = field(default_factory=lambda: [0] * NPH)
+    ff_done: int = 0                            # the force_full stack held 100 % for FORCE_FULL_HOLD_MIN (0.62-c)
 
 
 # ---- clear-sky DC model (fox2db_logic.h) ---------------------------------------------------------------------
@@ -462,18 +466,21 @@ def alloc_discharge(lead, w, dis, dcap, rule, sp, why):
             why[p] = (rule + tag)[:WHY_LEN - 1]
 
 
-def charge_order(lead):
-    """banks in charge order: CHARGE_PRIORITY, the lead bank (SoC ahead) last"""
+def charge_order(lead, ff=-1):
+    """banks in charge order: CHARGE_PRIORITY, the lead bank (SoC ahead) last; force_full_from_pv (0.62-c, ff = its
+    bank, -1 none): that bank first, the lead does not count"""
+    if ff >= 0:
+        return [ff] + [b for b in CHARGE_PRIORITY if b != ff]
     order = [b for b in CHARGE_PRIORITY if b != lead]
     if lead >= 0:
         order.append(lead)
     return order
 
 
-def alloc_charge(cfg, lead, rest, chg, n_chg, cap, sp):
+def alloc_charge(cfg, lead, ff, rest, chg, n_chg, cap, sp):
     """one level per bank in charge order, each up to min(cap, CHARGER_CAP_PHASE); what the caps cut goes up to
-    CHARGE_MAX_PHASE on all charging phases alike"""
-    order = charge_order(lead)
+    CHARGE_MAX_PHASE on all charging phases alike. ff: charge_order"""
+    order = charge_order(lead, ff)
     lvl = [order.index(bank_of(p)) if chg[p] and bank_of(p) in order else -1 for p in range(NPH)]
     cap1 = [min(cap[p], int(cfg.charger_cap_phase)) for p in range(NPH)]
     give, rest = alloc_levels(rest, lvl, len(order), cap1)
@@ -493,8 +500,8 @@ def int_caps(caps):
 BM_SRC_DAY, BM_SRC_B1, BM_SRC_STK, BM_SRC_WPG = range(4)
 BM_SRC_NAME = ["DAY", "B1", "STK", "WPG"]
 (BM_M_BMS_MISSING, BM_M_FORCE, BM_M_STALE, BM_M_LADESPERRE, BM_M_CHARGE, BM_M_FULL, BM_M_PROT, BM_M_CHARGING,
- BM_M_DIS) = range(9)
-BM_MODE_NAME = ["BMS_MISSING", "FORCE", "STALE", "LADESPERRE", "CHARGE", "FULL", "PROT", "CHARGING", "DIS"]
+ BM_M_DIS, BM_M_HOLD) = range(10)                  # HOLD appended (0.62-c), the older indices stay
+BM_MODE_NAME = ["BMS_MISSING", "FORCE", "STALE", "LADESPERRE", "CHARGE", "FULL", "PROT", "CHARGING", "DIS", "HOLD"]
 @dataclass(frozen=True)
 class SrcRule:
     b1_signed: int      # 1: a Bat1 discharge is house load the stacks take over; 0: only its charge counts
@@ -534,6 +541,7 @@ BM_MODE_RULE = {
     BM_M_PROT:        ModeRule(BM_A_ZERO, 0, BM_W_SOC),
     BM_M_CHARGING:    ModeRule(BM_A_ZERO, 0, BM_W_POWER),
     BM_M_DIS:         ModeRule(BM_A_DISCHARGE, 1, BM_W_NONE),
+    BM_M_HOLD:        ModeRule(BM_A_ZERO, 0, BM_W_SOC),       # force_full_from_pv without surplus (0.62-c)
 }
 
 
@@ -571,7 +579,8 @@ def bm_d2(b, prot, force, low, chg_prev):
     """D2. Per bank: SoC protection and force charge with hysteresis (only while the BMS reports), then the mode, first
     match: BMS_MISSING > FORCE > STALE > LADESPERRE > CHARGE / FULL > PROT > CHARGING > DIS. Charge mode on the Z2
     surplus, held down to SOYO_HOLD_TH once charging. LOW (0.52-c): DCL 0 or the lowest cell below CELL_FORCE_V force
-    charge too and stop the discharge, until DCL is back and the cell has recovered.
+    charge too and stop the discharge, until DCL is back and the cell has recovered. force_full_from_pv (0.62-c): the
+    named bank (ff) stays in CHARGE at 100 % and without surplus HOLDs instead of PROT / CHARGING / DIS.
     Returns (prot, force, low, chg_prev, charge_mode, mode per bank)."""
     charge_mode = bool(b["surplus_gt_on"] or (chg_prev and b["surplus_gt_hold"]))
     prot, force, low, mode, chg_next = list(prot), list(force), list(low), [0] * NBANK, 0
@@ -599,7 +608,9 @@ def bm_d2(b, prot, force, low, chg_prev):
         elif charge_mode and b["block"]:
             mode[k] = BM_M_LADESPERRE
         elif charge_mode:
-            mode[k] = BM_M_CHARGE if x["soc_lt_100"] else BM_M_FULL
+            mode[k] = BM_M_CHARGE if x["soc_lt_100"] or x.get("ff") else BM_M_FULL
+        elif x.get("ff"):
+            mode[k] = BM_M_HOLD
         elif prot[k]:
             mode[k] = BM_M_PROT
         elif x["charging"]:
@@ -666,6 +677,7 @@ class Chain:
         self.bat1_eff = self.chg_ref = self.surplus = 0.0
         self.block = self.charge_mode = 0
         self.cap_active = 0                     # D4: charge only the export above EXPORT_CAP
+        self.ff = -1                            # force_full_from_pv bank, -1 = off (0.62-c)
         self.discharge = [0] * NPH
         self.charge = [0] * NPH
         self.n_dis = self.n_chg = 0
@@ -678,6 +690,7 @@ def chain_inputs(inp, out, c):
     c.wp_on = inp.wp_time > 0 and inp.now - inp.wp_time < WP_MAX_AGE and inp.wp >= WP_ON_TH
     c.night = bool(inp.have_pv and inp.pv < NIGHT_PV_TH)
     c.winter = month >= WINTER_FROM or month <= WINTER_TO
+    c.ff = inp.force_full - 1 if 1 <= inp.force_full <= NBANK else -1
     # season from the measured energy (season.py), the months only when that is missing or older than 2 days
     season_ok = bool(inp.season and inp.t - inp.season_ts < SEASON_MAX_AGE)
     out.season = inp.season if season_ok else (BM_SUMMER if SUMMER_FROM <= month <= SUMMER_TO else BM_WINTER)
@@ -824,6 +837,8 @@ def chain_mode(cfg, inp, st, out, c):
         "bank": [d2_bank_bits(cfg, st.soc_ok[b], st.soc[b], inp.power_ok[b], inp.power[b], inp.lim_ok[b], inp.dcl[b],
                               inp.cell_ok[b], inp.cell_min[b]) for b in range(NBANK)],
     }
+    for b in range(NBANK):
+        d["bank"][b]["ff"] = b == c.ff
     st.prot, st.force, st.low, _, c.charge_mode, mode = bm_d2(d, st.prot, st.force, st.low, st.soyo_chg_prev)
     for b, bank in enumerate(BM_BANKS):
         r = BM_MODE_RULE[mode[b]]
@@ -899,10 +914,11 @@ def chain_charge(cfg, st, out, c):
     want = watt(c.own_charge) + c_div(KP_PM * (watt(c.chg_ref + c.bat1_eff) - target), 1000)
     if want < 0:
         want = 0
-    alloc_charge(cfg, st.lead, min(want, cap_sum), c.charge, c.n_chg, cap, out.sp)
+    alloc_charge(cfg, st.lead, c.ff, min(want, cap_sum), c.charge, c.n_chg, cap, out.sp)
     for p in range(NPH):
         if c.charge[p]:
-            out.why[p] = (out.why[p] + (" BAL" if st.lead >= 0 else " EQ"))[:WHY_LEN - 1]
+            tag = " FF" if c.ff >= 0 else " BAL" if st.lead >= 0 else " EQ"
+            out.why[p] = (out.why[p] + tag)[:WHY_LEN - 1]
             if c.cap_active:
                 out.why[p] = (out.why[p] + " CAP")[:WHY_LEN - 1]
 
@@ -916,10 +932,10 @@ def chain_pi(cfg, inp, st, out, c):
             if not st.soc_ok[b] or st.force[b] or st.low[b] or c.stale:
                 continue
             pi_ok[p] = 1
-            if not c.block and st.soc[b] < 100.0:
+            if not c.block and (st.soc[b] < 100.0 or b == c.ff):
                 pi_chg[p] = 1
                 n_pichg += 1
-            if not st.prot[b]:
+            if not st.prot[b] and b != c.ff:          # force_full_from_pv: that stack never discharges
                 pi_dis[p] = 1
                 n_pidis += 1
     applied = 0.0
@@ -950,7 +966,7 @@ def chain_pi(cfg, inp, st, out, c):
         if pi_ok[p]:
             pwhy[p] = "PI(%+.0f)" % u
     if u > 0:
-        alloc_charge(cfg, st.lead, int(u), pi_chg, n_pichg, int_caps(out.chg_cap), psp)
+        alloc_charge(cfg, st.lead, c.ff, int(u), pi_chg, n_pichg, int_caps(out.chg_cap), psp)
     elif u < 0:
         alloc_discharge(st.lead, int(-u), pi_dis, int_caps(out.dis_cap), "PI(%+.0f)" % u, psp, pwhy)
     for p in range(NPH):
@@ -980,6 +996,13 @@ def bm_step(cfg, inp, st):
                 or (out.sp[p] < 0 and out.dcl_bind[p] and -out.sp[p] >= int(out.dis_cap[p]) - 1)):
             out.why[p] = (out.why[p] + (" CCL" if out.sp[p] > 0 else " DCL"))[:WHY_LEN - 1]
     st.soyo_chg_prev = int(c.n_chg > 0)
+    # force_full_from_pv (0.62-c): done once its stack held 100 % for FORCE_FULL_HOLD_MIN; a missing BMS keeps the clock
+    if c.ff >= 0 and st.soc_ok[c.ff] and st.soc[c.ff] >= 100.0:
+        if st.ff_full_since <= 0:
+            st.ff_full_since = inp.now
+        out.ff_done = int(inp.now - st.ff_full_since >= cfg.force_full_hold_min * 60.0)
+    elif c.ff < 0 or st.soc_ok[c.ff]:
+        st.ff_full_since = 0.0
     if not c.n_dis:
         st.soyo_prop_prev = 0                # D3 with no discharging phase: reset
     pcc_over = bool(inp.have_pcc and inp.now - inp.inv_time < DO4_PCC_MAX_AGE and inp.pcc > PCC_PEAK_TH)
@@ -1027,6 +1050,7 @@ class FcIn:
     slots: list = field(default_factory=list)                     # [(unix t, kt)] of forecast.py kt_slots
     corr: float = 0.0
     lead: int = -1
+    force_full: int = 0                                           # bm_in.force_full: that stack charged first (0.62-c)
 
 
 @dataclass
@@ -1101,7 +1125,8 @@ def bm_full_forecast(cfg, fi):
             elif lead >= 0 and (d if lead == 0 else -d) < cfg.soc_balance_off:
                 lead = -1
         rest = fmax(0.0, p0 + FC_CHARGE_EFF * (pv - pv0))
-        for b in charge_order(lead):                            # alloc_charge: priority order up to the charger
+        ff = fi.force_full - 1 if 1 <= fi.force_full <= NBANK else -1
+        for b in charge_order(lead, ff):                            # alloc_charge: priority order up to the charger
             pb[b] = 0
             if not active[b] or soc[b] >= 100:
                 continue

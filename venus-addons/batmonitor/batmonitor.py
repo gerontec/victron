@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bm_logic as L  # noqa: E402
 import bm_parse  # noqa: E402
 
-VERSION = "0.61-py"
+VERSION = "0.62-py"
 INVERTER_TOPIC = "inverter/power_grid_exchange/json"
 R290_TOPIC = "r290/heatpump/all"
 AUSSEN_TOPIC = "aussen/temp"
@@ -42,6 +42,7 @@ FORECAST_TOPIC = "batmonitor/forecast"     # forecast.py on .218, hourly
 PEAK_MODEL_TOPIC = "batmonitor/peak_model" # out, retained, every PEAK_MODEL_SECONDS: for r290_boost.py
 PEAK_MODEL_SECONDS = 60.0
 DO4_LAST_TOPIC = "batmonitor/do4_last"     # out, retained: {"ts", "pcc_w"} of the last DO4 pulse (r290_boost, hantech)
+FORCE_FULL_TOPIC = "batmonitor/force_full_from_pv"   # in + out, retained: "S1" / "S2" / "off" (0.62-c), see batmonitor.c
 DO4_TOPIC = "pv_relay/DO4"                 # out, not retained: "1" for DO4_PULSE_S, then "0" (FoxESS shedding)
 TZ_BERLIN = "CET-1CEST,M3.5.0,M10.5.0/3"   # Europe/Berlin without a zoneinfo file
 SETPOINT_MAX_AGE = 90.0
@@ -97,7 +98,7 @@ class Batmonitor:
         self.mq = dict(have_pcc=0, have_pv=0, pcc=0.0, pv=0.0, bat1=0.0, pcc_avg5=0.0, bat1_avg5=0.0, inv_time=0.0,
                        have_soc_bat1=0, soc_bat1=0.0, r290_hz=0, r290_time=0.0, aussen=0.0, aussen_time=0.0,
                        wp=0.0, wp_time=0.0, season=0, season_ts=0.0, fc_target=0.0, fc_ts=0.0, fc_corr=0.0,
-                       fc_slots=[])
+                       fc_slots=[], force_full=0)
         self.bus = dbus.SystemBus()
         self.mqttc = None
 
@@ -161,7 +162,7 @@ class Batmonitor:
     # ---- MQTT (paho thread) --------------------------------------------------------------------------------
     def on_connect(self, client, userdata, flags, rc, properties=None):
         log("MQTT connected (%s)" % rc)
-        for t in (INVERTER_TOPIC, R290_TOPIC, AUSSEN_TOPIC, WP_TOPIC, SEASON_TOPIC, FORECAST_TOPIC):
+        for t in (INVERTER_TOPIC, R290_TOPIC, AUSSEN_TOPIC, WP_TOPIC, SEASON_TOPIC, FORECAST_TOPIC, FORCE_FULL_TOPIC):
             client.subscribe(t, 0)
 
     def on_message(self, client, userdata, msg):
@@ -189,6 +190,17 @@ class Batmonitor:
                 return
             with self.mq_lock:
                 self.mq.update(s, have_pcc=1, inv_time=mono())
+            return
+        if topic == FORCE_FULL_TOPIC:
+            ff = bm_parse.parse_force_full(text)
+            if ff < 0:
+                loge('force_full_from_pv: "%.40s" ignored (S1, S2 or off)' % text)
+                return
+            with self.mq_lock:
+                old = self.mq["force_full"]
+                self.mq["force_full"] = ff
+            if ff != old:
+                log("force_full_from_pv: %s" % (L.BM_BANKS[ff - 1].name if ff else "off"))
             return
         if topic == R290_TOPIC:
             hz = bm_parse.parse_r290(text)
@@ -290,6 +302,7 @@ class Batmonitor:
         fi.have_pv = int(inp.have_pv and inp.now - inp.inv_time < 180.0)
         fi.pv_sofar = inp.pv
         fi.lead = self.st.lead
+        fi.force_full = inp.force_full
         for b in range(L.NBANK):
             fi.volt_ok[b], fi.volt[b] = inp.volt_ok[b], inp.volt[b]
             fi.soc_ok[b], fi.soc[b] = self.st.soc_ok[b], self.st.soc[b]
@@ -350,6 +363,11 @@ class Batmonitor:
             "chain": {"src": o.src_why},
             "wp_max_w": o.wp_max_w,
             "d1_id": o.d1_id,
+            "force_full_from_pv": {                 # 0.62-c: stack None = off; held_min at 100 % SoC
+                "stack": L.BM_BANKS[il.force_full - 1].name if 1 <= il.force_full <= L.NBANK else None,
+                "held_min": (c_round((il.now - st.ff_full_since) / 6.0) / 10
+                             if 1 <= il.force_full <= L.NBANK and st.ff_full_since > 0 else None),
+                "hold_min": self.cfg.force_full_hold_min},
             "pi": {"armed": self.cfg.pi_armed, "y_w": c_round(o.pi.y), "e_w": c_round(o.pi.e),
                    "applied_w": c_round(o.pi.applied), "u_w": c_round(o.pi.u),
                    "sp": {L.BM_PH[p]: o.pi.sp[p] for p in range(L.NPH)}},
@@ -400,6 +418,7 @@ class Batmonitor:
             if m["fc_ts"] > 0 and i.t - int(m["fc_ts"]) < 3 * 3600:    # the slots for the peak window, as FC_MAX_AGE
                 i.fc_corr = m["fc_corr"]
                 i.fc_slots = list(m["fc_slots"])
+            i.force_full = m["force_full"]
         vb = self.vebus()
         i.grid_ok = int(self.get(vb, "/Ac/ActiveIn/Connected") == 1.0)
         for p in range(L.NPH):
@@ -440,6 +459,16 @@ class Batmonitor:
                 self.do4_publish("1")
                 self.do4_off_at = mono() + L.DO4_PULSE_S
                 self.publish(DO4_LAST_TOPIC, '{"ts":%d,"pcc_w":%.0f}' % (int(time.time()), i.pcc), 1, True)
+        if o.ff_done:
+            log("force_full_from_pv: %s held 100 %% SoC for %.0f min, done%s" % (
+                L.BM_BANKS[i.force_full - 1].name, self.cfg.force_full_hold_min,
+                "" if self.live else " (dry run, command kept)"))
+            if self.live:                            # a dry run (NCR fallback) never ends the live command
+                with self.mq_lock:
+                    self.mq["force_full"] = 0
+                self.st.ff_full_since = 0.0
+                if not self.publish(FORCE_FULL_TOPIC, "off", 1, True):
+                    loge("force_full_from_pv: publish off failed")
         if o.lead_event > 0:
             log("SoC balance: %s ahead by %.1f %%" % (L.BM_BANKS[self.st.lead].name, o.lead_diff))
         elif o.lead_event < 0:

@@ -68,6 +68,16 @@ def parse_r290(text):
     return int(v) if v is not None else None
 
 
+def parse_force_full(text):
+    """batmonitor/force_full_from_pv (0.62-c): "S1" / "S2" (case and whitespace ignored) -> 1 / 2, "off", "0" or empty
+    (a cleared retained message) -> 0; anything else -1 (ignored, the command stays)"""
+    w = text.split() if isinstance(text, str) else None
+    if w is None or len(w) > 1 or (w and len(w[0]) > 7):
+        return -1
+    w = w[0].lower() if w else ""
+    return {"": 0, "off": 0, "0": 0, "s1": 1, "s2": 2}.get(w, -1)
+
+
 def parse_number(text, lo, hi):
     """plain number topics (em0/power, outdoor temperature): the whole text one number in lo..hi, None = invalid"""
     try:

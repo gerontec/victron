@@ -67,6 +67,8 @@ int main(int argc, char **argv)
 				if ((run + b) % 6 == 2 && k >= 40 && k < 70)
 					in.dcl[b] = 0;
 			}
+			/* 0.62-c: force_full_from_pv off / S1 / S2 in alternating runs (deterministic, no rand) */
+			in.force_full = run % 4 == 3 ? 1 + (run / 4) % 2 : 0;
 			if (io) {
 				printf("IN %d %d %d %d %.17g %lld %d %d %.17g %.17g %.17g %.17g %.17g %.17g %d %.17g %d %.17g %.17g %.17g "
 					   "%.17g %.17g %d %lld %.17g %lld", run, k, cfg.pi_armed, fc_flag, in.now, (long long)in.t,
@@ -85,7 +87,7 @@ int main(int argc, char **argv)
 				printf(" %.17g %d", in.fc_corr, in.fc_n);
 				for (int i = 0; i < in.fc_n; i++)
 					printf(" %lld %.17g", (long long)in.fc_slot_t[i], in.fc_slot_kt[i]);
-				putchar('\n');
+				printf(" %d\n", in.force_full);
 			}
 			bm_step(&cfg, &in, &st, &out);
 			if (io && k % 7 == 0) {                         /* the full_at forecast too, deterministic slots (no rand) */
@@ -96,6 +98,7 @@ int main(int argc, char **argv)
 				fi.have_pv = in.have_pv;
 				fi.pv_sofar = in.pv;
 				fi.lead = st.lead;
+				fi.force_full = in.force_full;
 				fi.corr = (run % 3) * 0.5;
 				fi.n_slots = run % 5;
 				for (int i = 0; i < fi.n_slots; i++) {
@@ -118,6 +121,7 @@ int main(int argc, char **argv)
 				for (int b = 0; b < NBANK; b++)
 					printf(" %d %.17g %d %.17g %d %.17g", fi.soc_ok[b], fi.soc[b], fi.has_avg[b], fi.avg[b], fi.volt_ok[b],
 						   fi.volt[b]);
+				printf(" %d", fi.force_full);
 				printf("\nFC %d %d %lld %lld %.6f %.6f %.6f %.6f %.3f %.6f %d\n", run, k, (long long)fo.full_at[0],
 					   (long long)fo.full_at[1], fo.soc_sunset[0], fo.soc_sunset[1], fo.anchor, fo.kt_now, fo.pv_now_w,
 					   fo.rest_kwh, fo.weather);
@@ -125,8 +129,8 @@ int main(int argc, char **argv)
 			printf("%d %d %d %d %d\t%s\t%s\t%s\t%.3f %.3f %.3f %d %d %d %d\n", run, k, out.sp[0], out.sp[1], out.sp[2],
 				   out.why[0], out.why[1], out.why[2], out.surplus, out.pi.u, out.pi.y, out.pi.sp[0], out.pi.sp[1],
 				   out.pi.sp[2], out.bat1_first);
-			if (io)                       /* the DO4 pulse too (D5 changes no setpoint), and the D1 cell (0.60-c) */
-				printf("D5 %d %d %d %d\n", run, k, out.do4_pulse, out.d1_id);
+			if (io)                       /* the DO4 pulse too (D5 changes no setpoint), the D1 cell (0.60-c), ff_done (0.62-c) */
+				printf("D5 %d %d %d %d %d\n", run, k, out.do4_pulse, out.d1_id, out.ff_done);
 		}
 	}
 	return 0;

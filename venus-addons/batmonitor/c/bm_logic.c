@@ -107,6 +107,7 @@ const struct bm_param BM_PARAMS[] = {
 	{"ACOUT_FEED_S",          P(acout_feed_s),              10,      0,       120,     "s", "... for this long"},
 	{"WP_WINTER_W",           P(wp_winter_w),               1000,    0,       12000,   "W", "winter half-year (October..March), heat pump running: the stacks discharge nothing while the Sofar Bat1 discharges, else at most this (heat pump off: PCC near 0)"},
 	{"CHARGER_DC_W",          P(charger_dc_w),              3600,    500,     5000,    "W", "full_at forecast: DC at the BMS per MultiPlus at its limit (measured 2026-10-09: ~3.6 kW, 65-67 A, flat over 53.6-54.6 V)"},
+	{"FORCE_FULL_HOLD_MIN",   P(force_full_hold_min),       60,      0,       1440,    "min", "force_full_from_pv: the command ends once its stack held 100 % SoC this long (BMS cell balancing)"},
 };
 const int BM_NPARAMS = sizeof(BM_PARAMS) / sizeof(BM_PARAMS[0]);
 
@@ -396,10 +397,18 @@ double bm_bms_cap_phase(const struct bm_cfg *cfg, int bank, int volt_ok, double 
 	return (charge ? w / cfg->charge_eff : w * cfg->charge_eff) / BM_BANKS[bank].nph;
 }
 
-/* banks in charge order: CHARGE_PRIORITY, the lead bank (SoC ahead) last; returns the count */
-static int charge_order(int lead, int *order)
+/* banks in charge order: CHARGE_PRIORITY, the lead bank (SoC ahead) last; returns the count. force_full_from_pv
+   (0.62-c, ff = its bank, -1 none): that bank first, the lead does not count */
+static int charge_order(int lead, int ff, int *order)
 {
 	int k = 0;
+	if (ff >= 0) {
+		order[k++] = ff;
+		for (int i = 0; i < NBANK; i++)
+			if (CHARGE_PRIORITY[i] != ff)
+				order[k++] = CHARGE_PRIORITY[i];
+		return k;
+	}
 	for (int i = 0; i < NBANK; i++)
 		if (CHARGE_PRIORITY[i] != lead)
 			order[k++] = CHARGE_PRIORITY[i];
@@ -410,11 +419,11 @@ static int charge_order(int lead, int *order)
 
 /* S5 charge split (0.48-c, the same core, whole watts): one level per bank in CHARGE_PRIORITY order, the lead bank
    (SoC ahead) last, each up to its real charger capacity (CHARGER_CAP_PHASE, 0.29-c: cap[] = charger 70 A x BMS
-   voltage, BMS CCL); what the caps cut goes up to CHARGE_MAX_PHASE on all charging phases alike */
-static void alloc_charge(const struct bm_cfg *cfg, int lead, int rest, const int *chg, int n_chg, const int *cap,
-						 int *sp)
+   voltage, BMS CCL); what the caps cut goes up to CHARGE_MAX_PHASE on all charging phases alike. ff: charge_order */
+static void alloc_charge(const struct bm_cfg *cfg, int lead, int ff, int rest, const int *chg, int n_chg,
+						 const int *cap, int *sp)
 {
-	int order[NBANK], k = charge_order(lead, order), lvl[NPH], cap1[NPH], give[NPH];
+	int order[NBANK], k = charge_order(lead, ff, order), lvl[NPH], cap1[NPH], give[NPH];
 	for (int p = 0; p < NPH; p++) {
 		lvl[p] = -1;
 		cap1[p] = cap[p] < (int)cfg->charger_cap_phase ? cap[p] : (int)cfg->charger_cap_phase;
@@ -441,7 +450,7 @@ static void chg_caps(const struct bm_out *out, int *cap)
 
 const char *BM_SRC_NAME[BM_SRC_N] = {"DAY", "B1", "STK", "WPG"};
 const char *BM_MODE_NAME[BM_M_N] = {"BMS_MISSING", "FORCE", "STALE", "LADESPERRE", "CHARGE", "FULL", "PROT", "CHARGING",
-									"DIS"};
+									"DIS", "HOLD"};
 
 /* D1. Sofar first (0.38-c): Bat1 above BAT1_SOC_MIN (on again from + BAT1_FIRST_HYST) and the heat pump running ->
    the Sofar delivers first at night (S3 B1); else at night the stacks take the Sofar over (night floor, S3 STK).
@@ -469,6 +478,7 @@ const struct bm_mode_rule BM_MODE_RULE[BM_M_N] = {
 	[BM_M_PROT]        = {BM_A_ZERO,      0,      BM_W_SOC},
 	[BM_M_CHARGING]    = {BM_A_ZERO,      0,      BM_W_POWER},
 	[BM_M_DIS]         = {BM_A_DISCHARGE, 1,      BM_W_NONE},
+	[BM_M_HOLD]        = {BM_A_ZERO,      0,      BM_W_SOC},   /* force_full_from_pv without surplus (0.62-c) */
 };
 
 void bm_d1(const struct bm_d1_in *b, int bat1_first, struct bm_d1_out *o)
@@ -498,7 +508,10 @@ int bm_d1_id(const struct bm_d1_in *b, int bat1_first)
    10 % SoC / 3.0 V and switched itself off, the SoC force charge never started): DCL 0 or the lowest cell below
    CELL_FORCE_V force charge too and stop the discharge at once, until DCL is back and the cell has recovered, and
    (0.55-c, user 2026-10-24) the SoC is back at SOC_MIN_RELEASE: under the force charge current the cell is above
-   CELL_FORCE_RELEASE_V within minutes, without the SoC term LOW and discharge would take turns */
+   CELL_FORCE_RELEASE_V within minutes, without the SoC term LOW and discharge would take turns.
+   force_full_from_pv (0.62-c, user 2026-10-26: force balancing): the named bank (ff) stays in CHARGE at 100 % (the
+   Multi keeps offering current, the BMS CCL tapers it while the cells balance) and without surplus HOLDs instead of
+   PROT / CHARGING / DIS: it never discharges while the command is on. BMS_MISSING, FORCE, STALE and LADESPERRE first */
 void bm_d2(const struct bm_d2_in *b, const int *prot, const int *force, const int *low, int chg_prev,
 		   struct bm_d2_out *o)
 {
@@ -525,8 +538,8 @@ void bm_d2(const struct bm_d2_in *b, const int *prot, const int *force, const in
 		}
 		o->mode[k] = !x->bms_ok ? BM_M_BMS_MISSING : o->force[k] || o->low[k] ? BM_M_FORCE : b->stale ? BM_M_STALE
 					 : o->charge_mode && b->block ? BM_M_LADESPERRE
-					 : o->charge_mode ? (x->soc_lt_100 ? BM_M_CHARGE : BM_M_FULL)
-					 : o->prot[k] ? BM_M_PROT : x->charging ? BM_M_CHARGING : BM_M_DIS;
+					 : o->charge_mode ? (x->soc_lt_100 || x->ff ? BM_M_CHARGE : BM_M_FULL)
+					 : x->ff ? BM_M_HOLD : o->prot[k] ? BM_M_PROT : x->charging ? BM_M_CHARGING : BM_M_DIS;
 		if (o->mode[k] == BM_M_CHARGE)
 			o->chg_prev = 1;
 	}
@@ -596,10 +609,12 @@ int bm_d5(const struct bm_d5_in *b)
    Rule text per phase (0.42-c, one reason per stage, at most 48 characters for pv_victron.bm_lX_rule):
      <S1/S4 mode> [SRC:<S3>] [<S5 split>] [<limit>]
      mode   BMS_MISSING  FORCE(soc)  STALE  LADESPERRE(peak h)  CHARGE  FULL  PROT(soc)  CHARGING(W)  PROP  IDLE
+            HOLD(soc) (force_full_from_pv stack without surplus, 0.62-c)
      SRC    DAY  STK (night floor: stacks take over the Sofar)  B1 (Sofar first, B1FIRST)  WPG (winter, WP running,
             no B1FIRST)
      split  EQ (same power per stack)  BAL (lead stack alone / charged last)  SPILL (lead at its cap, rest to the
-            others)  WAIT (the other stack while the lead discharges)
+            others)  WAIT (the other stack while the lead discharges)  FF (charge: the force_full_from_pv stack first,
+            0.62-c)
      limit  CCL  DCL  WPMAX(W) (discharge: winter heat pump rule, 0 W while the Sofar discharges, else WP_WINTER_W)
      PI(+u) when the PI prototype is armed */
 struct chain {
@@ -612,6 +627,7 @@ struct chain {
 	double bat1_eff, chg_ref, surplus;
 	int block, charge_mode;
 	int cap_active;                    /* D4: charge only the export above EXPORT_CAP */
+	int ff;                            /* force_full_from_pv bank, -1 = off (0.62-c) */
 	int discharge[NPH], charge[NPH], n_dis, n_chg;
 };
 
@@ -624,6 +640,7 @@ static void chain_inputs(const struct bm_in *in, struct bm_out *out, struct chai
 	c->wp_on = in->wp_time > 0 && in->now - in->wp_time < WP_MAX_AGE && in->wp >= WP_ON_TH;
 	c->night = in->have_pv && in->pv < NIGHT_PV_TH;
 	c->winter = month >= WINTER_FROM || month <= WINTER_TO;
+	c->ff = in->force_full >= 1 && in->force_full <= NBANK ? in->force_full - 1 : -1;
 	/* Winter/summer from the measured energy (season.py on .218: summer when export > 2 x heat pump over 7 days,
 	   winter below 1 x, 0.21), the months only when that is missing or older than 2 days. 0.59-c: display only */
 	int season_ok = in->season && in->t - in->season_ts < SEASON_MAX_AGE;
@@ -723,9 +740,11 @@ static void chain_mode(const struct bm_cfg *cfg, const struct bm_in *in, struct 
 	d.block = c->block;
 	d.surplus_gt_on = c->surplus > PCC_SURPLUS_TH;
 	d.surplus_gt_hold = c->surplus > SOYO_HOLD_TH;
-	for (int b = 0; b < NBANK; b++)
+	for (int b = 0; b < NBANK; b++) {
 		d2_bank_bits(cfg, st->soc_ok[b], st->soc[b], in->power_ok[b], in->power[b], in->lim_ok[b], in->dcl[b],
 					 in->cell_ok[b], in->cell_min[b], &d.bank[b]);
+		d.bank[b].ff = b == c->ff;
+	}
 	bm_d2(&d, st->prot, st->force, st->low, st->soyo_chg_prev, &o);
 	memcpy(st->prot, o.prot, sizeof(st->prot));
 	memcpy(st->force, o.force, sizeof(st->force));
@@ -835,10 +854,10 @@ static void chain_charge(const struct bm_cfg *cfg, const struct bm_state *st, st
 	int want = watt(c->own_charge) + (int)((long)KP_PM * (watt(c->chg_ref + c->bat1_eff) - target) / 1000);
 	if (want < 0)
 		want = 0;
-	alloc_charge(cfg, st->lead, want < cap_sum ? want : cap_sum, c->charge, c->n_chg, cap, out->sp);
-	for (int p = 0; p < NPH; p++)                       /* CHARGE_PRIORITY order; with a lead the other stack first */
+	alloc_charge(cfg, st->lead, c->ff, want < cap_sum ? want : cap_sum, c->charge, c->n_chg, cap, out->sp);
+	for (int p = 0; p < NPH; p++)       /* CHARGE_PRIORITY order; with a lead the other stack first; FF that stack first */
 		if (c->charge[p]) {
-			strncat(out->why[p], st->lead >= 0 ? " BAL" : " EQ", WHY_LEN - 1 - strlen(out->why[p]));
+			strncat(out->why[p], c->ff >= 0 ? " FF" : st->lead >= 0 ? " BAL" : " EQ", WHY_LEN - 1 - strlen(out->why[p]));
 			if (c->cap_active)
 				strncat(out->why[p], " CAP", WHY_LEN - 1 - strlen(out->why[p]));
 		}
@@ -858,11 +877,11 @@ static void chain_pi(const struct bm_cfg *cfg, const struct bm_in *in, struct bm
 			if (!st->soc_ok[b] || st->force[b] || st->low[b] || c->stale)
 				continue;
 			pi_ok[p] = 1;
-			if (!c->block && st->soc[b] < 100.0) {
+			if (!c->block && (st->soc[b] < 100.0 || b == c->ff)) {
 				pi_chg[p] = 1;
 				n_pichg++;
 			}
-			if (!st->prot[b]) {
+			if (!st->prot[b] && b != c->ff) {          /* force_full_from_pv: that stack never discharges */
 				pi_dis[p] = 1;
 				n_pidis++;
 			}
@@ -899,7 +918,7 @@ static void chain_pi(const struct bm_cfg *cfg, const struct bm_in *in, struct bm
 	if (u > 0) {
 		int cap[NPH];
 		chg_caps(out, cap);
-		alloc_charge(cfg, st->lead, (int)u, pi_chg, n_pichg, cap, psp);
+		alloc_charge(cfg, st->lead, c->ff, (int)u, pi_chg, n_pichg, cap, psp);
 	} else if (u < 0) {
 		char rule[32];
 		snprintf(rule, sizeof(rule), "PI(%+.0f)", u);
@@ -943,6 +962,13 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 			(out->sp[p] < 0 && out->dcl_bind[p] && -out->sp[p] >= (int)out->dis_cap[p] - 1))
 			strncat(out->why[p], out->sp[p] > 0 ? " CCL" : " DCL", WHY_LEN - 1 - strlen(out->why[p]));
 	st->soyo_chg_prev = c.n_chg > 0;
+	/* force_full_from_pv (0.62-c): done once its stack held 100 % for FORCE_FULL_HOLD_MIN; a missing BMS keeps the clock */
+	if (c.ff >= 0 && st->soc_ok[c.ff] && st->soc[c.ff] >= 100.0) {
+		if (st->ff_full_since <= 0)
+			st->ff_full_since = in->now;
+		out->ff_done = in->now - st->ff_full_since >= cfg->force_full_hold_min * 60.0;
+	} else if (c.ff < 0 || st->soc_ok[c.ff])
+		st->ff_full_since = 0;
 	if (!c.n_dis) {
 		struct bm_d3_in d = {0, 0, 0, 0};
 		bm_d3(&d, st->soyo_prop_prev, &st->soyo_prop_prev);
@@ -1063,7 +1089,8 @@ void bm_full_forecast(const struct bm_cfg *cfg, const struct bm_fc_in *in, struc
 			else if (lead >= 0 && (lead == 0 ? d : -d) < cfg->soc_balance_off)
 				lead = -1;          /* no longer ahead: a 5 min step can jump over the +-1 % window of update_lead */
 		}
-		int order[NBANK], k = charge_order(lead, order);
+		int ff = in->force_full >= 1 && in->force_full <= NBANK ? in->force_full - 1 : -1;
+		int order[NBANK], k = charge_order(lead, ff, order);
 		double rest = fmax(0.0, p0 + FC_CHARGE_EFF * (pv - pv0));
 		for (int i = 0; i < k; i++) {                  /* alloc_charge: priority order up to the charger */
 			int b = order[i];

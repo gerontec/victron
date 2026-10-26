@@ -139,8 +139,14 @@ static void d2_bank_inv(const struct bm_d2_in *b, int k, int prot, int force, in
 						   && !x->charging), "DIS only with BMS, unprotected, fresh data, no surplus");
 	INV(!(x->bms_ok && x->soc_lt_min) || m != BM_M_DIS, "never discharge below SOC_MIN");
 	INV(!(x->bms_ok && x->soc_lt_force) || m == BM_M_FORCE, "below SOC_FORCE always force charge");
-	INV(m != BM_M_CHARGE || (x->soc_lt_100 && o->charge_mode && !b->block && !o->force[k] && !o->low[k] && !b->stale),
-		"CHARGE only below 100 %%, with surplus, no charge block, no force, fresh data");
+	INV(m != BM_M_CHARGE || ((x->soc_lt_100 || x->ff) && o->charge_mode && !b->block && !o->force[k] && !o->low[k]
+							  && !b->stale), "CHARGE only below 100 %% (force_full also at 100), with surplus, no charge"
+		" block, no force, fresh data");
+	INV(!x->ff || m != BM_M_DIS, "force_full_from_pv: that stack never discharges (0.62-c)");
+	INV((m == BM_M_HOLD) == (x->ff && x->bms_ok && !o->force[k] && !o->low[k] && !b->stale && !o->charge_mode),
+		"HOLD exactly for the force_full stack without surplus, after BMS_MISSING / FORCE / STALE");
+	INV(!x->ff || (m != BM_M_FULL && m != BM_M_PROT && m != BM_M_CHARGING), "force_full: no FULL / PROT / CHARGING");
+	INV(x->ff || m != BM_M_HOLD, "HOLD only with force_full");
 	INV(!b->stale || (m != BM_M_DIS && m != BM_M_CHARGE), "stale data: neither charge nor discharge");
 	INV(x->bms_ok || (m == BM_M_BMS_MISSING && o->prot[k] == prot && o->force[k] == force && o->low[k] == low),
 		"without BMS: BMS_MISSING, protection state kept");
@@ -161,11 +167,11 @@ static void d2_bank_inv(const struct bm_d2_in *b, int k, int prot, int force, in
    each bank's result equals its single-bank result, and chg_prev = OR(mode == CHARGE) */
 static void check_d2(void)
 {
-	struct bm_d2_bank banks[512], inert;
+	struct bm_d2_bank banks[1024], inert;
 	int nb = 0;
-	for (unsigned v = 0; v < 512; v++) {
+	for (unsigned v = 0; v < 1024; v++) {                /* bit 9: ff, force_full_from_pv (0.62-c) */
 		struct bm_d2_bank x = {BIT(v, 0), BIT(v, 1), BIT(v, 2), BIT(v, 3), BIT(v, 4), BIT(v, 5), BIT(v, 6), BIT(v, 7),
-							   BIT(v, 8)};
+							   BIT(v, 8), BIT(v, 9)};
 		if (bank_ok(&x))
 			banks[nb++] = x;
 	}
@@ -228,7 +234,7 @@ static void check_d2(void)
 		}
 		INV(o.chg_prev == any, "chg_prev = OR(mode == CHARGE)");
 	}
-	printf("\nD2 protection / mode per stack: %ld consistent combinations (%d bank bit sets of 512 x 12 global bits x 16"
+	printf("\nD2 protection / mode per stack: %ld consistent combinations (%d bank bit sets of 1024 x 12 global bits x 16"
 		   " states), both positions; coupling: %ld random joint inputs\n", combos, nb, joint);
 	printf("  mode reached (per stack):");
 	for (int m = 0; m < BM_M_N; m++)
@@ -376,6 +382,7 @@ static void check_amounts(void)
 				in.ccl[b] = r(0, 150);
 				in.dcl[b] = r(0, 250);
 			}
+			in.force_full = run % 3;                   /* 0.62-c: off, S1, S2 (deterministic, no rand) */
 			bm_step(&cfg, &in, &st, &out);
 			cycles++;
 			int dis_sum = 0;
@@ -394,8 +401,13 @@ static void check_amounts(void)
 							sp, out.chg_cap[p]);
 				}
 				if (!strncmp(w, "PROT", 4) || !strncmp(w, "STALE", 5) || !strncmp(w, "BMS_MISSING", 11)
-					|| !strncmp(w, "FULL", 4) || !strncmp(w, "CHARGING", 8) || !strncmp(w, "LADESPERRE", 10))
+					|| !strncmp(w, "FULL", 4) || !strncmp(w, "CHARGING", 8) || !strncmp(w, "LADESPERRE", 10)
+					|| !strncmp(w, "HOLD", 4))
 					INV(sp == 0, "no power in %s, got %d", w, sp);
+				int ffp = in.force_full && (in.force_full - 1 == 0 ? p == 0 : p != 0);   /* STACK1 = L1, STACK2 = L2+L3 */
+				INV(!ffp || sp >= 0, "0.62-c: the force_full stack never discharges, got %d %s", sp, w);
+				INV(!ffp || strncmp(w, "CHARGE", 6) || strstr(w, " FF"), "0.62-c: its charge is tagged FF, got %s", w);
+				INV(ffp || strncmp(w, "HOLD", 4), "0.62-c: HOLD only on the force_full stack, got %s", w);
 				if (!strncmp(w, "FORCE", 5))
 					INV(sp == (int)fmin(cfg.force_charge_w, out.chg_cap[p]), "force charge min(FORCE_CHARGE_W, chg_cap %.0f), "
 						"got %d", out.chg_cap[p], sp);
@@ -408,7 +420,8 @@ static void check_amounts(void)
 		}
 	}
 	printf("\namounts: %ld random bm_step cycles, properties checked (discharge / charge only in their modes, phase and\n"
-		   "  total caps, no power in PROT / STALE / BMS_MISSING / FULL / CHARGING / LADESPERRE, no heat pump rule)\n", cycles);
+		   "  total caps, no power in PROT / STALE / BMS_MISSING / FULL / CHARGING / LADESPERRE / HOLD, no heat pump rule,\n"
+		   "  the force_full stack never discharges)\n", cycles);
 }
 
 int main(void)

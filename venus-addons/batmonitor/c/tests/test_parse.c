@@ -61,11 +61,21 @@ static void test_number(void)
 	CHECK(!bm_parse_number("40000", -1000, 30000, &v), "out of range");
 }
 
+static void test_force_full(void)
+{
+	CHECK(bm_parse_force_full("S1") == 1 && bm_parse_force_full(" s2\n") == 2, "S1 / S2, case and whitespace");
+	CHECK(bm_parse_force_full("off") == 0 && bm_parse_force_full("OFF") == 0 && bm_parse_force_full("0") == 0
+		  && bm_parse_force_full("") == 0, "off, 0, empty (cleared retained)");
+	CHECK(bm_parse_force_full("S3") == -1 && bm_parse_force_full("S1 S2") == -1 && bm_parse_force_full("1") == -1
+		  && bm_parse_force_full("STACK1_MUST") == -1, "anything else ignored");
+}
+
 int main(void)
 {
 	test_inverter();
 	test_r290();
 	test_number();
+	test_force_full();
 	printf("%d checks, %d failed\n", checks, fails);
 	return fails != 0;
 }

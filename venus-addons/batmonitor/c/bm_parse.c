@@ -4,6 +4,8 @@
 #include <ctype.h>
 #include <math.h>
 #include <stdlib.h>
+#include <string.h>
+#include <strings.h>
 
 /* plausible ranges in the units of the payload (kW, %, Hz) */
 #define PCC_MAX_KW 100.0
@@ -64,4 +66,26 @@ int bm_parse_number(const char *text, double lo, double hi, double *v)
 		return 0;
 	*v = x;
 	return 1;
+}
+
+int bm_parse_force_full(const char *text)
+{
+	char w[8];
+	size_t n = 0;
+	while (isspace((unsigned char)*text))
+		text++;
+	while (*text && !isspace((unsigned char)*text) && n < sizeof(w) - 1)
+		w[n++] = *text++;
+	w[n] = 0;
+	while (isspace((unsigned char)*text))
+		text++;
+	if (*text)
+		return -1;                                   /* two words or longer than 7 characters */
+	if (!n || !strcasecmp(w, "off") || !strcmp(w, "0"))
+		return 0;
+	if (!strcasecmp(w, "S1"))
+		return 1;
+	if (!strcasecmp(w, "S2"))
+		return 2;
+	return -1;
 }

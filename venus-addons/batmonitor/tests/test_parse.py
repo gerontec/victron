@@ -6,7 +6,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from bm_parse import parse_inverter, parse_number, parse_r290  # noqa: E402
+from bm_parse import parse_force_full, parse_inverter, parse_number, parse_r290  # noqa: E402
 
 checks = fails = 0
 
@@ -58,6 +58,12 @@ check(parse_number("123xyz", -1000, 30000) is None, "trailing text: rejected")
 check(parse_number("", -1000, 30000) is None and parse_number("abc", -1000, 30000) is None, "no number")
 check(parse_number("nan", -1000, 30000) is None and parse_number("inf", -1000, 30000) is None, "nan / inf")
 check(parse_number("40000", -1000, 30000) is None, "out of range")
+
+check(parse_force_full("S1") == 1 and parse_force_full(" s2\n") == 2, "S1 / S2, case and whitespace")
+check(parse_force_full("off") == 0 and parse_force_full("OFF") == 0 and parse_force_full("0") == 0
+      and parse_force_full("") == 0, "off, 0, empty (cleared retained)")
+check(parse_force_full("S3") == -1 and parse_force_full("S1 S2") == -1 and parse_force_full("1") == -1
+      and parse_force_full("STACK1_MUST") == -1, "anything else ignored")
 
 print("%d checks, %d failed" % (checks, fails))
 sys.exit(fails != 0)
