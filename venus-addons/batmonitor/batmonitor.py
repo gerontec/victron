@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bm_logic as L  # noqa: E402
 import bm_parse  # noqa: E402
 
-VERSION = "0.67-py"
+VERSION = "0.68-py"
 INVERTER_TOPIC = "inverter/power_grid_exchange/json"
 R290_TOPIC = "r290/heatpump/all"
 AUSSEN_TOPIC = "aussen/temp"
@@ -443,9 +443,12 @@ class Batmonitor:
             i.power_ok[b], i.power[b] = int(pw is not None), pw or 0.0
             u = self.get(s, "/Dc/0/Voltage")
             i.volt_ok[b], i.volt[b] = int(u is not None), u or 0.0
-            ccl, dcl = self.get(s, "/Info/MaxChargeCurrent"), None
+            # 0.68-c: dbus-ebox-battery >= 1.5 publishes the DVCC limits of both banks on /Info/* and the Pytes alone
+            # on /Info/Pack/*; the per-bank caps need the bank's own limits
+            lim = "/Info/Pack/" if self.get(s, "/Info/Pack/MaxChargeCurrent") is not None else "/Info/"
+            ccl, dcl = self.get(s, lim + "MaxChargeCurrent"), None
             if ccl is not None and ccl >= 0:
-                dcl = self.get(s, "/Info/MaxDischargeCurrent")
+                dcl = self.get(s, lim + "MaxDischargeCurrent")
             i.lim_ok[b] = int(ccl is not None and ccl >= 0 and dcl is not None and dcl >= 0)
             i.ccl[b], i.dcl[b] = ccl or 0.0, dcl or 0.0
             cell = self.get(s, "/System/MinCellVoltage")         # 0.52-c: LOW force charge

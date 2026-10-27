@@ -65,6 +65,9 @@
  *     FORCE_FULL_TOP_V (3.45 V, so the small spread at rest after the charge does not count), and in any case
  *     FORCE_FULL_MAX_MIN (240 min) after the command came, also when the stack never reached 100 %. A restart of
  *     batmonitor starts that clock again. state.json force_full_from_pv on_min / max_min / spread_mv.
+ *   - bank limits from /Info/Pack/... when the service has them (0.68-c, dbus-ebox-battery 1.5): the EBox service is
+ *     the DVCC BMS of the whole VE.Bus system and now publishes both banks' limits on /Info/...; the Pytes alone is on
+ *     /Info/Pack/.... The MUST (can0) has no Pack paths and keeps /Info/....
  *   - full_at with the measured charger power (0.31-c, user 2026-10-09): each MultiPlus delivers ~3.6 kW DC at the BMS
  *     at its limit (65-67 A, flat over 53.6-54.6 V; AC-in ~4040 W), not 70 A x U: CHARGER_DC_W caps the forecast.
  *   - full_at (0.32-c, user 2026-10-09): the forecast splits the power each step like alloc_charge and lets the SoC lead
@@ -99,7 +102,7 @@
 #include "bm_logic.h"
 #include "bm_parse.h"
 
-#define VERSION "0.67-c"
+#define VERSION "0.68-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
@@ -749,8 +752,12 @@ static void calc(void)
 		in.bms_ok[b] = get(s, "/Connected", &conn) == 0 && conn == 1.0 && get(s, "/Soc", &in.soc[b]) == 0;
 		in.power_ok[b] = get(s, "/Dc/0/Power", &in.power[b]) == 0;
 		in.volt_ok[b] = get(s, "/Dc/0/Voltage", &in.volt[b]) == 0;
-		in.lim_ok[b] = get(s, "/Info/MaxChargeCurrent", &in.ccl[b]) == 0 && in.ccl[b] >= 0 &&
-					   get(s, "/Info/MaxDischargeCurrent", &in.dcl[b]) == 0 && in.dcl[b] >= 0;
+		/* 0.68-c: dbus-ebox-battery >= 1.5 publishes the DVCC limits of both banks on /Info/... and the Pytes alone on
+		   /Info/Pack/...; the per-bank caps need the bank's own limits */
+		in.lim_ok[b] = (get(s, "/Info/Pack/MaxChargeCurrent", &in.ccl[b]) == 0 ?
+						get(s, "/Info/Pack/MaxDischargeCurrent", &in.dcl[b]) == 0 :
+						get(s, "/Info/MaxChargeCurrent", &in.ccl[b]) == 0 &&
+						get(s, "/Info/MaxDischargeCurrent", &in.dcl[b]) == 0) && in.ccl[b] >= 0 && in.dcl[b] >= 0;
 		in.cell_ok[b] = get(s, "/System/MinCellVoltage", &in.cell_min[b]) == 0 && in.cell_min[b] > 1.5 &&
 						in.cell_min[b] < 4.5;     /* 0.52-c: LOW force charge */
 		in.cell_max_ok[b] = get(s, "/System/MaxCellVoltage", &in.cell_max[b]) == 0 && in.cell_max[b] > 1.5 &&

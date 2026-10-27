@@ -65,9 +65,9 @@ COLUMNS = {
 	'bat_w': ('battery', '/Dc/0/Power'),
 	'cell_max_v': ('battery', '/System/MaxCellVoltage'),
 	'cell_min_v': ('battery', '/System/MinCellVoltage'),
-	'cvl_v': ('battery', '/Info/MaxChargeVoltage'),
-	'ccl_a': ('battery', '/Info/MaxChargeCurrent'),
-	'dcl_a': ('battery', '/Info/MaxDischargeCurrent'),
+	'cvl_v': ('battery', '/Info/Pack/MaxChargeVoltage'),          # dbus-ebox-battery 1.5: Pytes alone, /Info/* = both banks
+	'ccl_a': ('battery', '/Info/Pack/MaxChargeCurrent'),
+	'dcl_a': ('battery', '/Info/Pack/MaxDischargeCurrent'),
 	'charge_request': ('battery', '/Info/ChargeRequest'),
 	'a_soc': ('battery_a', '/Soc'),
 	'a_soh': ('battery_a', '/Soh'),
