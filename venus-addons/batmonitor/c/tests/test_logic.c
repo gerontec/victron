@@ -266,7 +266,7 @@ static void test_bank_split(void)
 {
 	struct run r;
 	struct plant pl = BASE(.house = 4000, .season = BM_SUMMER, .season_age_h = 1);
-	simulate(&r, &pl, local_time(2026, 7, 15, 23, 0), 60);       /* 0.26: L1 = L2 + L3 (0.63-c: above SINGLE_DIS_W) */
+	simulate(&r, &pl, local_time(2026, 7, 15, 23, 0), 60);       /* 0.26: L1 = L2 + L3 */
 	print_state("bank split, house 4 kW", &r);
 	CHECK(abs(r.out.sp[0] - (r.out.sp[1] + r.out.sp[2])) <= 3 && abs(r.out.sp[1] - r.out.sp[2]) <= 1,
 		  "L1 = L2 + L3, got %d %d %d", r.out.sp[0], r.out.sp[1], r.out.sp[2]);
@@ -346,42 +346,16 @@ static void test_house_acout(void)
 	CHECK(!r.out.house, "AC-out total 90 W: house on the grid (below HOUSE_ON_W)");
 }
 
-/* 0.63-c: with the grid there one MultiPlus discharges up to SINGLE_DIS_W (the meter nets the phases) */
-static void test_single_unit(void)
+/* 0.70-c: no single-unit discharge any more (D6 removed): a small load goes to all discharging phases */
+static void test_all_units(void)
 {
 	struct run r;
 	struct plant pl = BASE(.house = 2000, .season = BM_SUMMER, .season_age_h = 1);
 	simulate(&r, &pl, local_time(2026, 7, 15, 23, 0), 60);
-	print_state("one unit, house 2 kW", &r);
-	CHECK(abs(r.out.sp[0] + 2000) <= 30 && r.out.sp[1] == 0 && r.out.sp[2] == 0 && rule_has(&r, " 1PH") &&
-		  rule_has(&r, " STBY"), "L1 alone (equal SoC: the first stack), got %d %d %d", r.out.sp[0], r.out.sp[1],
-		  r.out.sp[2]);
+	print_state("house 2 kW: all units", &r);
+	CHECK(r.out.sp[0] < 0 && r.out.sp[1] < 0 && r.out.sp[2] < 0 && !rule_has(&r, " 1PH") && !rule_has(&r, " STBY"),
+		  "all phases, no 1PH / STBY, got %d %d %d", r.out.sp[0], r.out.sp[1], r.out.sp[2]);
 	CHECK(fabs(r.pcc) <= 80, "house covered, pcc %.0f", r.pcc);
-
-	pl = BASE(.house = 2000, .soc = {50, 52}, .season = BM_SUMMER, .season_age_h = 1);
-	simulate(&r, &pl, local_time(2026, 7, 15, 23, 0), 60);
-	print_state("one unit, Stack2 fuller", &r);
-	CHECK(r.out.sp[0] == 0 && abs(r.out.sp[1] + 2000) <= 30 && r.out.sp[2] == 0,
-		  "L2 alone (Stack2 fuller), got %d %d %d", r.out.sp[0], r.out.sp[1], r.out.sp[2]);
-
-	pl = BASE(.house = 3400, .season = BM_SUMMER, .season_age_h = 1);
-	simulate(&r, &pl, local_time(2026, 7, 15, 23, 0), 8);        /* 0.64-c: 40 s above, one unit carries it */
-	print_state("house 3.4 kW for 40 s: one unit", &r);
-	CHECK(abs(r.out.sp[0] + 3400) <= 40 && r.out.sp[1] == 0 && r.out.sp[2] == 0 && !r.st.single_all,
-		  "below SINGLE_DIS_UP_S one unit up to its cap, got %d %d %d", r.out.sp[0], r.out.sp[1], r.out.sp[2]);
-
-	pl = BASE(.house = 3400, .season = BM_SUMMER, .season_age_h = 1);
-	simulate(&r, &pl, local_time(2026, 7, 15, 23, 0), 60);
-	print_state("house 3.4 kW: all units", &r);
-	CHECK(r.out.sp[0] < 0 && r.out.sp[1] < 0 && r.out.sp[2] < 0 && r.st.single_all,
-		  "above SINGLE_DIS_W all phases, got %d %d %d", r.out.sp[0], r.out.sp[1], r.out.sp[2]);
-	CHECK(fabs(r.pcc) <= 80, "house covered, pcc %.0f", r.pcc);
-
-	pl = BASE(.house = 2000, .season = BM_SUMMER, .season_age_h = 1, .grid_off = 1);
-	simulate(&r, &pl, local_time(2026, 7, 15, 23, 0), 60);
-	print_state("off-grid, house 2 kW", &r);
-	CHECK(r.out.sp[0] < 0 && r.out.sp[1] < 0 && r.out.sp[2] < 0, "off-grid every phase, got %d %d %d",
-		  r.out.sp[0], r.out.sp[1], r.out.sp[2]);
 }
 
 static void test_winter_night_floor(void)
@@ -1098,7 +1072,7 @@ int main(void)
 	test_summer_wp_4kw_from_battery();
 	test_w_max_and_phase_cap();
 	test_bank_split();
-	test_single_unit();
+	test_all_units();
 	test_house_acout();
 	test_bms_current_limits();
 	test_winter_night_floor();

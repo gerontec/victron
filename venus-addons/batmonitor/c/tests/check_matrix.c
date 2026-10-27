@@ -1,5 +1,5 @@
 /*
- * check_matrix: exhaustive check of the batmonitor decision layer (bm_d1, bm_d2, bm_dlead, bm_d3; 0.43-c; bm_d6 0.65-c).
+ * check_matrix: exhaustive check of the batmonitor decision layer (bm_d1, bm_d2, bm_dlead, bm_d3; 0.43-c; bm_d6 0.65-0.69-c, removed 0.70-c).
  *
  * Every decision is a pure function of predicates ("bits", threshold comparisons of the inputs) and a few hysteresis
  * state bits. This program enumerates EVERY bit / state combination of each function that is physically consistent
@@ -326,37 +326,6 @@ static void check_d3(void)
 	printf("\nD3 PROPORTIONAL / IDLE: %ld combinations, %ld PROPORTIONAL\n", combos, prop);
 }
 
-/* ---- D6: one MultiPlus or all phases (0.63-c, decision function 0.65-c) ----------------------------------------- */
-static int d6_states;                        /* reachable (all, over) states, for the state space */
-static void check_d6(void)
-{
-	long combos = 0, one = 0;
-	int seen[4] = {0};
-	for (unsigned v = 0; v < 32; v++)
-		for (int k = 0; k < 4; k++) {
-			struct bm_d6_in b = {BIT(v, 0), BIT(v, 1), BIT(v, 2), BIT(v, 3), BIT(v, 4)};
-			int all = BIT(k, 0), over = BIT(k, 1), an, on, an2, on2;
-			if (b.w_gt_on && b.w_lt_off)                      /* SINGLE_DIS_HYST_W >= 0 */
-				continue;
-			int r = bm_d6(&b, all, over, &an, &on);
-			combos++;
-			one += r;
-			seen[an + 2 * on] = 1;
-			INV(!r || (b.grid_ok && b.on), "one unit only with the grid there and SINGLE_DIS_W on");
-			INV((b.grid_ok && b.on) || (!r && an == all && on == over), "off-grid / off: all phases, state untouched");
-			INV(!r || !an, "one unit only while not latched to all phases");
-			INV(!an || all || (b.w_gt_on && b.over_long), "to all phases only after SINGLE_DIS_UP_S above SINGLE_DIS_W");
-			INV(an || !all || !(b.grid_ok && b.on) || b.w_lt_off, "back to one unit only below SINGLE_DIS_W - HYST");
-			INV(!(b.grid_ok && b.on) || on == b.w_gt_on, "the timer runs exactly while above SINGLE_DIS_W");
-			INV(r || an || !(b.grid_ok && b.on), "all phases only latched (no flapping per cycle)");
-			int r2 = bm_d6(&b, an, on, &an2, &on2);
-			INV(r2 == r && an2 == an && on2 == on, "D6 fixed point after one step");
-		}
-	d6_states = seen[0] + seen[1] + seen[2] + seen[3];
-	printf("\nD6 one unit / all phases: %ld consistent combinations (5 bits x 4 states), %ld one unit, %d states "
-		   "reachable (ONE, OVER, ALL, ALL+over)\n", combos, one, d6_states);
-}
-
 /* ---- D7: house on AC-out1 (0.69-c) ----------------------------------------------------------------------------- */
 static int d7_states;
 static void check_d7(void)
@@ -395,11 +364,11 @@ static void check_d7(void)
 /* the largest persistent decision state, the product of the state bits of every D function (0.65-c) */
 static void state_space(void)
 {
-	long d1 = 2, d2 = 8 * 8 * 2, lead = 3, d3 = 2, d4 = 2, unit = 3, d6 = d6_states, d7 = d7_states;
+	long d1 = 2, d2 = 8 * 8 * 2, lead = 3, d3 = 2, d4 = 2, d7 = d7_states;
 	long before = d1 * d2 * lead * d3 * d4;
 	printf("\nstate space (max persistent decision states): D1 %ld (bat1_first) x D2 %ld (prot/force/low per stack, "
-		   "chg_prev) x lead %ld x D3 %ld x D4 %ld x D6 %ld x unit %ld (none/L1/L2) x D7 %ld = %ld (0.62-c: %ld)\n",
-		   d1, d2, lead, d3, d4, d6, unit, d7, before * d6 * unit * d7, before);
+		   "chg_prev) x lead %ld x D3 %ld x D4 %ld x D7 %ld = %ld (0.62-c: %ld)\n",
+		   d1, d2, lead, d3, d4, d7, before * d7, before);
 }
 
 /* ---- amounts: properties of bm_step on random inputs ----------------------------------------------------------- */
@@ -511,7 +480,6 @@ int main(void)
 	check_d2();
 	check_lead();
 	check_d3();
-	check_d6();
 	check_d7();
 	state_space();
 	check_amounts();

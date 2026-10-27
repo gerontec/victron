@@ -55,8 +55,6 @@ struct bm_cfg {
 	double force_full_max_min;      /* ... at the latest this long after the command, also below 100 % (0.67-c) */
 	double force_full_spread_mv, force_full_top_v;   /* ... once the cell spread is down to this with the highest cell
 	                                                    at the top (0.67-c) */
-	double single_dis_w, single_dis_hyst_w;   /* grid there: one MultiPlus discharges up to this total (0.63-c) */
-	double single_dis_up_s;                   /* ... all phases only after this long above it (0.64-c) */
 	double house_acout;                       /* the house on AC-out1 (0.69-c): 0 never, 1 always, 2 auto (D7) */
 };
 
@@ -136,9 +134,6 @@ struct bm_state {
 	double ff_full_since;                        /* monotonic s since the force_full stack is at 100 %, 0 = not (0.62-c) */
 	double ff_since;                             /* monotonic s since the force_full command is on, 0 = off (0.67-c) */
 	double ff_spread_since;                      /* monotonic s since its cell spread is down at the top, 0 = not */
-	int single_ph;                               /* the one discharging phase with the grid there, -1 = none (0.63-c) */
-	int single_all;                              /* the discharge is above SINGLE_DIS_W: all phases (0.63-c) */
-	double single_over_since;                    /* monotonic s since the discharge is above SINGLE_DIS_W, 0 = not (0.64-c) */
 	int house_on;                                /* D7: the house hangs on AC-out1 (0.69-c) */
 	double house_under_since;                    /* monotonic s since the AC-out total is below HOUSE_OFF_W, 0 = not */
 	int setpoints[NPH];                         /* sent last cycle (the PI's u_applied) */
@@ -307,19 +302,6 @@ int bm_d5(const struct bm_d5_in *b);                                  /* 1 = pul
 #define DO4_LOCKOUT 300.0                    /* s between two pulses: WR2 needs its restart after a pulse */
 #define DO4_PCC_MAX_AGE 15.0                 /* s: only a fresh PCC triggers (sofar_fast.py: every 4 s) */
 #define DO4_PULSE_S 3.0                      /* s: DO4=1, then DO4=0 (as fox2db / the ESP: r4 pulse 3) */
-
-/* D6 (0.63-c, decision function 0.65-c): one MultiPlus or all phases for the discharge. Why: a MP2 loses ~30-40 W
-   fixed plus poor efficiency at low power (pv_victron 18.-26.10.2026: 14 % loss below 2 kW total, 4-5 % above); with
-   the grid there the meter nets the phases, so one unit may feed alone (unbalanced on purpose); off-grid every phase
-   carries its own load, all units feed synchronously. State: all (single_all), over (single_over_since set) */
-struct bm_d6_in {
-	int grid_ok;                                 /* vebus /Ac/ActiveIn/Connected */
-	int on;                                      /* SINGLE_DIS_W > 0 */
-	int w_gt_on;                                 /* discharge amount w > SINGLE_DIS_W */
-	int w_lt_off;                                /* w < SINGLE_DIS_W - SINGLE_DIS_HYST_W */
-	int over_long;                               /* w above since at least SINGLE_DIS_UP_S (over set before) */
-};
-int bm_d6(const struct bm_d6_in *b, int all, int over, int *all_next, int *over_next);   /* 1 = one unit, 0 = all */
 
 /* D7 (0.69-c, user 2026-10-27): the house hangs on AC-out1, so the Multis measure the house load themselves.
    House on AC-out1: winter half-year Z2 near 0 (discharge = the AC-out1 load, AC-in total 0; the heat pump stays on

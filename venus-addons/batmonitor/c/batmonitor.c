@@ -74,6 +74,10 @@
  *     pump included, at least the house load). Auto above 99 W AC-out total, off after 60 s below 30 W; env
  *     BATMONITOR_HOUSE_ACOUT 0 = the 0.68-c matrix (git tag batmonitor-0.68-c-house-on-grid, house on the grid),
  *     1 = always. state.json house.
+ *   - no single-unit discharge any more (0.70-c, user 2026-10-27 "keep it simple"): D6 / 1PH (0.63-0.69-c) removed, the
+ *     discharge always goes to all discharging phases as up to 0.62-c. Measured pv_victron 17.-27.10.2026: the loss
+ *     stayed ~110-130 W with one unit (a STBY unit on the grid still draws ~45-65 W from its stack), 1-2 kW AC 89.6 %
+ *     vs 92.2 % before; it only fed one phase into Z1. BATMONITOR_SINGLE_DIS_* no longer exist.
  *   - full_at with the measured charger power (0.31-c, user 2026-10-09): each MultiPlus delivers ~3.6 kW DC at the BMS
  *     at its limit (65-67 A, flat over 53.6-54.6 V; AC-in ~4040 W), not 70 A x U: CHARGER_DC_W caps the forecast.
  *   - full_at (0.32-c, user 2026-10-09): the forecast splits the power each step like alloc_charge and lets the SoC lead
@@ -108,7 +112,7 @@
 #include "bm_logic.h"
 #include "bm_parse.h"
 
-#define VERSION "0.69-c"
+#define VERSION "0.70-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
