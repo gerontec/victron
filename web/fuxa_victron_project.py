@@ -180,7 +180,7 @@ text(604, 181, 'AC-in limit', 11, fill=MUTED)
 value(720, 181, 'ac_in_limit_a', 'A', 0, 12, anchor='end')
 
 # rotary changeover switch 3~ (ATS): common -> house; I = grid (branch A, normal), II = AC-out1 of the MultiPlus.
-# blade on II only while Venus reports a grid failure (grid_lost: VE.Bus active input 240, the Multis invert)
+# blade on II while AC-out1 feeds the house (ups_active: AC-out total > 99 W or grid failure, user 2026-10-27)
 ATS_BG = '#2a1a1c'
 box(840, 60, 230, 130, ATS_BG)
 shape('path', dict(G, d='M840,95 L890,95'))                 # I
@@ -189,11 +189,11 @@ shape('path', dict(G, d='M1010,125 L1110,125'))             # common -> house bo
 
 
 def blade(d, on_lost):
-    """switch blade, visible while grid_lost == on_lost, else drawn in the box colour"""
+    """switch blade, visible while ups_active == on_lost, else drawn in the box colour"""
     on, off = {'type': 2, 'color': '', 'stroke': FG}, {'type': 2, 'color': '', 'stroke': ATS_BG}
     lo, hi = (on, off) if not on_lost else (off, on)
     shape('path', {'d': d, 'fill': 'none', 'stroke': FG if not on_lost else ATS_BG, 'stroke-width': 5, 'stroke-linecap': 'round'},
-          'grid_lost', [dict(lo, min=-1, max=0.5), dict(hi, min=0.5, max=2)])
+          'ups_active', [dict(lo, min=-1, max=0.5), dict(hi, min=0.5, max=2)])
 
 
 blade('M1010,125 L892,97', 0)                                 # default: grid -> house
@@ -209,8 +209,13 @@ text(1126, 104, 'AC-out1 = UPS leg of the ATS', 11, fill=MUTED)
 for i, (ph, key) in enumerate((('L1', 'l1_ac_out_w'), ('L2', 'l2_ac_out_w'), ('L3', 'l3_ac_out_w'))):
     text(1126, 126 + i * 20, f'AC-out1 {ph}', 13, fill=MUTED)
     value(1300, 126 + i * 20, key, 'W', 0, 14, anchor='end')
-text(1320, 146, 'total', 11, fill=MUTED)
-value(1420, 146, 'ac_out_kw', 'kW', 2, 12, 'normal', anchor='end')
+    value(1420, 126 + i * 20, f'{ph.lower()}_house_bat_pct', '%', 0, 14, anchor='end', fill=ORANGE)
+# battery share of the house load (user 2026-10-27): per phase max(0, AC-out - AC-in), rest = grid via AC-in
+text(1420, 104, 'from battery', 11, 'normal', 'end', ORANGE)
+text(1126, 184, 'total', 11, fill=MUTED)
+value(1300, 184, 'ac_out_kw', 'kW', 2, 12, 'normal', anchor='end')
+value(1420, 184, 'house_bat_pct', '%', 0, 12, anchor='end', fill=ORANGE)
+value(1370, 184, 'house_bat_w', 'W', 0, 12, 'normal', anchor='end', fill=ORANGE)
 text(30, 52, 'AC-in / DC: + charging (green) · − feeding the house (orange) · AC-out1 → rotary switch II (purple)', 11, fill=MUTED)
 
 # AC bus from the MCB to the three MultiPlus

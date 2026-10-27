@@ -75,6 +75,16 @@ if ($r) {
     $grid = ($r['grid_l1_w'] === null) ? null : $r['grid_l1_w'] + $r['grid_l2_w'] + $r['grid_l3_w'];
     $acin = ($r['ac_in_l1_w'] === null) ? null : $r['ac_in_l1_w'] + $r['ac_in_l2_w'] + $r['ac_in_l3_w'];
     $acout = ($r['ac_out_l1_w'] === null) ? null : $r['ac_out_l1_w'] + $r['ac_out_l2_w'] + $r['ac_out_l3_w'];
+    // house on AC-out1: per phase the part of AC-out not drawn at AC-in comes from the battery (inverter losses ignored)
+    $hbat = $hout = 0;
+    $hpct = [];
+    foreach (['l1', 'l2', 'l3'] as $p) {
+        $in = $r["ac_in_{$p}_w"]; $out = $r["ac_out_{$p}_w"];
+        if ($in === null || $out === null || $out < 20) { $hpct[$p] = null; continue; }
+        $b = max(0, min($out, $out - $in));
+        $hbat += $b; $hout += $out;
+        $hpct[$p] = (int)round(100 * $b / $out);
+    }
     $values = [
         // VE.Bus system
         'vebus_state' => v($st, '', 'VE.Bus state code (3 Bulk, 4 Absorption, 5 Float, 8 Passthru, 9 Inverting, 252 External control)', 'pv_victron.vebus_state'),
@@ -83,6 +93,17 @@ if ($r) {
         'vebus_mode_text' => v($VEBUS_MODE[num($r['vebus_mode'])] ?? null, 'text', 'Switch position', 'derived'),
         'vebus_error' => v(num($r['vebus_error']), '', 'VE.Bus error code, 0 = ok', 'pv_victron.vebus_error'),
         'grid_lost' => v($r['active_input'] === null ? null : ((int)$r['active_input'] === 240 ? 1 : 0), '', 'Grid failure reported by Venus: VE.Bus active input 240 = AC-in disconnected (the Multis invert, state 9); 1 = rotary switch to the UPS leg (AC-out1)', 'pv_victron.active_input'),
+        // house on AC-out1 since 2026-10-27: the rotary switch is on II whenever AC-out1 carries load (> 99 W, above the
+        // ~-85 W measurement error while charging) or Venus reports a grid failure
+        'ups_active' => v(($acout === null && $r['active_input'] === null) ? null
+                          : ((($acout !== null && $acout > 99) || (int)$r['active_input'] === 240) ? 1 : 0), '',
+                          'Rotary switch on the UPS leg: 1 = AC-out1 of the MultiPlus feeds the house (AC-out total > 99 W or grid failure)', 'derived'),
+        'house_bat_w' => v($hout > 0 ? (int)round($hbat) : null, 'W', 'House load on AC-out1 covered by the batteries: sum over phases of max(0, AC-out - AC-in)', 'derived'),
+        'house_grid_w' => v($hout > 0 ? (int)round($hout - $hbat) : null, 'W', 'House load on AC-out1 passed through from AC-in (grid)', 'derived'),
+        'house_bat_pct' => v($hout > 0 ? (int)round(100 * $hbat / $hout) : null, '%', 'Battery share of the house load on AC-out1', 'derived'),
+        'l1_house_bat_pct' => v($hpct['l1'], '%', 'L1: battery share of AC-out1 (null below 20 W)', 'derived'),
+        'l2_house_bat_pct' => v($hpct['l2'], '%', 'L2: battery share of AC-out1 (null below 20 W)', 'derived'),
+        'l3_house_bat_pct' => v($hpct['l3'], '%', 'L3: battery share of AC-out1 (null below 20 W)', 'derived'),
         'ac_in_f_hz' => v(num($r['ac_in_f_hz']), 'Hz', 'Grid frequency at AC-in', 'pv_victron.ac_in_f_hz'),
         'ac_in_limit_a' => v(num($r['ac_in_limit_a']), 'A', 'AC input current limit', 'pv_victron.ac_in_limit_a'),
         'ac_in_kw' => v(kw($acin), 'kW', 'Power drawn at AC-in by all three MultiPlus, + = from the grid (charging), - = fed back', 'derived'),
