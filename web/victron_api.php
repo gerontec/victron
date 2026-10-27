@@ -67,6 +67,16 @@ function v($value, string $unit, string $desc, string $src): array {
 }
 function num($x) { return $x === null ? null : $x + 0; }
 function kw($x) { return $x === null ? null : round($x / 1000, 2); }
+// full / empty forecast for one stack: full_at from batmonitor, empty linear at the 5 min average down to the 5 % discharge stop
+function eta(?array $r, string $s, string $soc_col): ?string {
+    if (!$r) return null;
+    if (isset($r["bm_{$s}_full_at"])) return 'full ' . date('H:i', strtotime($r["bm_{$s}_full_at"]));
+    $avg = $r["bm_{$s}_chg_avg5_w"] ?? null;
+    $soc = $r[$soc_col] ?? null;
+    if ($avg === null || $soc === null || $avg > -50 || $soc <= 5) return null;
+    $sec = ($soc - 5) / 100 * 300 * 51.2 / -$avg * 3600;
+    return $sec > 86400 ? 'empty >24 h' : 'empty ' . date('H:i', time() + (int)$sec);
+}
 
 // VE.Bus /State (Victron dbus documentation)
 $VEBUS_STATE = [0 => 'Off', 1 => 'Low power', 2 => 'Fault', 3 => 'Bulk', 4 => 'Absorption', 5 => 'Float', 6 => 'Storage',
@@ -193,6 +203,8 @@ if ($r) {
         's2_chg_avg5_kw' => v(kw($r['bm_s2_chg_avg5_w'] ?? null), 'kW', 'Stack2 DC power, 5 min average (+ = charging)', 'pv_victron.bm_s2_chg_avg5_w'),
         's1_full_at' => v(isset($r['bm_s1_full_at']) ? date('H:i', strtotime($r['bm_s1_full_at'])) : null, 'text', 'Stack1 forecast: 100 % SoC at this time (hh:mm) if the 5 min average charge power holds; null = not charging or full', 'pv_victron.bm_s1_full_at'),
         's2_full_at' => v(isset($r['bm_s2_full_at']) ? date('H:i', strtotime($r['bm_s2_full_at'])) : null, 'text', 'Stack2 forecast: 100 % SoC at this time (hh:mm) if the 5 min average charge power holds; null = not charging or full', 'pv_victron.bm_s2_full_at'),
+        's1_eta' => v(eta($r, 's1', 'a_soc'), 'text', 'Stack1 forecast at the 5 min average DC power: "full hh:mm" (100 % SoC, from batmonitor) or "empty hh:mm" (discharge stop 5 % SoC, linear, 300 Ah x 51.2 V; "empty >24 h" beyond a day); null = idle', 'derived: pv_victron.bm_s1_full_at, bm_s1_chg_avg5_w, a_soc'),
+        's2_eta' => v(eta($r, 's2', 'soc'), 'text', 'Stack2 forecast at the 5 min average DC power: "full hh:mm" (100 % SoC, from batmonitor) or "empty hh:mm" (discharge stop 5 % SoC, linear, 300 Ah x 51.2 V; "empty >24 h" beyond a day); null = idle', 'derived: pv_victron.bm_s2_full_at, bm_s2_chg_avg5_w, soc'),
         's1_discharge_blocked' => v(isset($r['bm_s1_prot']) ? (bool)$r['bm_s1_prot'] : null, 'bool', 'Stack1 discharge protection (SoC < 5 % until 7 %)', 'pv_victron.bm_s1_prot'),
         's2_discharge_blocked' => v(isset($r['bm_s2_prot']) ? (bool)$r['bm_s2_prot'] : null, 'bool', 'Stack2 discharge protection (SoC < 5 % until 7 %)', 'pv_victron.bm_s2_prot'),
         's1_forced_charge' => v(isset($r['bm_s1_force']) ? (bool)$r['bm_s1_force'] : null, 'bool', 'Stack1 forced grid charge (SoC < 3 % until 5 %)', 'pv_victron.bm_s1_force'),
