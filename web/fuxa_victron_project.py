@@ -176,8 +176,9 @@ shape('path', dict(G, d='M660,95 L660,140'))                # branch B -> MCB
 text(668, 132, 'B', 13, 'bold', fill=GRIDC)
 box(590, 140, 140, 50, '#2a1a1c', 6)
 text(604, 160, 'MCB 3~ → AC-in', 13, 'bold')
-text(604, 181, 'AC-in limit', 11, fill=MUTED)
-value(720, 181, 'ac_in_limit_a', 'A', 0, 12, anchor='end')
+# real AC-in power instead of the configured current limit (user 2026-10-27), + = from the grid
+text(604, 181, 'AC-in power', 11, fill=MUTED)
+value(720, 181, 'ac_in_kw', 'kW', 2, 12, anchor='end')
 
 # rotary changeover switch 3~ (ATS): common -> house; I = grid (branch A, normal), II = AC-out1 of the MultiPlus.
 # blade on II while AC-out1 feeds the house (ups_active: AC-out total > 99 W or grid failure, user 2026-10-27)
