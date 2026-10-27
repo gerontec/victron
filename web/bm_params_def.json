@@ -1,0 +1,353 @@
+{
+ "version": "0.70-py",
+ "params": [
+  {
+   "name": "W_MAX",
+   "default": 10000,
+   "min": 0,
+   "max": 12000,
+   "unit": "W",
+   "help": "total discharge (soyo was 1800 W)"
+  },
+  {
+   "name": "DISCHARGE_MAX_PHASE",
+   "default": 3800,
+   "min": 0,
+   "max": 5000,
+   "unit": "W",
+   "help": "discharge per phase"
+  },
+  {
+   "name": "CHARGE_MAX_PHASE",
+   "default": 4900,
+   "min": 0,
+   "max": 5000,
+   "unit": "W",
+   "help": "PV charge per phase (5000 VA peaks)"
+  },
+  {
+   "name": "CHARGER_CAP_PHASE",
+   "default": 4200,
+   "min": 0,
+   "max": 5000,
+   "unit": "W",
+   "help": "real charger capacity per phase, priority fill"
+  },
+  {
+   "name": "SOC_MIN",
+   "default": 5,
+   "min": 0,
+   "max": 50,
+   "unit": "%",
+   "help": "no discharge below"
+  },
+  {
+   "name": "SOC_MIN_RELEASE",
+   "default": 7,
+   "min": 0,
+   "max": 60,
+   "unit": "%",
+   "help": "discharge again from"
+  },
+  {
+   "name": "SOC_FORCE",
+   "default": 3,
+   "min": 0,
+   "max": 30,
+   "unit": "%",
+   "help": "grid force charge below"
+  },
+  {
+   "name": "SOC_FORCE_RELEASE",
+   "default": 5,
+   "min": 0,
+   "max": 40,
+   "unit": "%",
+   "help": "force charge until"
+  },
+  {
+   "name": "FORCE_CHARGE_W",
+   "default": 500,
+   "min": 0,
+   "max": 4000,
+   "unit": "W",
+   "help": "force charge per phase"
+  },
+  {
+   "name": "DCL_FORCE_A",
+   "default": 1,
+   "min": 0,
+   "max": 50,
+   "unit": "A",
+   "help": "force charge (LOW) while the BMS discharge limit is below this, no discharge (0 = off)"
+  },
+  {
+   "name": "CELL_FORCE_V",
+   "default": 3.0,
+   "min": 0,
+   "max": 3.4,
+   "unit": "V",
+   "help": "force charge (LOW) while the lowest cell is below this, no discharge (0 = off)"
+  },
+  {
+   "name": "CELL_FORCE_RELEASE_V",
+   "default": 3.25,
+   "min": 0,
+   "max": 3.5,
+   "unit": "V",
+   "help": "LOW ends once the lowest cell is at least this and DCL is back"
+  },
+  {
+   "name": "SOC_BALANCE_ON",
+   "default": 3,
+   "min": 0.5,
+   "max": 50,
+   "unit": "%",
+   "help": "SoC difference that starts balancing"
+  },
+  {
+   "name": "SOC_BALANCE_OFF",
+   "default": 1,
+   "min": 0,
+   "max": 50,
+   "unit": "%",
+   "help": "balancing ends below"
+  },
+  {
+   "name": "SOYO_TARGET",
+   "default": 0,
+   "min": -500,
+   "max": 500,
+   "unit": "W",
+   "help": "PCC target (+ = export)"
+  },
+  {
+   "name": "SOFAR_TRICKLE",
+   "default": 30,
+   "min": 0,
+   "max": 500,
+   "unit": "W",
+   "help": "night: stacks give this much more than the house needs"
+  },
+  {
+   "name": "CHARGER_A",
+   "default": 70,
+   "min": 0,
+   "max": 70,
+   "unit": "A",
+   "help": "MultiPlus-II charger current per unit (DC), ceiling = this x BMS voltage"
+  },
+  {
+   "name": "CHARGE_EFF",
+   "default": 0.93,
+   "min": 0.7,
+   "max": 1.0,
+   "unit": "",
+   "help": "AC-in per DC at the charger limit"
+  },
+  {
+   "name": "BAT1_SOC_MIN",
+   "default": 5,
+   "min": 0,
+   "max": 101,
+   "unit": "%",
+   "help": "night: the Sofar Bat1 serves house + heat pump first down to this SoC; 101 = off"
+  },
+  {
+   "name": "EXPORT_CAP",
+   "default": 18000,
+   "min": 0,
+   "max": 30000,
+   "unit": "W",
+   "help": "summer peak window: while the forecast expects export above this, the stacks charge only the export above it (0 = off)"
+  },
+  {
+   "name": "HOUSE_EST",
+   "default": 1000,
+   "min": 0,
+   "max": 5000,
+   "unit": "W",
+   "help": "summer peak window: house load assumed when turning the PV forecast into export"
+  },
+  {
+   "name": "DO4_GRACE_S",
+   "default": 120,
+   "min": 0,
+   "max": 600,
+   "unit": "s",
+   "help": "DO4 (FoxESS shedding) only after the PCC stays above 20 kW this long: R290 boost and air conditioning first"
+  },
+  {
+   "name": "DO4_HARD_W",
+   "default": 23000,
+   "min": 20000,
+   "max": 40000,
+   "unit": "W",
+   "help": "DO4 at once above this PCC export"
+  },
+  {
+   "name": "ACOUT_FEED_MAX_W",
+   "default": 5000,
+   "min": 0,
+   "max": 10000,
+   "unit": "W",
+   "help": "grid offline: DO4 when PV feeds more than this into one MultiPlus AC-out (factor 1.0 rule, 5000 VA; 0 = off)"
+  },
+  {
+   "name": "ACOUT_FEED_S",
+   "default": 10,
+   "min": 0,
+   "max": 120,
+   "unit": "s",
+   "help": "... for this long"
+  },
+  {
+   "name": "CHARGER_DC_W",
+   "default": 3600,
+   "min": 500,
+   "max": 5000,
+   "unit": "W",
+   "help": "full_at forecast: DC at the BMS per MultiPlus at its limit"
+  },
+  {
+   "name": "WP_WINTER_W",
+   "default": 1000,
+   "min": 0,
+   "max": 12000,
+   "unit": "W",
+   "help": "winter half-year (October..March), heat pump running: the stacks discharge nothing while the Sofar Bat1 discharges, else at most this (heat pump off: PCC near 0)"
+  },
+  {
+   "name": "FORCE_FULL_HOLD_MIN",
+   "default": 60,
+   "min": 0,
+   "max": 1440,
+   "unit": "min",
+   "help": "force_full_from_pv: the command ends once its stack held 100 % SoC this long (BMS cell balancing)"
+  },
+  {
+   "name": "FORCE_FULL_MAX_MIN",
+   "default": 240,
+   "min": 0,
+   "max": 1440,
+   "unit": "min",
+   "help": "force_full_from_pv: the command ends at the latest this long after it came, also below 100 % SoC (0 = off)"
+  },
+  {
+   "name": "FORCE_FULL_SPREAD_MV",
+   "default": 30,
+   "min": 0,
+   "max": 500,
+   "unit": "mV",
+   "help": "force_full_from_pv: the command ends once the cell spread of its stack stayed at or below this for 60 s with the highest cell at FORCE_FULL_TOP_V (0 = off)"
+  },
+  {
+   "name": "FORCE_FULL_TOP_V",
+   "default": 3.45,
+   "min": 3.0,
+   "max": 3.7,
+   "unit": "V",
+   "help": "... the highest cell at least this: the spread counts only at the top of the charge, not at rest"
+  },
+  {
+   "name": "HOUSE_ACOUT",
+   "default": 2,
+   "min": 0,
+   "max": 2,
+   "unit": "",
+   "help": "house on AC-out1 (0.69-c): winter Z2 near 0 (discharge = AC-out1 load), summer Z1 near 0 (PCC, at least the AC-out1 load); 0 = never (0.68-c matrix, house on the grid), 1 = always, 2 = auto (AC-out total > 99 W, off after 60 s < 30 W)"
+  }
+ ],
+ "src_rule": [
+  {
+   "src": "DAY",
+   "b1_signed": 0,
+   "trickle": 0,
+   "idle_w": 20,
+   "prop_hold": 0
+  },
+  {
+   "src": "B1",
+   "b1_signed": 0,
+   "trickle": 0,
+   "idle_w": 20,
+   "prop_hold": 0
+  },
+  {
+   "src": "STK",
+   "b1_signed": 1,
+   "trickle": 1,
+   "idle_w": 0,
+   "prop_hold": 1
+  },
+  {
+   "src": "WPG",
+   "b1_signed": 0,
+   "trickle": 0,
+   "idle_w": 20,
+   "prop_hold": 0
+  }
+ ],
+ "mode_rule": [
+  {
+   "mode": "BMS_MISSING",
+   "action": "ZERO",
+   "capped": 0,
+   "why": "NAME"
+  },
+  {
+   "mode": "FORCE",
+   "action": "FORCE",
+   "capped": 1,
+   "why": "SOC"
+  },
+  {
+   "mode": "STALE",
+   "action": "ZERO",
+   "capped": 0,
+   "why": "NAME"
+  },
+  {
+   "mode": "LADESPERRE",
+   "action": "ZERO",
+   "capped": 0,
+   "why": "PEAK_H"
+  },
+  {
+   "mode": "CHARGE",
+   "action": "CHARGE",
+   "capped": 1,
+   "why": "CHAIN"
+  },
+  {
+   "mode": "FULL",
+   "action": "ZERO",
+   "capped": 0,
+   "why": "NAME"
+  },
+  {
+   "mode": "PROT",
+   "action": "ZERO",
+   "capped": 0,
+   "why": "SOC"
+  },
+  {
+   "mode": "CHARGING",
+   "action": "ZERO",
+   "capped": 0,
+   "why": "POWER"
+  },
+  {
+   "mode": "DIS",
+   "action": "DISCHARGE",
+   "capped": 1,
+   "why": "NONE"
+  },
+  {
+   "mode": "HOLD",
+   "action": "ZERO",
+   "capped": 0,
+   "why": "SOC"
+  }
+ ]
+}
