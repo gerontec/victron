@@ -164,3 +164,10 @@ FROM dim_bm_matrix m
 JOIN (SELECT 0 n UNION SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5 UNION SELECT 6
       UNION SELECT 7) b ON 1 = 1
 ON DUPLICATE KEY UPDATE bitmask = VALUES(bitmask), meaning = VALUES(meaning);
+
+-- 2026-10-27: AC-in current per phase (vebus /Ac/ActiveIn/Lx/I, + = from the grid); INSTANT, no table copy
+ALTER TABLE pv_victron
+  ADD COLUMN ac_in_l1_i DECIMAL(6,2) NULL COMMENT 'AC-in L1 current (A), + = from the grid',
+  ADD COLUMN ac_in_l2_i DECIMAL(6,2) NULL COMMENT 'AC-in L2 current (A), + = from the grid',
+  ADD COLUMN ac_in_l3_i DECIMAL(6,2) NULL COMMENT 'AC-in L3 current (A), + = from the grid',
+  ALGORITHM=INSTANT;

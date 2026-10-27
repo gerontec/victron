@@ -86,6 +86,7 @@ COLUMNS = {
 for ph in (1, 2, 3):
 	COLUMNS[f'ac_in_l{ph}_v'] = ('vebus', f'/Ac/ActiveIn/L{ph}/V')
 	COLUMNS[f'ac_in_l{ph}_w'] = ('vebus', f'/Ac/ActiveIn/L{ph}/P')
+	COLUMNS[f'ac_in_l{ph}_i'] = ('vebus', f'/Ac/ActiveIn/L{ph}/I')  # + = from the grid (2026-10-27)
 	COLUMNS[f'ac_out_l{ph}_v'] = ('vebus', f'/Ac/Out/L{ph}/V')
 	COLUMNS[f'ac_out_l{ph}_w'] = ('vebus', f'/Ac/Out/L{ph}/P')
 	COLUMNS[f'ac_out_l{ph}_s'] = ('vebus', f'/Ac/Out/L{ph}/S')     # apparent power = V x I (coarse below ~1 A)
