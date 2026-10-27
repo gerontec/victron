@@ -38,6 +38,7 @@ struct plant {
 	double acout_feed[NPH];        /* W PV feeding back into each AC-out (FoxESS on AC-out1), 0 = none */
 	int grid_off;                  /* 1 = grid offline (island, transfer relay open) */
 	int force_full;                /* batmonitor/force_full_from_pv: 0 off, 1 = S1, 2 = S2 (0.62-c) */
+	double cell_min[NBANK], cell_max[NBANK];   /* BMS lowest / highest cell V, 0 = not sent (0.67-c) */
 };
 
 static double r_override_w_max;     /* > 0: W_MAX for the next simulate() (parameter test) */
@@ -133,6 +134,10 @@ static void simulate(struct run *r, const struct plant *pl, time_t t0, int n)
 			in->lim_ok[b] = pl->lim[b];
 			in->ccl[b] = pl->ccl[b];
 			in->dcl[b] = pl->dcl[b];
+			in->cell_ok[b] = pl->cell_min[b] > 0;
+			in->cell_min[b] = pl->cell_min[b];
+			in->cell_max_ok[b] = pl->cell_max[b] > 0;
+			in->cell_max[b] = pl->cell_max[b];
 			in->power[b] = 0;
 			for (int i = 0; i < BM_BANKS[b].nph; i++)
 				in->power[b] += r->ac[BM_BANKS[b].ph[i]];
@@ -510,6 +515,49 @@ static void test_force_full_from_pv(void)
 	simulate(&r, &pl, local_time(2026, 1, 15, 19, 0), 30);
 	CHECK(r.out.sp[0] == 500 && strstr(r.out.why[0], "FORCE("), "force charge first, got %d %s", r.out.sp[0],
 		  r.out.why[0]);
+}
+
+/* 0.67-c (user 2026-10-27): force_full_from_pv also ends once the cell spread at the top stayed small for 60 s, and
+   at the latest FORCE_FULL_MAX_MIN after the command, also below 100 % */
+static void test_force_full_end(void)
+{
+	struct run r;
+	struct plant pl = BASE(.pv = 2500, .house = 500, .wp = 0, .soc = {94, 60}, .force_full = 1,
+						   .cell_min = {3.397, 3.30}, .cell_max = {3.489, 3.31});
+	simulate(&r, &pl, local_time(2026, 1, 15, 12, 0), 60);
+	CHECK(r.out.ff_done == 0, "spread 92 mV at the top: not done, got %d", r.out.ff_done);
+
+	pl.cell_min[0] = 3.33;                                       /* at rest after the charge: small spread, low cells */
+	pl.cell_max[0] = 3.335;
+	simulate(&r, &pl, local_time(2026, 1, 15, 12, 0), 60);
+	CHECK(r.out.ff_done == 0, "spread 5 mV at rest (highest cell below FORCE_FULL_TOP_V): not done, got %d",
+		  r.out.ff_done);
+
+	pl.cell_min[0] = 3.47;                                       /* the low cell caught up at the top */
+	pl.cell_max[0] = 3.495;
+	simulate(&r, &pl, local_time(2026, 1, 15, 12, 0), FF_SPREAD_STABLE_S / CYCLE_SECONDS);
+	CHECK(r.out.ff_done == 0, "spread 25 mV not yet 60 s: not done, got %d", r.out.ff_done);
+	simulate(&r, &pl, local_time(2026, 1, 15, 12, 0), FF_SPREAD_STABLE_S / CYCLE_SECONDS + 1);
+	CHECK(r.out.ff_done == BM_FF_SPREAD, "spread 25 mV for 60 s: done (spread), got %d", r.out.ff_done);
+
+	pl.cell_max[0] = 0;                                          /* no highest cell from the BMS: never by spread */
+	simulate(&r, &pl, local_time(2026, 1, 15, 12, 0), 60);
+	CHECK(r.out.ff_done == 0, "no MaxCellVoltage: not done, got %d", r.out.ff_done);
+
+	pl.cell_min[0] = 3.397;                                      /* never full, spread stays: the timeout ends it */
+	pl.cell_max[0] = 3.489;
+	simulate(&r, &pl, local_time(2026, 1, 15, 12, 0), 240 * 12);
+	CHECK(r.out.ff_done == 0, "below FORCE_FULL_MAX_MIN 240 min: not done, got %d", r.out.ff_done);
+	simulate(&r, &pl, local_time(2026, 1, 15, 12, 0), 240 * 12 + 1);
+	CHECK(r.out.ff_done == BM_FF_MAX, "after 240 min: done (max), got %d", r.out.ff_done);
+
+	pl.soc[0] = 100;                                             /* the hold time comes first */
+	simulate(&r, &pl, local_time(2026, 1, 15, 12, 0), 60 * 12 + 1);
+	CHECK(r.out.ff_done == BM_FF_HOLD, "60 min at 100 %%: done (hold), got %d", r.out.ff_done);
+
+	pl.force_full = 0;                                           /* off: nothing ends */
+	simulate(&r, &pl, local_time(2026, 1, 15, 12, 0), 240 * 12 + 1);
+	CHECK(r.out.ff_done == 0 && r.st.ff_since == 0, "off: not done, got %d", r.out.ff_done);
 }
 
 static void test_discharge_protection(void)
@@ -984,6 +1032,7 @@ int main(void)
 	test_day_sofar_saturated();
 	test_force_charge();
 	test_force_full_from_pv();
+	test_force_full_end();
 	test_discharge_protection();
 	test_stale();
 	test_wp_stale_still_covered();

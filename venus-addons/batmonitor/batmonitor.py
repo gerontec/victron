@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bm_logic as L  # noqa: E402
 import bm_parse  # noqa: E402
 
-VERSION = "0.66-py"
+VERSION = "0.67-py"
 INVERTER_TOPIC = "inverter/power_grid_exchange/json"
 R290_TOPIC = "r290/heatpump/all"
 AUSSEN_TOPIC = "aussen/temp"
@@ -367,7 +367,11 @@ class Batmonitor:
                 "stack": L.BM_BANKS[il.force_full - 1].name if 1 <= il.force_full <= L.NBANK else None,
                 "held_min": (c_round((il.now - st.ff_full_since) / 6.0) / 10
                              if 1 <= il.force_full <= L.NBANK and st.ff_full_since > 0 else None),
-                "hold_min": self.cfg.force_full_hold_min},
+                "hold_min": self.cfg.force_full_hold_min,
+                "on_min": (c_round((il.now - st.ff_since) / 6.0) / 10      # 0.67-c
+                           if 1 <= il.force_full <= L.NBANK and st.ff_since > 0 else None),
+                "max_min": self.cfg.force_full_max_min,
+                "spread_mv": self.cfg.force_full_spread_mv},
             "pi": {"armed": self.cfg.pi_armed, "y_w": c_round(o.pi.y), "e_w": c_round(o.pi.e),
                    "applied_w": c_round(o.pi.applied), "u_w": c_round(o.pi.u),
                    "sp": {L.BM_PH[p]: o.pi.sp[p] for p in range(L.NPH)}},
@@ -447,6 +451,9 @@ class Batmonitor:
             cell = self.get(s, "/System/MinCellVoltage")         # 0.52-c: LOW force charge
             i.cell_ok[b] = int(cell is not None and 1.5 < cell < 4.5)
             i.cell_min[b] = cell if i.cell_ok[b] else 0.0
+            cell = self.get(s, "/System/MaxCellVoltage")         # 0.67-c: force_full ends at a small cell spread
+            i.cell_max_ok[b] = int(cell is not None and 1.5 < cell < 4.5)
+            i.cell_max[b] = cell if i.cell_max_ok[b] else 0.0
 
         o = self.out = L.bm_step(self.cfg, i, self.st)
         self.in_last = i
@@ -465,13 +472,22 @@ class Batmonitor:
                 self.do4_off_at = mono() + L.DO4_PULSE_S
                 self.publish(DO4_LAST_TOPIC, '{"ts":%d,"pcc_w":%.0f}' % (int(time.time()), i.pcc), 1, True)
         if o.ff_done:
-            log("force_full_from_pv: %s held 100 %% SoC for %.0f min, done%s" % (
-                L.BM_BANKS[i.force_full - 1].name, self.cfg.force_full_hold_min,
-                "" if self.live else " (dry run, command kept)"))
+            b = i.force_full - 1
+            dry = "" if self.live else " (dry run, command kept)"
+            if o.ff_done == L.BM_FF_SPREAD:
+                log("force_full_from_pv: %s cell spread %.0f mV <= %.0f mV (cells %.3f..%.3f V), done%s" % (
+                    L.BM_BANKS[b].name, (i.cell_max[b] - i.cell_min[b]) * 1000.0, self.cfg.force_full_spread_mv,
+                    i.cell_min[b], i.cell_max[b], dry))
+            elif o.ff_done == L.BM_FF_MAX:
+                log("force_full_from_pv: %s still on after %.0f min, done%s" % (
+                    L.BM_BANKS[b].name, self.cfg.force_full_max_min, dry))
+            else:
+                log("force_full_from_pv: %s held 100 %% SoC for %.0f min, done%s" % (
+                    L.BM_BANKS[b].name, self.cfg.force_full_hold_min, dry))
             if self.live:                            # a dry run (NCR fallback) never ends the live command
                 with self.mq_lock:
                     self.mq["force_full"] = 0
-                self.st.ff_full_since = 0.0
+                self.st.ff_full_since = self.st.ff_since = self.st.ff_spread_since = 0.0
                 if not self.publish(FORCE_FULL_TOPIC, "off", 1, True):
                     loge("force_full_from_pv: publish off failed")
         if o.lead_event > 0:

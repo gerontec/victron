@@ -108,6 +108,9 @@ const struct bm_param BM_PARAMS[] = {
 	{"WP_WINTER_W",           P(wp_winter_w),               1000,    0,       12000,   "W", "winter half-year (October..March), heat pump running: the stacks discharge nothing while the Sofar Bat1 discharges, else at most this (heat pump off: PCC near 0)"},
 	{"CHARGER_DC_W",          P(charger_dc_w),              3600,    500,     5000,    "W", "full_at forecast: DC at the BMS per MultiPlus at its limit (measured 2026-10-09: ~3.6 kW, 65-67 A, flat over 53.6-54.6 V)"},
 	{"FORCE_FULL_HOLD_MIN",   P(force_full_hold_min),       60,      0,       1440,    "min", "force_full_from_pv: the command ends once its stack held 100 % SoC this long (BMS cell balancing)"},
+	{"FORCE_FULL_MAX_MIN",    P(force_full_max_min),        240,     0,       1440,    "min", "force_full_from_pv: the command ends at the latest this long after it came, also below 100 % SoC (0 = off)"},
+	{"FORCE_FULL_SPREAD_MV",  P(force_full_spread_mv),      30,      0,       500,     "mV", "force_full_from_pv: the command ends once the cell spread of its stack stayed at or below this for 60 s with the highest cell at FORCE_FULL_TOP_V (0 = off)"},
+	{"FORCE_FULL_TOP_V",      P(force_full_top_v),          3.45,    3.0,     3.7,     "V", "... the highest cell at least this: the spread counts only at the top of the charge, not at rest"},
 	{"SINGLE_DIS_W",          P(single_dis_w),              3000,    0,       5000,    "W", "grid there: discharge through one MultiPlus only up to this total (unbalanced phases, the meter nets them; less idle loss), above it all phases (0 = off)"},
 	{"SINGLE_DIS_HYST_W",     P(single_dis_hyst_w),         500,     0,       3000,    "W", "back to one MultiPlus below SINGLE_DIS_W minus this"},
 	{"SINGLE_DIS_UP_S",       P(single_dis_up_s),           60,      0,       600,     "s", "all phases only after the discharge stayed above SINGLE_DIS_W this long (one unit carries up to its cap meanwhile)"},
@@ -1057,9 +1060,31 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 	if (c.ff >= 0 && st->soc_ok[c.ff] && st->soc[c.ff] >= 100.0) {
 		if (st->ff_full_since <= 0)
 			st->ff_full_since = in->now;
-		out->ff_done = in->now - st->ff_full_since >= cfg->force_full_hold_min * 60.0;
+		if (in->now - st->ff_full_since >= cfg->force_full_hold_min * 60.0)
+			out->ff_done = BM_FF_HOLD;
 	} else if (c.ff < 0 || st->soc_ok[c.ff])
 		st->ff_full_since = 0;
+	/* 0.67-c (user 2026-10-27: "sobald die Zellspreizung niedrig genug ist default mode, oder spaetestens nach timeout"):
+	   also done once the cell spread stayed at or below FORCE_FULL_SPREAD_MV for FF_SPREAD_STABLE_S with the highest
+	   cell at the top, or FORCE_FULL_MAX_MIN after the command came. Missing cell values stop the spread clock. */
+	if (c.ff < 0) {
+		st->ff_since = st->ff_spread_since = 0;
+	} else {
+		if (st->ff_since <= 0)
+			st->ff_since = in->now;
+		int b = c.ff;
+		if (cfg->force_full_spread_mv > 0 && in->cell_ok[b] && in->cell_max_ok[b] &&
+			in->cell_max[b] >= cfg->force_full_top_v &&
+			(in->cell_max[b] - in->cell_min[b]) * 1000.0 <= cfg->force_full_spread_mv) {
+			if (st->ff_spread_since <= 0)
+				st->ff_spread_since = in->now;
+		} else
+			st->ff_spread_since = 0;
+		if (!out->ff_done && st->ff_spread_since > 0 && in->now - st->ff_spread_since >= FF_SPREAD_STABLE_S)
+			out->ff_done = BM_FF_SPREAD;
+		if (!out->ff_done && cfg->force_full_max_min > 0 && in->now - st->ff_since >= cfg->force_full_max_min * 60.0)
+			out->ff_done = BM_FF_MAX;
+	}
 	if (!c.n_dis) {
 		struct bm_d3_in d = {0, 0, 0, 0};
 		bm_d3(&d, st->soyo_prop_prev, &st->soyo_prop_prev);

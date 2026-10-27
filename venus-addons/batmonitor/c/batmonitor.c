@@ -59,6 +59,12 @@
  *     command is on (HOLD without surplus); the other stack covers the house. No grid charging. BMS_MISSING, FORCE /
  *     LOW, STALE and the summer charge block keep their priority. After FORCE_FULL_HOLD_MIN (60 min) at 100 % SoC the
  *     command ends by itself: batmonitor publishes "off" retained. "off" ends it at once. state.json force_full_from_pv.
+ *   - force_full_from_pv ends earlier or at the latest (0.67-c, user 2026-10-27: "sobald die Zellspreizung niedrig genug
+ *     ist default mode, oder spaetestens nach timeout"): once the cell spread of its stack (BMS /System/MaxCellVoltage
+ *     - MinCellVoltage) stayed at or below FORCE_FULL_SPREAD_MV (30 mV) for 60 s with the highest cell at
+ *     FORCE_FULL_TOP_V (3.45 V, so the small spread at rest after the charge does not count), and in any case
+ *     FORCE_FULL_MAX_MIN (240 min) after the command came, also when the stack never reached 100 %. A restart of
+ *     batmonitor starts that clock again. state.json force_full_from_pv on_min / max_min / spread_mv.
  *   - full_at with the measured charger power (0.31-c, user 2026-10-09): each MultiPlus delivers ~3.6 kW DC at the BMS
  *     at its limit (65-67 A, flat over 53.6-54.6 V; AC-in ~4040 W), not 70 A x U: CHARGER_DC_W caps the forecast.
  *   - full_at (0.32-c, user 2026-10-09): the forecast splits the power each step like alloc_charge and lets the SoC lead
@@ -93,7 +99,7 @@
 #include "bm_logic.h"
 #include "bm_parse.h"
 
-#define VERSION "0.66-c"
+#define VERSION "0.67-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
@@ -614,6 +620,12 @@ static void write_state(const int *sp, char why[][WHY_LEN], double surplus)
 		cJSON_AddNullToObject(o, "held_min");
 	}
 	cJSON_AddNumberToObject(o, "hold_min", cfg.force_full_hold_min);
+	if (in_last.force_full >= 1 && in_last.force_full <= NBANK && st.ff_since > 0)   /* 0.67-c */
+		cJSON_AddNumberToObject(o, "on_min", round((in_last.now - st.ff_since) / 6.0) / 10);
+	else
+		cJSON_AddNullToObject(o, "on_min");
+	cJSON_AddNumberToObject(o, "max_min", cfg.force_full_max_min);
+	cJSON_AddNumberToObject(o, "spread_mv", cfg.force_full_spread_mv);
 	o = cJSON_AddObjectToObject(js, "chain");                  /* 0.42-c: S3 reason, as in the rule text */
 	cJSON_AddStringToObject(o, "src", o_.src_why);
 	o = cJSON_AddObjectToObject(js, "pi");
@@ -741,6 +753,8 @@ static void calc(void)
 					   get(s, "/Info/MaxDischargeCurrent", &in.dcl[b]) == 0 && in.dcl[b] >= 0;
 		in.cell_ok[b] = get(s, "/System/MinCellVoltage", &in.cell_min[b]) == 0 && in.cell_min[b] > 1.5 &&
 						in.cell_min[b] < 4.5;     /* 0.52-c: LOW force charge */
+		in.cell_max_ok[b] = get(s, "/System/MaxCellVoltage", &in.cell_max[b]) == 0 && in.cell_max[b] > 1.5 &&
+							in.cell_max[b] < 4.5;   /* 0.67-c: force_full ends at a small cell spread */
 	}
 
 	bm_step(&cfg, &in, &st, &o_);
@@ -764,13 +778,22 @@ static void calc(void)
 		}
 	}
 	if (o_.ff_done) {
-		LOG("force_full_from_pv: %s held 100 %% SoC for %.0f min, done%s", BM_BANKS[in.force_full - 1].name,
-			cfg.force_full_hold_min, LIVE ? "" : " (dry run, command kept)");
+		int b = in.force_full - 1;
+		if (o_.ff_done == BM_FF_SPREAD)
+			LOG("force_full_from_pv: %s cell spread %.0f mV <= %.0f mV (cells %.3f..%.3f V), done%s", BM_BANKS[b].name,
+				(in.cell_max[b] - in.cell_min[b]) * 1000.0, cfg.force_full_spread_mv, in.cell_min[b], in.cell_max[b],
+				LIVE ? "" : " (dry run, command kept)");
+		else if (o_.ff_done == BM_FF_MAX)
+			LOG("force_full_from_pv: %s still on after %.0f min, done%s", BM_BANKS[b].name, cfg.force_full_max_min,
+				LIVE ? "" : " (dry run, command kept)");
+		else
+			LOG("force_full_from_pv: %s held 100 %% SoC for %.0f min, done%s", BM_BANKS[b].name,
+				cfg.force_full_hold_min, LIVE ? "" : " (dry run, command kept)");
 		if (LIVE) {                               /* a dry run (NCR fallback) never ends the live command */
 			pthread_mutex_lock(&mq_lock);
 			mq.force_full = 0;
 			pthread_mutex_unlock(&mq_lock);
-			st.ff_full_since = 0;
+			st.ff_full_since = st.ff_since = st.ff_spread_since = 0;
 			if (!mosq_g || mosquitto_publish(mosq_g, NULL, FORCE_FULL_TOPIC, 3, "off", 1, true) != MOSQ_ERR_SUCCESS)
 				LOGE("force_full_from_pv: publish off failed");
 		}

@@ -24,6 +24,10 @@ CYCLE_SECONDS = 5
 WHY_LEN = 96
 BM_SUMMER, BM_WINTER, BM_TRANSITION = 1, 2, 3
 BM_NOMINAL_V = 51.2            # 16S LFP, for BMS current limits without a voltage
+BM_FF_HOLD = 1                 # Out.ff_done: held 100 % SoC for FORCE_FULL_HOLD_MIN (0.62-c)
+BM_FF_SPREAD = 2               # cell spread down to FORCE_FULL_SPREAD_MV for FF_SPREAD_STABLE_S (0.67-c)
+BM_FF_MAX = 3                  # FORCE_FULL_MAX_MIN after the command (0.67-c)
+FF_SPREAD_STABLE_S = 60
 
 # soyo, 1:1 from sofar_waveshare.yaml, power values doubled (POWER_SCALE)
 POWER_SCALE = 2
@@ -188,6 +192,9 @@ BM_PARAMS = [
     Param("CHARGER_DC_W", "charger_dc_w", 3600, 500, 5000, "W", "full_at forecast: DC at the BMS per MultiPlus at its limit"),
     Param("WP_WINTER_W", "wp_winter_w", 1000, 0, 12000, "W", "winter half-year (October..March), heat pump running: the stacks discharge nothing while the Sofar Bat1 discharges, else at most this (heat pump off: PCC near 0)"),
     Param("FORCE_FULL_HOLD_MIN", "force_full_hold_min", 60, 0, 1440, "min", "force_full_from_pv: the command ends once its stack held 100 % SoC this long (BMS cell balancing)"),
+    Param("FORCE_FULL_MAX_MIN", "force_full_max_min", 240, 0, 1440, "min", "force_full_from_pv: the command ends at the latest this long after it came, also below 100 % SoC (0 = off)"),
+    Param("FORCE_FULL_SPREAD_MV", "force_full_spread_mv", 30, 0, 500, "mV", "force_full_from_pv: the command ends once the cell spread of its stack stayed at or below this for 60 s with the highest cell at FORCE_FULL_TOP_V (0 = off)"),
+    Param("FORCE_FULL_TOP_V", "force_full_top_v", 3.45, 3.0, 3.7, "V", "... the highest cell at least this: the spread counts only at the top of the charge, not at rest"),
     Param("SINGLE_DIS_W", "single_dis_w", 3000, 0, 5000, "W", "grid there: discharge through one MultiPlus only up to this total (unbalanced phases, the meter nets them; less idle loss), above it all phases (0 = off)"),
     Param("SINGLE_DIS_HYST_W", "single_dis_hyst_w", 500, 0, 3000, "W", "back to one MultiPlus below SINGLE_DIS_W minus this"),
     Param("SINGLE_DIS_UP_S", "single_dis_up_s", 60, 0, 600, "s", "all phases only after the discharge stayed above SINGLE_DIS_W this long (one unit carries up to its cap meanwhile)"),
@@ -256,6 +263,8 @@ class In:
     cell_ok: list = field(default_factory=lambda: [0] * NBANK)
     cell_min: list = field(default_factory=lambda: [0.0] * NBANK)  # BMS /System/MinCellVoltage V (0.52-c)
     force_full: int = 0                         # batmonitor/force_full_from_pv (0.62-c): 0 off, 1 = S1, 2 = S2
+    cell_max_ok: list = field(default_factory=lambda: [0] * NBANK)
+    cell_max: list = field(default_factory=lambda: [0.0] * NBANK)  # BMS /System/MaxCellVoltage V (0.67-c)
 
 
 @dataclass
@@ -278,6 +287,8 @@ class State:
     pi_e_prev: float = 0.0
     pi_t_prev: float = 0.0
     ff_full_since: float = 0.0                  # monotonic s since the force_full stack is at 100 %, 0 = not (0.62-c)
+    ff_since: float = 0.0                       # monotonic s since the force_full command is on, 0 = off (0.67-c)
+    ff_spread_since: float = 0.0                # monotonic s since its cell spread is down at the top, 0 = not
     single_ph: int = -1                         # the one discharging phase with the grid there, -1 = none (0.63-c)
     single_all: int = 0                         # the discharge is above SINGLE_DIS_W: all phases (0.63-c)
     single_over_since: float = 0.0              # monotonic s since the discharge is above SINGLE_DIS_W, 0 = not (0.64-c)
@@ -330,7 +341,7 @@ class Out:
     dis_cap: list = field(default_factory=lambda: [0.0] * NPH)
     ccl_bind: list = field(default_factory=lambda: [0] * NPH)
     dcl_bind: list = field(default_factory=lambda: [0] * NPH)
-    ff_done: int = 0                            # the force_full stack held 100 % for FORCE_FULL_HOLD_MIN (0.62-c)
+    ff_done: int = 0                            # end the force_full command (0.62-c): BM_FF_HOLD, _SPREAD, _MAX, 0 = no
 
 
 # ---- clear-sky DC model (fox2db_logic.h) ---------------------------------------------------------------------
@@ -1079,9 +1090,30 @@ def bm_step(cfg, inp, st):
     if c.ff >= 0 and st.soc_ok[c.ff] and st.soc[c.ff] >= 100.0:
         if st.ff_full_since <= 0:
             st.ff_full_since = inp.now
-        out.ff_done = int(inp.now - st.ff_full_since >= cfg.force_full_hold_min * 60.0)
+        if inp.now - st.ff_full_since >= cfg.force_full_hold_min * 60.0:
+            out.ff_done = BM_FF_HOLD
     elif c.ff < 0 or st.soc_ok[c.ff]:
         st.ff_full_since = 0.0
+    # 0.67-c (user 2026-10-27: "sobald die Zellspreizung niedrig genug ist default mode, oder spaetestens nach timeout"):
+    # also done once the cell spread stayed at or below FORCE_FULL_SPREAD_MV for FF_SPREAD_STABLE_S with the highest
+    # cell at the top, or FORCE_FULL_MAX_MIN after the command came. Missing cell values stop the spread clock.
+    if c.ff < 0:
+        st.ff_since = st.ff_spread_since = 0.0
+    else:
+        if st.ff_since <= 0:
+            st.ff_since = inp.now
+        b = c.ff
+        if (cfg.force_full_spread_mv > 0 and inp.cell_ok[b] and inp.cell_max_ok[b]
+                and inp.cell_max[b] >= cfg.force_full_top_v
+                and (inp.cell_max[b] - inp.cell_min[b]) * 1000.0 <= cfg.force_full_spread_mv):
+            if st.ff_spread_since <= 0:
+                st.ff_spread_since = inp.now
+        else:
+            st.ff_spread_since = 0.0
+        if not out.ff_done and st.ff_spread_since > 0 and inp.now - st.ff_spread_since >= FF_SPREAD_STABLE_S:
+            out.ff_done = BM_FF_SPREAD
+        if not out.ff_done and cfg.force_full_max_min > 0 and inp.now - st.ff_since >= cfg.force_full_max_min * 60.0:
+            out.ff_done = BM_FF_MAX
     if not c.n_dis:
         st.soyo_prop_prev = 0                # D3 with no discharging phase: reset
     pcc_over = bool(inp.have_pcc and inp.now - inp.inv_time < DO4_PCC_MAX_AGE and inp.pcc > PCC_PEAK_TH)

@@ -94,6 +94,9 @@ def main():
         n_slots = int(next(it))
         i.fc_slots = [(int(next(it)), float(next(it))) for _ in range(n_slots)]
         i.force_full = int(next(it))
+        for b in range(L.NBANK):                     # 0.67-c
+            i.cell_max_ok[b] = int(next(it))
+            i.cell_max[b] = float(next(it))
         o = L.bm_step(cfg, i, st)
         out_lines.append("%d %d %d %d %d\t%s\t%s\t%s\t%.3f %.3f %.3f %d %d %d %d\n" % (
             run, k, o.sp[0], o.sp[1], o.sp[2], o.why[0], o.why[1], o.why[2], o.surplus, o.pi.u, o.pi.y,

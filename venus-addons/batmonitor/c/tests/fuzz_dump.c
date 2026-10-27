@@ -64,6 +64,12 @@ int main(int argc, char **argv)
 				/* 0.52-c: lowest cell and DCL 0 for LOW (deterministic, no rand: older revisions see the same inputs) */
 				in.cell_ok[b] = (run + k + b) % 4 != 0;
 				in.cell_min[b] = 2.9 + 0.05 * ((run * 7 + k / 3 + b) % 9);
+				/* 0.67-c: the top of the charge for the force_full spread end; cells >= CELL_FORCE_RELEASE_V act the same
+				   for LOW at 3.25 and at 3.45, so older revisions still see equivalent inputs */
+				if (in.cell_min[b] >= 3.25)
+					in.cell_min[b] += 0.2;
+				in.cell_max_ok[b] = (run + k + b) % 5 != 0;
+				in.cell_max[b] = in.cell_min[b] + 0.005 * ((run * 3 + k / 40 + b) % 12);
 				if ((run + b) % 6 == 2 && k >= 40 && k < 70)
 					in.dcl[b] = 0;
 			}
@@ -87,7 +93,10 @@ int main(int argc, char **argv)
 				printf(" %.17g %d", in.fc_corr, in.fc_n);
 				for (int i = 0; i < in.fc_n; i++)
 					printf(" %lld %.17g", (long long)in.fc_slot_t[i], in.fc_slot_kt[i]);
-				printf(" %d\n", in.force_full);
+				printf(" %d", in.force_full);
+				for (int b = 0; b < NBANK; b++)
+					printf(" %d %.17g", in.cell_max_ok[b], in.cell_max[b]);
+				printf("\n");
 			}
 			bm_step(&cfg, &in, &st, &out);
 			if (io && k % 7 == 0) {                         /* the full_at forecast too, deterministic slots (no rand) */

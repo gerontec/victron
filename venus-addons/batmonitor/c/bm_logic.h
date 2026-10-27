@@ -20,6 +20,10 @@ extern "C" {                         /* the ESP32 shadow (ESPHome, C++) calls th
 #define BM_WINTER 2
 #define BM_TRANSITION 3
 #define BM_NOMINAL_V 51.2          /* 16S LFP, for BMS current limits without a voltage */
+#define BM_FF_HOLD 1               /* bm_out.ff_done: held 100 % SoC for FORCE_FULL_HOLD_MIN (0.62-c) */
+#define BM_FF_SPREAD 2             /* cell spread down to FORCE_FULL_SPREAD_MV for FF_SPREAD_STABLE_S (0.67-c) */
+#define BM_FF_MAX 3                /* FORCE_FULL_MAX_MIN after the command (0.67-c) */
+#define FF_SPREAD_STABLE_S 60
 
 struct bm_bank {
 	const char *name, *service;
@@ -48,6 +52,9 @@ struct bm_cfg {
 	double wp_winter_w;             /* winter half-year, heat pump running: discharge at most this, only with the Sofar
 	                                   Bat1 empty (0.61-c) */
 	double force_full_hold_min;     /* force_full_from_pv ends once its stack held 100 % SoC this long (0.62-c) */
+	double force_full_max_min;      /* ... at the latest this long after the command, also below 100 % (0.67-c) */
+	double force_full_spread_mv, force_full_top_v;   /* ... once the cell spread is down to this with the highest cell
+	                                                    at the top (0.67-c) */
 	double single_dis_w, single_dis_hyst_w;   /* grid there: one MultiPlus discharges up to this total (0.63-c) */
 	double single_dis_up_s;                   /* ... all phases only after this long above it (0.64-c) */
 };
@@ -105,6 +112,8 @@ struct bm_in {
 	double cell_min[NBANK];                                 /* BMS /System/MinCellVoltage V (0.52-c) */
 	int force_full;                                         /* batmonitor/force_full_from_pv (0.62-c): 0 off, 1 = S1
 	                                                           (STACK1), 2 = S2 (STACK2); memset 0 = off */
+	int cell_max_ok[NBANK];
+	double cell_max[NBANK];                                 /* BMS /System/MaxCellVoltage V (0.67-c) */
 };
 
 struct bm_ls { int active, cap, peak_h, win_end_h; double dc, ratio, ratio_now, noon_h; };   /* active = waiting below the cap */
@@ -124,6 +133,8 @@ struct bm_state {
 	double acout_over_since;                     /* monotonic s since an AC-out feeds above ACOUT_FEED_MAX_W (0.51-c) */
 	double pi_e_prev, pi_t_prev;
 	double ff_full_since;                        /* monotonic s since the force_full stack is at 100 %, 0 = not (0.62-c) */
+	double ff_since;                             /* monotonic s since the force_full command is on, 0 = off (0.67-c) */
+	double ff_spread_since;                      /* monotonic s since its cell spread is down at the top, 0 = not */
 	int single_ph;                               /* the one discharging phase with the grid there, -1 = none (0.63-c) */
 	int single_all;                              /* the discharge is above SINGLE_DIS_W: all phases (0.63-c) */
 	double single_over_since;                    /* monotonic s since the discharge is above SINGLE_DIS_W, 0 = not (0.64-c) */
@@ -149,8 +160,7 @@ struct bm_out {
 	double chg_cap[NPH];                         /* W AC: charge ceiling per phase used this cycle */
 	double dis_cap[NPH];                         /* W AC: discharge ceiling per phase used this cycle */
 	int ccl_bind[NPH], dcl_bind[NPH];            /* 1 = the BMS current limit is below the charger / phase limit */
-	int ff_done;                                 /* 1 = the force_full stack held 100 % for FORCE_FULL_HOLD_MIN, end the
-	                                                command (0.62-c) */
+	int ff_done;                                 /* end the force_full command (0.62-c): BM_FF_HOLD, _SPREAD, _MAX, 0 = no */
 };
 
 /* ---- decision layer (0.43-c): the discrete part of the rule chain as pure functions of predicates ("bits", each a
