@@ -10,12 +10,14 @@ OUT="${2:?usage: prepare_venus_rootfs.sh <image.ext4[.gz]> <out.tar.zst>}"
 FEED="${FEED:-https://updates.victronenergy.com/feeds/venus/release/packages/scarthgap}"
 HERE=$(dirname "$(readlink -f "$0")")
 
-# closed packages of the official large image that have no public recipe
+# closed packages of the official large image that have no public recipe. Left out on purpose (venus_harden.sh,
+# 2026-10-27): mqtt-rpc (remote commands from VRM: firmware, VE.Bus settings, files) and support-keys (SSH keys of
+# Victron staff for remote support)
 CLOSED="serial-starter mk2-dbus mk2vsc hub4control vecan-dbus vrmlogger vebus-system-config vebus-updater
 service-advertiser dbus-modbustcp dbus-mqtt-integrations dbus-parallel-bms dbus-eebus dbus-canopen-motordrive
 dbus-fzsonick-48tl dbus-adc dbus-ble-sensors dbus-cgwacs dbus-fronius dbus-motordrive dbus-rv-c dbus-valence
-gps-dbus can-bus-bms can-bus-bms-hv vedirect-interface gui start-gui-v1 mqtt-rpc venus-eeprom
-venus-opportunity-loads vesmart-server velib-tools support-keys dup vup xupc xupd xupt prodtest"
+gps-dbus can-bus-bms can-bus-bms-hv vedirect-interface gui start-gui-v1 venus-eeprom
+venus-opportunity-loads vesmart-server velib-tools dup vup xupc xupd xupt prodtest"
 
 W=$(mktemp -d /var/tmp/venus-rootfs.XXXXXX)
 cleanup() {
@@ -66,6 +68,9 @@ rm -f "$R/etc/resolv.conf"
 [ -e "$W/resolv.conf.orig" ] || [ -L "$W/resolv.conf.orig" ] && cp -a "$W/resolv.conf.orig" "$R/etc/resolv.conf"
 rm -rf "$R/usr/lib/opkg/lists"/*
 [ -z "$missing" ] || { echo "missing closed packages:$missing" >&2; exit 1; }
+
+echo "== hardening: VRM report only"
+"$HERE/venus_harden.sh" "$R"
 
 echo "== pack ${OUT}"
 tar -C "$R" --numeric-owner --xattrs --acls -cpf - . | zstd -T0 -q -o "$OUT" -f
