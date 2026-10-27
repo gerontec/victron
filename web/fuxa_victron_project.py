@@ -152,7 +152,9 @@ GRIDC = '#94a3b8'
 G = {'fill': 'none', 'stroke': GRIDC, 'stroke-width': 7, 'stroke-linecap': 'round', 'stroke-linejoin': 'round'}
 box(370, 70, 100, 50, '#1f2937', 8)
 text(420, 92, 'Z1', 15, 'bold', 'middle')
-text(420, 111, 'grid meter', 11, 'normal', 'middle', MUTED)
+# Sofar PCC at Z1 instead of the 'grid meter' label (user 2026-10-27), + = export
+text(380, 111, 'PCC', 11, fill=MUTED)
+value(460, 111, 'pcc_kw', 'kW', 2, 12, anchor='end')
 box(510, 70, 100, 50, '#1f2937', 8)
 text(560, 92, 'Z2', 15, 'bold', 'middle')
 text(560, 111, 'house meter', 11, 'normal', 'middle', MUTED)
@@ -174,11 +176,17 @@ shape('circle', {'cx': 660, 'cy': 95, 'r': 7, 'fill': GRIDC, 'stroke': 'none'})
 text(700, 86, 'A', 13, 'bold', fill=GRIDC)
 shape('path', dict(G, d='M660,95 L660,140'))                # branch B -> MCB
 text(668, 132, 'B', 13, 'bold', fill=GRIDC)
-box(590, 140, 140, 50, '#2a1a1c', 6)
-text(604, 160, 'MCB 3~ → AC-in', 13, 'bold')
+# box turns brown and the feed-in row orange while a unit feeds in at AC-in (ac_in_export_w > 50 W, user 2026-10-27):
+# the AC-in total hides it when the other phases draw about as much
+box(590, 140, 140, 66, '#2a1a1c', 6, 'ac_in_export_w', flow_ranges('color', '#2a1a1c', '#2a1a1c', '#3a2a10', 50))
+text(604, 158, 'MCB 3~ → AC-in', 13, 'bold')
 # real AC-in power instead of the configured current limit (user 2026-10-27), + = from the grid
-text(604, 181, 'AC-in power', 11, fill=MUTED)
-value(720, 181, 'ac_in_kw', 'kW', 2, 12, anchor='end')
+text(604, 177, 'AC-in power', 11, fill=MUTED)
+value(720, 177, 'ac_in_kw', 'kW', 2, 12, anchor='end')
+FEED = [{'type': 2, 'min': -1e6, 'max': 50, 'color': MUTED, 'stroke': ''}, {'type': 2, 'min': 50, 'max': 1e6, 'color': ORANGE, 'stroke': ''}]
+dyn_text(604, 196, 'feed-in', 'ac_in_export_w', FEED, 11, 'normal', fill=MUTED)
+value(678, 196, 'ac_in_export_phases', '', None, 11, 'bold', anchor='end', fill=ORANGE)
+value(720, 196, 'ac_in_export_w', 'W', 0, 12, anchor='end')
 
 # rotary changeover switch 3~ (ATS): common -> house; I = grid (branch A, normal), II = AC-out1 of the MultiPlus.
 # blade on II while AC-out1 feeds the house (ups_active: AC-out total > 99 W or grid failure, user 2026-10-27)
@@ -223,7 +231,7 @@ text(30, 52, 'AC-in / DC: + charging (green) · − feeding the house (orange) �
 # physical order on the wall (user 2026-10-08): unit 1 left = L2, unit 2 middle = L1 (master, Stack1), unit 3 right = L3
 CX = {'l2': 230, 'l1': 730, 'l3': 1230}
 LEFT, RIGHT = min(CX.values()), max(CX.values())
-line('M660,190 L660,235', 'ac_in_kw', 50 / 1000, color=GREY)
+line('M660,206 L660,235', 'ac_in_kw', 50 / 1000, color=GREY)
 line(f'M{LEFT - 50},235 L{RIGHT - 50},235', 'ac_in_kw', 50 / 1000)
 for p, x in CX.items():
     line(f'M{x - 50},235 L{x - 50},275', f'{p}_ac_in_w', 50)

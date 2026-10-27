@@ -15,6 +15,7 @@ $errors = [];
 $r = null;
 $ext = [];
 $wp = null;
+$pcc = null;
 try {
     $pdo = new PDO("mysql:host=$db_host;dbname=$db_name;charset=utf8mb4", $db_user, $db_pass, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
     $r = $pdo->query("SELECT * FROM pv_victron ORDER BY ts DESC LIMIT 1")->fetch(PDO::FETCH_ASSOC) ?: null;
@@ -22,6 +23,10 @@ try {
         FROM pv_victron WHERE ts >= NOW() - INTERVAL 24 HOUR")->fetch(PDO::FETCH_ASSOC) ?: [];
     // heat pump: SDM72D meter of the R290, last reading of the last 3 min (batmonitor: running from 300 W)
     $wp = $pdo->query("SELECT total_active_power AS w FROM sdm72d WHERE timestamp >= NOW() - INTERVAL 3 MINUTE
+        ORDER BY timestamp DESC LIMIT 1")->fetch(PDO::FETCH_ASSOC) ?: null;
+    // Sofar PCC at Z1: last non-null minute value of the last 5 min (inverter_data has empty rows)
+    $pcc = $pdo->query("SELECT ActivePower_PCC_Total AS kw FROM inverter_data WHERE device_id = 1
+        AND timestamp >= NOW() - INTERVAL 5 MINUTE AND ActivePower_PCC_Total IS NOT NULL
         ORDER BY timestamp DESC LIMIT 1")->fetch(PDO::FETCH_ASSOC) ?: null;
 } catch (Exception $e) {
     $errors[] = 'database: ' . $e->getMessage();
@@ -85,6 +90,13 @@ if ($r) {
         $hbat += $b; $hout += $out;
         $hpct[$p] = (int)round(100 * $b / $out);
     }
+    // feed-in at AC-in (user 2026-10-27): units pushing power back through the MCB, per phase below -50 W
+    $exp_w = 0;
+    $exp_ph = [];
+    foreach (['l1', 'l2', 'l3'] as $p) {
+        $in = $r["ac_in_{$p}_w"];
+        if ($in !== null && $in < -50) { $exp_w += -$in; $exp_ph[] = strtoupper($p); }
+    }
     $values = [
         // VE.Bus system
         'vebus_state' => v($st, '', 'VE.Bus state code (3 Bulk, 4 Absorption, 5 Float, 8 Passthru, 9 Inverting, 252 External control)', 'pv_victron.vebus_state'),
@@ -98,6 +110,8 @@ if ($r) {
         'ups_active' => v(($acout === null && $r['active_input'] === null) ? null
                           : ((($acout !== null && $acout > 99) || (int)$r['active_input'] === 240) ? 1 : 0), '',
                           'Rotary switch on the UPS leg: 1 = AC-out1 of the MultiPlus feeds the house (AC-out total > 99 W or grid failure)', 'derived'),
+        'ac_in_export_w' => v($r['ac_in_l1_w'] === null ? null : (int)round($exp_w), 'W', 'Feed-in back through the MCB: sum over phases with AC-in below -50 W of -AC-in (0 = no unit feeds in)', 'derived: pv_victron.ac_in_l1..l3_w'),
+        'ac_in_export_phases' => v($r['ac_in_l1_w'] === null ? null : ($exp_ph ? implode(' ', $exp_ph) : '-'), 'text', 'Phases whose MultiPlus feeds in at AC-in (below -50 W), "-" if none', 'derived: pv_victron.ac_in_l1..l3_w'),
         'house_bat_w' => v($hout > 0 ? (int)round($hbat) : null, 'W', 'House load on AC-out1 covered by the batteries: sum over phases of max(0, AC-out - AC-in)', 'derived'),
         'house_grid_w' => v($hout > 0 ? (int)round($hout - $hbat) : null, 'W', 'House load on AC-out1 passed through from AC-in (grid)', 'derived'),
         'house_bat_pct' => v($hout > 0 ? (int)round(100 * $hbat / $hout) : null, '%', 'Battery share of the house load on AC-out1', 'derived'),
@@ -164,6 +178,7 @@ if ($r) {
         // ESS / grid
         'system_state' => v(num($r['system_state']), '', 'Venus system state', 'pv_victron.system_state'),
         'ess_setpoint_w' => v(num($r['ess_setpoint_w']), 'W', 'ESS grid setpoint (+ = import)', 'pv_victron.ess_setpoint_w'),
+        'pcc_kw' => v($pcc ? num($pcc['kw']) : null, 'kW', 'Grid exchange measured by the Sofar at the point of common coupling (meter Z1), minute value, + = export (Sofar convention)', 'inverter_data.ActivePower_PCC_Total (device_id 1)'),
         'grid_kw' => v(kw($grid), 'kW', 'Grid value used by ESS: -(Sofar PCC + Bat1) with observer (dbus-pcc-grid), + = import', 'derived: pv_victron.grid_l1..l3_w'),
         // batmonitor decisions (venus-addons/batmonitor, Hub4Mode 3)
         'bm_l1_sp_w' => v(num($r['bm_l1_sp_w'] ?? null), 'W', 'batmonitor setpoint L1 (dev0, middle, Stack1), + = charging', 'pv_victron.bm_l1_sp_w'),
