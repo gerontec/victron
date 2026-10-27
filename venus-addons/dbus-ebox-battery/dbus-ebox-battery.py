@@ -10,7 +10,7 @@ Input: MQTT topic ebox/pwr on the local Venus broker, written every 30 s by ebox
 Behaviour:
 - charge end as before: CVL = MAX_CHARGE_VOLTAGE (highest pack voltage seen at 100 % SoC, Jul-Oct 2026)
 - cell protection: charge current tapers when the highest cell reaches CELL_TAPER_MV, 0 at CELL_STOP_MV
-- pack "High" voltage event from the EBox console (volt_st, Volt.St column of `ebox pwr`): charging blocked
+- pack "High" or "OV" (1.6) voltage event from the EBox console (volt_st, Volt.St column of `ebox pwr`): charging blocked
   (CCL 0, AllowToCharge 0, HighVoltage alarm) until volt_st is back and the highest cell is below
   HIGH_RELEASE_MV, so the charger does not pulse against the pack limit
 - low SoC below FORCE_CHARGE_SOC: discharge blocked until FORCE_CHARGE_RELEASE_SOC; forced charge from the grid
@@ -26,11 +26,27 @@ three units, so /Info/* now carries the limits of both banks:
 - CCL / DCL = Pytes + MUST: a tapering or blocked Pytes no longer stops the MUST on L1 (and the other way round).
   The per-bank limits are enforced per phase by batmonitor (charge / discharge caps from each BMS); for the Pytes
   it reads /Info/Pack/*, which keep the Pytes-only values.
-- CVL = the MUST request (57.6 V) while the Pytes is full (SoC >= CVL_RAISE_SOC, back below CVL_LOWER_SOC) and
-  the MUST takes charge; else MAX_CHARGE_VOLTAGE (56.6 V) as before, so the Pytes keeps the fast voltage limit of
-  the chargers whenever it can charge. While raised, a pack voltage guard on the Pytes CCL (TAPER_CURRENT from
-  PACK_TAPER_V, 0 from MAX_CHARGE_VOLTAGE) keeps batmonitor from charging the Pytes above its own CVL.
+- CVL = MAX_CHARGE_VOLTAGE (56.6 V) always. 1.5 raised it to the MUST request (57.6 V) while the Pytes was full;
+  removed in 1.6 (user 2026-10-27: no raise above 57 V unless it can be limited to the L1 unit): the VE.Bus has one
+  charge voltage for all three units (vebus /BatteryOperationalLimits/MaxChargeVoltage, no per-device or per-phase
+  setpoint), so a raised CVL also reached the Pytes on L2 + L3. /Info/CvlRaised stays, always 0.
 - MUST missing on the D-Bus: the Pytes values alone, as up to 1.4.
+
+Pack alarms (1.6, 2026-10-27: pack 1 SysError + pack 3 Absent with the red ALM LED, Venus showed nothing): ebox_mqtt.py
+sends all status columns of `ebox pwr` per present pack ("pack_st"); each one goes to /Module/<n>/* and to a Venus
+alarm (0 ok, 1 warning, 2 alarm), worst pack wins. Alarms only, the charge / discharge limits do not change.
+- Base.St SysError -> InternalFailure 2; Charge / Dischg / Idle ok
+- pack of 1..PACKS_EXPECTED missing (Absent) -> BmsCable 2 (link between the packs), /System/NrOfModulesOffline;
+  "pack_st": null (console not readable, CAN fallback) -> BmsCable 1
+- Volt.St, B.V.St: High -> HighVoltage 1, OV -> HighVoltage 2
+- Curr.St: COCAlm -> HighChargeCurrent 1, DOCAlm -> HighDischargeCurrent 1, other COC* / DOC* -> 2
+- Temp.St, B.T.St: only Normal seen so far
+- seen so far (pv_ebox2 since 2026-07-29): Base.St Charge Dischg Idle SysError Absent, Volt.St Normal High OV,
+  Curr.St Normal COCAlm DOCAlm, Temp.St Normal. Not seen, assumed by symmetry: Low / UV -> LowVoltage 1 / 2,
+  High / OT -> HighTemperature 1 / 2, Low / UT -> LowTemperature 1 / 2
+- any other state -> InternalFailure 1 and a log line, so a new console state never goes unnoticed
+- an alarm stays up ALARM_HOLD_SECONDS after its last sighting: a flapping pack (15:27 Idle, 15:28 SysError)
+  raises one notification, not one per 30 s
 """
 
 import json
@@ -47,7 +63,7 @@ from gi.repository import GLib
 sys.path.insert(1, '/opt/victronenergy/dbus-systemcalc-py/ext/velib_python')
 from vedbus import VeDbusService  # noqa: E402
 
-VERSION = '1.5'
+VERSION = '1.6'
 # can-bus-bms (Speicher A on can0) registers as battery instance 512; 513 keeps the MQTT topics
 # N/<portal>/battery/<instance>/... of the two batteries apart
 DEVICE_INSTANCE = 513
@@ -67,10 +83,62 @@ FORCE_CHARGE_RELEASE_SOC = 8.0  # %
 STALE_SECONDS = 120
 CAPACITY_AH = 300               # 15 kWh at 51.2 V nominal (was 600 = both stacks, corrected 2026-10-08)
 MUST_SERVICE = 'com.victronenergy.battery.socketcan_can0'   # Stack1 MUST on L1 (1.5)
-CVL_RAISE_SOC = 99.0            # Pytes SoC from which the system CVL may follow the MUST
-CVL_LOWER_SOC = 97.0            # ... back to MAX_CHARGE_VOLTAGE below
-PACK_TAPER_V = 56.4             # V, raised CVL: Pytes CCL down to TAPER_CURRENT, 0 from MAX_CHARGE_VOLTAGE
 REFRESH_SECONDS = 5             # system limits follow the MUST BMS this often (the EBox data comes every 30 s)
+PACKS_EXPECTED = 3              # modules 1..3 of the Pytes stack (1.6)
+ALARM_HOLD_SECONDS = 300        # alarm stays up this long after its last sighting (1.6)
+
+# console state -> (alarm path, level) per status column of `ebox pwr` (1.6); 'Normal' and BASE_OK are 0
+BASE_OK = ('Charge', 'Dischg', 'Idle')
+STATE_ALARMS = {
+	'base':  {'SysError': ('/Alarms/InternalFailure', 2)},
+	'volt':  {'High': ('/Alarms/HighVoltage', 1), 'OV': ('/Alarms/HighVoltage', 2),
+	          'Low': ('/Alarms/LowVoltage', 1), 'UV': ('/Alarms/LowVoltage', 2)},
+	'curr':  {'COCAlm': ('/Alarms/HighChargeCurrent', 1), 'DOCAlm': ('/Alarms/HighDischargeCurrent', 1)},
+	'temp':  {'High': ('/Alarms/HighTemperature', 1), 'OT': ('/Alarms/HighTemperature', 2),
+	          'Low': ('/Alarms/LowTemperature', 1), 'UT': ('/Alarms/LowTemperature', 2)},
+}
+STATE_ALARMS['bvolt'] = STATE_ALARMS['volt']
+STATE_ALARMS['btemp'] = STATE_ALARMS['temp']
+ALARM_PATHS = ('/Alarms/HighVoltage', '/Alarms/LowVoltage', '/Alarms/HighTemperature', '/Alarms/LowTemperature',
+	'/Alarms/HighChargeCurrent', '/Alarms/HighDischargeCurrent', '/Alarms/InternalFailure', '/Alarms/BmsCable')
+MODULE_FIELDS = (('base', 'BaseSt'), ('volt', 'VoltSt'), ('curr', 'CurrSt'), ('temp', 'TempSt'),
+	('bvolt', 'BVoltSt'), ('btemp', 'BTempSt'))
+
+
+def state_alarm(field, state):
+	"""(path, level) of one console state, (None, 0) if ok; unknown states -> InternalFailure 1"""
+	if state in (None, 'Normal') or (field == 'base' and state in BASE_OK):
+		return None, 0
+	hit = STATE_ALARMS[field].get(state)
+	if hit:
+		return hit
+	if field == 'curr' and state[:3] in ('COC', 'DOC'):
+		return ('/Alarms/HighChargeCurrent' if state[0] == 'C' else '/Alarms/HighDischargeCurrent'), 2
+	return '/Alarms/InternalFailure', 1
+
+
+def pack_alarms(pack_st):
+	"""raw alarm levels {path: level} and the causes {path: ['pack 1 base SysError', ...]} from pack_st"""
+	raw, why = {}, {}
+
+	def put(path, level, cause):
+		if level > raw.get(path, 0):
+			raw[path] = level
+		why.setdefault(path, []).append(cause)
+
+	if pack_st is None:
+		put('/Alarms/BmsCable', 1, 'EBox console not readable')
+		return raw, why
+	present = {p.get('n') for p in pack_st}
+	for n in range(1, PACKS_EXPECTED + 1):
+		if n not in present:
+			put('/Alarms/BmsCable', 2, 'pack %d absent' % n)
+	for p in pack_st:
+		for field in STATE_ALARMS:
+			path, level = state_alarm(field, p.get(field))
+			if path:
+				put(path, level, 'pack %s %s %s' % (p.get('n'), field, p.get(field)))
+	return raw, why
 
 log = logging.getLogger('dbus-ebox-battery')
 
@@ -84,7 +152,9 @@ class EboxBattery:
 		self.high_block = False
 		self.bus = dbus.SystemBus()
 		self.pack = None                # last Pytes values from update(): soc, voltage, vhigh (1.5)
-		self.cvl_raised = False
+		self.clock = time.monotonic
+		self.alarm_seen = {}            # path -> {level: last sighting} (1.6)
+		self.alarm_shown = {}           # path -> level on the D-Bus (1.6)
 
 	def register(self):
 		s = VeDbusService('com.victronenergy.battery.ebox', self.bus, register=False)
@@ -103,6 +173,11 @@ class EboxBattery:
 		s.add_path('/System/MaxCellVoltage', None)
 		s.add_path('/System/MinCellVoltage', None)
 		s.add_path('/System/NrOfModulesOnline', None)
+		s.add_path('/System/NrOfModulesOffline', None)                  # 1.6
+		for n in range(1, PACKS_EXPECTED + 1):                          # 1.6: console states per pack
+			s.add_path('/Module/%d/Online' % n, None)
+			for _, name in MODULE_FIELDS:
+				s.add_path('/Module/%d/%s' % (n, name), None)
 		s.add_path('/Info/MaxChargeVoltage', MAX_CHARGE_VOLTAGE)
 		s.add_path('/Info/MaxChargeCurrent', None)
 		s.add_path('/Info/MaxDischargeCurrent', None)
@@ -110,11 +185,12 @@ class EboxBattery:
 		s.add_path('/Info/Pack/MaxChargeCurrent', None)
 		s.add_path('/Info/Pack/MaxDischargeCurrent', None)
 		s.add_path('/Info/MustIncluded', 0)                            # 1.5: /Info/* include the MUST on L1
-		s.add_path('/Info/CvlRaised', 0)                               # 1.5: CVL follows the MUST, Pytes full
+		s.add_path('/Info/CvlRaised', 0)                               # 1.5, always 0 since 1.6 (no CVL raise)
 		s.add_path('/Info/ChargeRequest', 0)
 		s.add_path('/Io/AllowToCharge', 1)
 		s.add_path('/Io/AllowToDischarge', 1)
-		s.add_path('/Alarms/HighVoltage', 0)
+		for path in ALARM_PATHS:
+			s.add_path(path, 0)
 		s.add_path('/Alarms/LowSoc', 0)
 		s.register()
 		self.service = s
@@ -140,7 +216,7 @@ class EboxBattery:
 		vlow = d.get('vlow_mv')
 
 		volt_st = str(d.get('volt_st') or 'Normal')
-		if volt_st.lower().startswith('high'):
+		if volt_st.lower().startswith('high') or volt_st == 'OV':      # 1.6: OV (protection) is worse than High
 			if not self.high_block:
 				log.warning('EBox reports %s voltage (cell max %s mV): charging blocked', volt_st, vhigh)
 			self.high_block = True
@@ -166,11 +242,44 @@ class EboxBattery:
 			ctx['/System/MinCellVoltage'] = vlow / 1000.0 if vlow else None
 			ctx['/System/NrOfModulesOnline'] = d.get('packs')
 			ctx['/Info/ChargeRequest'] = 1 if force_charge else 0
-			ctx['/Alarms/HighVoltage'] = 2 if self.high_block else (1 if (vhigh or 0) >= CELL_STOP_MV else 0)
 			ctx['/Alarms/LowSoc'] = 1 if self.low_soc else 0
+		self.update_alarms(d, 2 if self.high_block else (1 if (vhigh or 0) >= CELL_STOP_MV else 0))
 		self.pack = {'soc': soc, 'voltage': voltage, 'vhigh': vhigh}
 		self.last_update = time.monotonic()
 		self.publish_limits()
+
+	def update_alarms(self, d, high_voltage):
+		"""/Module/<n>/*, /System/NrOfModulesOffline and the alarms from pack_st (1.6); high_voltage = the cell /
+		block alarm of up to 1.5. A payload without "pack_st" (ebox_mqtt.py before 1.6) leaves the pack alarms 0."""
+		if 'pack_st' in d:
+			raw, why = pack_alarms(d['pack_st'])
+		else:
+			raw, why = {}, {}
+		raw['/Alarms/HighVoltage'] = max(raw.get('/Alarms/HighVoltage', 0), high_voltage)
+		now = self.clock()
+		with self.service as ctx:
+			pack_st = d.get('pack_st')
+			by_n = {p.get('n'): p for p in pack_st} if pack_st is not None else None
+			ctx['/System/NrOfModulesOffline'] = (PACKS_EXPECTED - len(set(by_n) & set(range(1, PACKS_EXPECTED + 1)))
+				if by_n is not None else None)
+			for n in range(1, PACKS_EXPECTED + 1):
+				p = by_n.get(n) if by_n is not None else None
+				ctx['/Module/%d/Online' % n] = None if by_n is None else (1 if p else 0)
+				for field, name in MODULE_FIELDS:
+					ctx['/Module/%d/%s' % (n, name)] = p.get(field) if p else (None if by_n is None else 'Absent')
+			for path in ALARM_PATHS:
+				level = raw.get(path, 0)
+				seen = self.alarm_seen.setdefault(path, {})
+				if level:
+					seen[level] = now
+				shown = max([lv for lv, t in seen.items() if now - t < ALARM_HOLD_SECONDS] + [level])
+				if shown != self.alarm_shown.get(path, 0):
+					if shown > self.alarm_shown.get(path, 0):
+						log.warning('%s %d: %s', path, shown, ', '.join(why.get(path, [])) or 'held')
+					else:
+						log.info('%s %d (clear for %d s)', path, shown, ALARM_HOLD_SECONDS)
+				self.alarm_shown[path] = shown
+				ctx[path] = shown
 
 	def must_limits(self):
 		"""CVL, CCL, DCL of the MUST BMS on L1 from the D-Bus (its CAN-bus BMS values, same Venus), None if it is
@@ -202,18 +311,7 @@ class EboxBattery:
 		pack_ccl = 0.0 if self.high_block else self.charge_current(p['vhigh'])
 		pack_dcl = 0.0 if self.low_soc else MAX_DISCHARGE_CURRENT
 		must = self.must_limits()
-		raise_cvl = (must is not None and must[0] > MAX_CHARGE_VOLTAGE and must[1] > 0 and
-					 p['soc'] >= (CVL_LOWER_SOC if self.cvl_raised else CVL_RAISE_SOC))
-		if raise_cvl != self.cvl_raised:
-			log.info('system CVL %.2f V (%s), Pytes SoC %.1f %%', must[0] if raise_cvl else MAX_CHARGE_VOLTAGE,
-				'MUST request, Pytes full' if raise_cvl else 'Pytes', p['soc'])
-			self.cvl_raised = raise_cvl
-		if raise_cvl and p['voltage']:                      # the chargers no longer hold the Pytes at its CVL
-			if p['voltage'] >= MAX_CHARGE_VOLTAGE:
-				pack_ccl = 0.0
-			elif p['voltage'] >= PACK_TAPER_V:
-				pack_ccl = min(pack_ccl, TAPER_CURRENT)
-		cvl = must[0] if raise_cvl else MAX_CHARGE_VOLTAGE
+		cvl = MAX_CHARGE_VOLTAGE                            # 1.6: never the MUST request, it would reach L2 + L3 too
 		ccl = pack_ccl + (must[1] if must else 0.0)
 		dcl = pack_dcl + (must[2] if must else 0.0)
 		with self.service as ctx:
@@ -223,7 +321,7 @@ class EboxBattery:
 			ctx['/Info/MaxChargeCurrent'] = ccl
 			ctx['/Info/MaxDischargeCurrent'] = dcl
 			ctx['/Info/MustIncluded'] = 1 if must else 0
-			ctx['/Info/CvlRaised'] = 1 if raise_cvl else 0
+			ctx['/Info/CvlRaised'] = 0
 			ctx['/Io/AllowToCharge'] = 1 if ccl > 0 else 0
 			ctx['/Io/AllowToDischarge'] = 1 if dcl > 0 else 0
 		return True

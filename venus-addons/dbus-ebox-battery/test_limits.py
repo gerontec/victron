@@ -86,17 +86,11 @@ b.update(dict(pwr, vhigh_mv=3655))                   # Pytes cell stop: MUST sti
 check(s['/Info/Pack/MaxChargeCurrent'] == 0 and s['/Info/MaxChargeCurrent'] == 15 and s['/Io/AllowToCharge'] == 1,
 	'Pytes cell 3655 mV: Pack CCL 0, system CCL 15 (MUST)')
 
-b.update(dict(pwr, soc=100, voltage_v=55.2))       # Pytes full: CVL follows the MUST
-check(s['/Info/MaxChargeVoltage'] == 57.6 and s['/Info/CvlRaised'] == 1 and s['/Info/Pack/MaxChargeCurrent'] == 586,
-	'Pytes 100 %%, 55.2 V: CVL %s, Pack CCL %s' % (s['/Info/MaxChargeVoltage'], s['/Info/Pack/MaxChargeCurrent']))
+b.update(dict(pwr, soc=100, voltage_v=55.2))       # 1.6: Pytes full, MUST asks 57.6 V: CVL stays 56.6 (VE.Bus-wide)
+check(s['/Info/MaxChargeVoltage'] == 56.6 and s['/Info/CvlRaised'] == 0 and s['/Info/Pack/MaxChargeCurrent'] == 586,
+	'Pytes 100 %%, MUST 57.6 V: CVL %s, Pack CCL %s' % (s['/Info/MaxChargeVoltage'], s['/Info/Pack/MaxChargeCurrent']))
 b.update(dict(pwr, soc=100, voltage_v=56.45))
-check(s['/Info/Pack/MaxChargeCurrent'] == 10, 'raised, Pytes 56.45 V: Pack CCL taper 10')
-b.update(dict(pwr, soc=100, voltage_v=56.6))
-check(s['/Info/Pack/MaxChargeCurrent'] == 0, 'raised, Pytes 56.6 V: Pack CCL 0')
-b.update(dict(pwr, soc=98, voltage_v=55.0))
-check(s['/Info/CvlRaised'] == 1, 'Pytes 98 %: stays raised (hysteresis)')
-b.update(dict(pwr, soc=96.5, voltage_v=55.0))
-check(s['/Info/MaxChargeVoltage'] == 56.6 and s['/Info/CvlRaised'] == 0, 'Pytes 96.5 %: back to 56.6')
+check(s['/Info/MaxChargeVoltage'] == 56.6 and s['/Info/Pack/MaxChargeCurrent'] == 586, 'Pytes 56.45 V: no raise, no pack taper')
 
 b.update(dict(pwr, soc=100))
 MUST['/Info/MaxChargeCurrent'] = 0.0                # MUST full (CCL 0): no reason to raise
@@ -111,5 +105,49 @@ MUST['/Info/MaxChargeCurrent'] = 15.0
 b.publish_limits()
 check(s['/Info/Pack/MaxDischargeCurrent'] == 0 and s['/Info/MaxDischargeCurrent'] == 200 and s['/Io/AllowToDischarge'] == 1,
 	'Pytes 3 %: Pack DCL 0, system DCL 200 (MUST)')
+
+# 1.6 pack alarms
+t = [1000.0]
+b.clock = lambda: t[0]
+b.alarm_seen = {}                                     # sightings of the real clock above
+b.update(dict(pwr))
+ok = {'base': 'Dischg', 'volt': 'Normal', 'curr': 'Normal', 'temp': 'Normal', 'bvolt': 'Normal', 'btemp': 'Normal'}
+three = [dict(ok, n=n) for n in (1, 2, 3)]
+b.update(dict(pwr, pack_st=three))
+check(all(s[p] == 0 for p in eb.ALARM_PATHS) and s['/System/NrOfModulesOffline'] == 0 and s['/Module/3/Online'] == 1,
+	'3 packs Normal: no alarm, 0 offline')
+now27 = [dict(ok, n=1, base='SysError'), dict(ok, n=2)]          # 2026-10-27 15:34
+b.update(dict(pwr, pack_st=now27))
+check(s['/Alarms/InternalFailure'] == 2 and s['/Alarms/BmsCable'] == 2 and s['/System/NrOfModulesOffline'] == 1
+	and s['/Module/1/BaseSt'] == 'SysError' and s['/Module/3/Online'] == 0 and s['/Module/3/BaseSt'] == 'Absent',
+	'pack 1 SysError + pack 3 absent: InternalFailure 2, BmsCable 2')
+check(s['/Info/Pack/MaxChargeCurrent'] == 586 and s['/Info/Pack/MaxDischargeCurrent'] == 586, 'alarms do not change limits')
+t[0] += 60
+b.update(dict(pwr, pack_st=three))
+check(s['/Alarms/InternalFailure'] == 2 and s['/Alarms/BmsCable'] == 2, 'back to normal after 60 s: still held')
+t[0] += eb.ALARM_HOLD_SECONDS
+b.update(dict(pwr, pack_st=three))
+check(s['/Alarms/InternalFailure'] == 0 and s['/Alarms/BmsCable'] == 0, 'clear after hold')
+t[0] += 1000
+b.update(dict(pwr, pack_st=[dict(ok, n=1, curr='COCAlm', volt='OV'), dict(ok, n=2, curr='DOCAlm'), dict(ok, n=3, curr='COCPro')]))
+check(s['/Alarms/HighChargeCurrent'] == 2 and s['/Alarms/HighDischargeCurrent'] == 1 and s['/Alarms/HighVoltage'] == 2,
+	'COCAlm+COCPro -> HighChargeCurrent 2, DOCAlm 1, OV -> HighVoltage 2')
+t[0] += 1000
+b.update(dict(pwr, pack_st=[dict(ok, n=1, temp='Weird'), dict(ok, n=2), dict(ok, n=3)]))
+check(s['/Alarms/InternalFailure'] == 1, 'unknown state -> InternalFailure 1')
+t[0] += 1000
+b.update(dict(pwr, pack_st=None))
+check(s['/Alarms/BmsCable'] == 1 and s['/System/NrOfModulesOffline'] is None and s['/Module/1/Online'] is None,
+	'console not readable: BmsCable 1, modules unknown')
+t[0] += 1000
+b.update(dict(pwr))
+check(all(s[p] == 0 for p in eb.ALARM_PATHS), 'payload without pack_st (old ebox_mqtt): no pack alarm')
+t[0] += 1000
+b.update(dict(pwr, volt_st='OV', vhigh_mv=3500))
+check(b.high_block and s['/Info/Pack/MaxChargeCurrent'] == 0 and s['/Alarms/HighVoltage'] == 2, 'volt_st OV: Pytes charging blocked')
+b.update(dict(pwr, vhigh_mv=3500))
+check(b.high_block, 'OV gone, cell 3500 mV: still blocked')
+b.update(dict(pwr, vhigh_mv=3400))
+check(not b.high_block and s['/Info/Pack/MaxChargeCurrent'] == 586, 'cell 3400 mV: released')
 print('%d failed' % fails)
 sys.exit(1 if fails else 0)
