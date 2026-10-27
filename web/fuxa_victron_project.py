@@ -133,15 +133,7 @@ def on_off(off, on):
     return [{'type': 2, 'min': -1, 'max': 0.5, 'color': off, 'stroke': ''}, {'type': 2, 'min': 0.5, 'max': 2, 'color': on, 'stroke': ''}]
 
 
-# heat pump tile (user 2026-10-25): text red and a flame + ON while the heat pump runs (wp_on, SDM72D >= 300 W), else OFF
 WP_BLUE, WP_RED = '#93c5fd', '#ef4444'
-box(1220, 14, 210, 28, '#16263a', 6)
-dyn_text(1232, 33, '◂ Heat pump', 'wp_on', on_off(WP_BLUE, WP_RED), fill=WP_BLUE)
-shape('path', {'d': 'M1374,38 c-5,0 -7,-4 -6,-8 c1,-3 3,-4 3,-8 c3,2 4,4 4,6 c1,-1 2,-3 2,-5 c3,3 4,6 4,9 c0,4 -3,6 -7,6 Z',
-               'fill': 'none', 'stroke': 'none'}, 'wp_on', on_off('none', WP_RED))
-dyn_text(1388, 33, 'ON', 'wp_on', on_off('none', WP_RED), fill='none')
-dyn_text(1388, 33, 'OFF', 'wp_on', on_off(MUTED, 'none'), fill=MUTED)
-click_tile(1220, 14, 210, 28, 'nav_ww', {'action': 'onOpenTab', 'actparam': 'https://fuxa.heissa.de/', 'actoptions': {'newTab': False}})
 
 # ---- Pi 4 / Venus (far left) --------------------------------------------------------------------
 box(30, 60, 310, 150, '#1e1b3a')
@@ -165,14 +157,18 @@ box(510, 70, 100, 50, '#1f2937', 8)
 text(560, 92, 'Z2', 15, 'bold', 'middle')
 text(560, 111, 'house meter', 11, 'normal', 'middle', MUTED)
 shape('path', dict(G, d='M470,95 L510,95'))
-# heat pump directly behind Z1 (user 2026-10-27): cheap heat-pump tariff, not via Z2
+# heat pump directly behind Z1 (user 2026-10-27): cheap heat-pump tariff, not via Z2; replaces the tile top right
+# (user 2026-10-25): text red and a flame + ON while the heat pump runs (wp_on, SDM72D >= 300 W), else OFF; click opens fuxa.heissa.de
 box(370, 145, 100, 65, '#16263a', 8)
 shape('path', dict(G, d='M420,120 L420,145'))
 dyn_text(420, 166, 'Heat pump', 'wp_on', on_off(WP_BLUE, WP_RED), 13, anchor='middle', fill=WP_BLUE)
 text(420, 183, 'cheap tariff', 11, 'normal', 'middle', MUTED)
 dyn_text(380, 201, 'ON', 'wp_on', on_off('none', WP_RED), 12, fill='none')
 dyn_text(380, 201, 'OFF', 'wp_on', on_off(MUTED, 'none'), 12, fill=MUTED)
+shape('path', {'d': 'M410,205 c-5,0 -7,-4 -6,-8 c1,-3 3,-4 3,-8 c3,2 4,4 4,6 c1,-1 2,-3 2,-5 c3,3 4,6 4,9 c0,4 -3,6 -7,6 Z',
+               'fill': 'none', 'stroke': 'none'}, 'wp_on', on_off('none', WP_RED))
 value(460, 201, 'wp_w', 'W', 0, 12, anchor='end')
+click_tile(370, 145, 100, 65, 'nav_ww', {'action': 'onOpenTab', 'actparam': 'https://fuxa.heissa.de/', 'actoptions': {'newTab': False}})
 shape('path', dict(G, d='M610,95 L840,95'))                 # branch A -> rotary switch I
 shape('circle', {'cx': 660, 'cy': 95, 'r': 7, 'fill': GRIDC, 'stroke': 'none'})
 text(700, 86, 'A', 13, 'bold', fill=GRIDC)
