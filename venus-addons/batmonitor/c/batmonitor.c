@@ -93,7 +93,7 @@
 #include "bm_logic.h"
 #include "bm_parse.h"
 
-#define VERSION "0.65-c"
+#define VERSION "0.66-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
@@ -725,6 +725,12 @@ static void calc(void)
 		snprintf(path, sizeof(path), "/Ac/Out/%s/P", BM_PH[p]);
 		in.ac_out_ok[p] = vb && get(vb, path, &in.ac_out[p]) == 0;
 	}
+	/* 0.66-c: the house hangs on AC-out1 (user 2026-10-27, the heat pump does not). The logic works on the battery
+	   side of each Multi: AC-in minus the AC-out load (+ = the Multi charges its stack); send_setpoints adds the
+	   load back, as /Hub4/Lx/AcPowerSetpoint is the AC-in power */
+	for (int p = 0; p < NPH; p++)
+		if (in.grid_ok && in.ac_ok[p] && in.ac_out_ok[p])
+			in.ac_in[p] -= in.ac_out[p];
 	for (int b = 0; b < NBANK; b++) {
 		const char *s = BM_BANKS[b].service;
 		double conn;
@@ -824,17 +830,19 @@ static void send_setpoints(void)
 		return;
 	memcpy(sp, st.setpoints, sizeof(sp));
 	if (mono() - setpoint_time > SETPOINT_MAX_AGE)
-		memset(sp, 0, sizeof(sp));          /* ESP TX watchdog */
+		memset(sp, 0, sizeof(sp));          /* ESP TX watchdog: stacks idle, the AC-out load passes through */
 	if (!hub4mode_set) {
 		set_int("com.victronenergy.settings", "/Settings/CGwacs/Hub4Mode", 3);
 		hub4mode_set = LIVE;
 	}
 	for (int p = 0; p < NPH; p++) {
 		char path[48];
+		/* sp is the battery side (0.66-c): AC-in = sp + the AC-out load of this cycle */
+		int ac = sp[p] + (in_last.grid_ok && in_last.ac_out_ok[p] ? (int)lround(in_last.ac_out[p]) : 0);
 		snprintf(path, sizeof(path), "/Hub4/%s/MaxFeedInPower", BM_PH[p]);
-		set_int(vb, path, (sp[p] < 0 ? -sp[p] : 0) + 100);
+		set_int(vb, path, (ac < 0 ? -ac : 0) + 100);
 		snprintf(path, sizeof(path), "/Hub4/%s/AcPowerSetpoint", BM_PH[p]);
-		set_int(vb, path, sp[p]);
+		set_int(vb, path, ac);
 	}
 }
 
@@ -845,16 +853,23 @@ static void stop_control(void)
 		do4_off_at = 0;
 	}
 	const char *vb = vebus();
+	double conn = 0;
+	int grid = vb && get(vb, "/Ac/ActiveIn/Connected", &conn) == 0 && conn == 1.0;
 	if (vb)
 		for (int p = 0; p < NPH; p++) {
 			char path[48];
+			double load = 0;
+			snprintf(path, sizeof(path), "/Ac/Out/%s/P", BM_PH[p]);
+			if (!grid || get(vb, path, &load) != 0)
+				load = 0;
 			snprintf(path, sizeof(path), "/Hub4/%s/AcPowerSetpoint", BM_PH[p]);
-			set_int(vb, path, 0);
+			set_int(vb, path, (int)lround(load));
 		}
 	/* stays in Hub4Mode 3 (0.53-c): until 0.52-c it wrote Hub4Mode 1 here, so every restart handed the system to
 	   Victron's own ESS for seconds; 2026-10-11 08:26:35 (Pytes 5.3 % < BatteryLife 10 %) the Multis then charged
-	   at their maximum and ignored the Hub4 setpoints. Setpoints 0 = the Multis pass through, nothing else */
-	LOG("stopped, setpoints 0, Hub4Mode stays 3");
+	   at their maximum and ignored the Hub4 setpoints. Setpoint = the AC-out load at stop (0.66-c, house on AC-out1):
+	   the Multis pass through, the stacks idle; later load changes until the restart come from the stacks */
+	LOG("stopped, setpoints = AC-out load (stacks idle), Hub4Mode stays 3");
 }
 
 static void on_signal(int sig)

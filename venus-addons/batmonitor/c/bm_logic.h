@@ -86,12 +86,13 @@ struct bm_in {
 	time_t fc_slot_t[24];
 	double fc_slot_kt[24];
 	int ac_ok[NPH];
-	double ac_in[NPH];                                      /* vebus /Ac/ActiveIn/Lx/P, + = the Multi takes */
+	double ac_in[NPH];                                      /* vebus /Ac/ActiveIn/Lx/P minus /Ac/Out/Lx/P with the grid
+	                                                           there (0.66-c): the battery side, + = the Multi charges */
 	int grid_ok;                                            /* vebus /Ac/ActiveIn/Connected == 1: grid there, transfer
 	                                                           relay closed (0.51-c: AC-out overfeed only matters off-grid) */
 	int ac_out_ok[NPH];
-	double ac_out[NPH];                                     /* vebus /Ac/Out/Lx/P: load on AC-out1 (0.36-c: read only,
-	                                                           not used by the logic until critical loads hang there) */
+	double ac_out[NPH];                                     /* vebus /Ac/Out/Lx/P: load on AC-out1 (the house since
+	                                                           2026-10-27; batmonitor.c subtracts it from ac_in) */
 	int bms_ok[NBANK];                                      /* Connected == 1 and /Soc valid */
 	double soc[NBANK];
 	int power_ok[NBANK];

@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bm_logic as L  # noqa: E402
 import bm_parse  # noqa: E402
 
-VERSION = "0.65-py"
+VERSION = "0.66-py"
 INVERTER_TOPIC = "inverter/power_grid_exchange/json"
 R290_TOPIC = "r290/heatpump/all"
 AUSSEN_TOPIC = "aussen/temp"
@@ -426,6 +426,11 @@ class Batmonitor:
             i.ac_ok[p], i.ac_in[p] = int(v is not None), v or 0.0
             v = self.get(vb, "/Ac/Out/%s/P" % L.BM_PH[p])
             i.ac_out_ok[p], i.ac_out[p] = int(v is not None), v or 0.0
+        # 0.66: the house hangs on AC-out1 (user 2026-10-27, the heat pump does not). The logic works on the battery
+        # side of each Multi: AC-in minus the AC-out load; send_setpoints adds the load back (AcPowerSetpoint = AC-in)
+        for p in range(L.NPH):
+            if i.grid_ok and i.ac_ok[p] and i.ac_out_ok[p]:
+                i.ac_in[p] -= i.ac_out[p]
         for b, bank in enumerate(L.BM_BANKS):
             s = bank.service
             soc = self.get(s, "/Soc") if self.get(s, "/Connected") == 1.0 else None
@@ -498,13 +503,16 @@ class Batmonitor:
             return
         sp = list(self.st.setpoints)
         if mono() - self.setpoint_time > SETPOINT_MAX_AGE:
-            sp = [0] * L.NPH                # ESP TX watchdog
+            sp = [0] * L.NPH                # ESP TX watchdog: stacks idle, the AC-out load passes through
         if not self.hub4mode_set:
             self.set_int("com.victronenergy.settings", "/Settings/CGwacs/Hub4Mode", 3)
             self.hub4mode_set = self.live
+        il = self.in_last
         for p in range(L.NPH):
-            self.set_int(vb, "/Hub4/%s/MaxFeedInPower" % L.BM_PH[p], (-sp[p] if sp[p] < 0 else 0) + 100)
-            self.set_int(vb, "/Hub4/%s/AcPowerSetpoint" % L.BM_PH[p], sp[p])
+            # sp is the battery side (0.66): AC-in = sp + the AC-out load of this cycle
+            ac = sp[p] + (int(round(il.ac_out[p])) if il and il.grid_ok and il.ac_out_ok[p] else 0)
+            self.set_int(vb, "/Hub4/%s/MaxFeedInPower" % L.BM_PH[p], (-ac if ac < 0 else 0) + 100)
+            self.set_int(vb, "/Hub4/%s/AcPowerSetpoint" % L.BM_PH[p], ac)
 
     def stop_control(self):
         if self.do4_off_at > 0:             # never leave the relay on
@@ -512,10 +520,13 @@ class Batmonitor:
             self.do4_off_at = 0.0
         vb = self.vebus()
         if vb:
+            grid = self.get(vb, "/Ac/ActiveIn/Connected") == 1.0
             for p in range(L.NPH):
-                self.set_int(vb, "/Hub4/%s/AcPowerSetpoint" % L.BM_PH[p], 0)
+                load = self.get(vb, "/Ac/Out/%s/P" % L.BM_PH[p]) if grid else None
+                self.set_int(vb, "/Hub4/%s/AcPowerSetpoint" % L.BM_PH[p], int(round(load or 0.0)))
         # stays in Hub4Mode 3 (0.53): Hub4Mode 1 on stop handed every restart to Victron's ESS (2026-10-11 08:26:35)
-        log("stopped, setpoints 0, Hub4Mode stays 3")
+        # setpoint = the AC-out load at stop (0.66, house on AC-out1): pass through, the stacks idle
+        log("stopped, setpoints = AC-out load (stacks idle), Hub4Mode stays 3")
 
     def run(self):
         log("batmonitor %s %s, cycle %d s, banks STACK1_MUST=L1, STACK2_PYTES=L2+L3, charge block %s, PI %s" % (
