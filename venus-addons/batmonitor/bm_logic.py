@@ -198,6 +198,7 @@ BM_PARAMS = [
     Param("SINGLE_DIS_W", "single_dis_w", 3000, 0, 5000, "W", "grid there: discharge through one MultiPlus only up to this total (unbalanced phases, the meter nets them; less idle loss), above it all phases (0 = off)"),
     Param("SINGLE_DIS_HYST_W", "single_dis_hyst_w", 500, 0, 3000, "W", "back to one MultiPlus below SINGLE_DIS_W minus this"),
     Param("SINGLE_DIS_UP_S", "single_dis_up_s", 60, 0, 600, "s", "all phases only after the discharge stayed above SINGLE_DIS_W this long (one unit carries up to its cap meanwhile)"),
+    Param("HOUSE_ACOUT", "house_acout", 2, 0, 2, "", "house on AC-out1 (0.69-c): winter Z2 near 0 (discharge = AC-out1 load), summer Z1 near 0 (PCC, at least the AC-out1 load); 0 = never (0.68-c matrix, house on the grid), 1 = always, 2 = auto (AC-out total > 99 W, off after 60 s < 30 W)"),
 ]
 
 
@@ -292,6 +293,8 @@ class State:
     single_ph: int = -1                         # the one discharging phase with the grid there, -1 = none (0.63-c)
     single_all: int = 0                         # the discharge is above SINGLE_DIS_W: all phases (0.63-c)
     single_over_since: float = 0.0              # monotonic s since the discharge is above SINGLE_DIS_W, 0 = not (0.64-c)
+    house_on: int = 0                           # D7: the house hangs on AC-out1 (0.69-c)
+    house_under_since: float = 0.0              # monotonic s since the AC-out total is below HOUSE_OFF_W, 0 = not
     setpoints: list = field(default_factory=lambda: [0] * NPH)
 
 
@@ -342,6 +345,8 @@ class Out:
     ccl_bind: list = field(default_factory=lambda: [0] * NPH)
     dcl_bind: list = field(default_factory=lambda: [0] * NPH)
     ff_done: int = 0                            # end the force_full command (0.62-c): BM_FF_HOLD, _SPREAD, _MAX, 0 = no
+    house: int = 0                              # D7 this cycle: 1 = house on AC-out1, the Z1 / Z2 rule (0.69-c)
+    house_w: int = 0                            # AC-out1 load W (sum of the positive phases)
 
 
 # ---- clear-sky DC model (fox2db_logic.h) ---------------------------------------------------------------------
@@ -696,6 +701,25 @@ def bm_d6(grid_ok, on, w_gt_on, w_lt_off, over_long, all_, over):
     return int(not all_), all_, over
 
 
+HOUSE_ON_W = 99.0
+HOUSE_OFF_W = 30.0
+HOUSE_OFF_S = 60.0
+
+
+def bm_d7(mode_off, mode_on, over_on, under_off, under_long, on):
+    """D7 (0.69-c): the house on AC-out1; returns (on_next, under_next). HOUSE_ACOUT 0 / 1 fixes the state; auto: above
+    HOUSE_ON_W on at once, below HOUSE_OFF_W the timer runs and after HOUSE_OFF_S off, in between the state holds and
+    the timer stops. On: winter Z2 near 0 (discharge = the AC-out1 load), summer Z1 near 0 (PCC, at least the house
+    load); off: the 0.68-c matrix (git tag batmonitor-0.68-c-house-on-grid) for the house on the grid"""
+    if mode_off:
+        return 0, 0
+    if mode_on or over_on:
+        return 1, 0
+    if under_off:
+        return int(bool(on and not under_long)), 1
+    return on, 0
+
+
 # ---- the rule chain: one function per stage, run in this order by bm_step ------------------------------------
 # Rule text per phase: <S1/S4 mode> [SRC:<S3>] [<S5 split>] [<limit>], see bm_logic.c
 
@@ -716,6 +740,7 @@ class Chain:
         self.discharge = [0] * NPH
         self.charge = [0] * NPH
         self.n_dis = self.n_chg = 0
+        self.house = self.house_w = 0           # D7: house on AC-out1, its load W (0.69-c)
 
 
 def chain_inputs(inp, out, c):
@@ -741,6 +766,28 @@ def chain_inputs(inp, out, c):
                 c.own_discharge -= a
 
 
+def chain_house(cfg, inp, st, out, c):
+    """D7 house on AC-out1 (0.69-c): the AC-out total of the phases that report it, the load = its positive phases"""
+    total = load = 0.0
+    for p in range(NPH):
+        if inp.ac_out_ok[p]:
+            total += inp.ac_out[p]
+            load += inp.ac_out[p] if inp.ac_out[p] > 0 else 0
+    mode = lround(cfg.house_acout)
+    under = int(st.house_under_since > 0)
+    on, under_next = bm_d7(mode == 0, mode == 1, total > HOUSE_ON_W, total < HOUSE_OFF_W,
+                           (inp.now - st.house_under_since if under else 0) >= HOUSE_OFF_S, st.house_on)
+    st.house_on = on
+    if not under_next:
+        st.house_under_since = 0.0
+    elif not under:
+        st.house_under_since = inp.now
+    c.house = on
+    c.house_w = watt(load)
+    out.house = c.house
+    out.house_w = c.house_w
+
+
 def chain_d1(cfg, inp, st, out, c):
     """S3 source and the winter heat pump rule"""
     b = {
@@ -760,6 +807,13 @@ def chain_d1(cfg, inp, st, out, c):
     out.bat1_first = o["b1_first"]
     c.b1_first, c.night_floor, c.src = o["b1_first"], o["night_floor"], o["src_reason"]
     out.src_why = BM_SRC_NAME[o["src_reason"]]
+    if c.house:                    # D7 (0.69-c): Z1 / Z2 rule, no source, night floor or heat pump cap
+        c.wp_max = out.wp_max_w = -1
+        c.dis_max = int(cfg.w_max)
+        c.b1_first = out.bat1_first = 0
+        c.night_floor = 0
+        c.src = BM_SRC_DAY
+        out.src_why = "Z2" if c.winter else "Z1"
 
 
 def chain_gates(cfg, inp, st, out):
@@ -975,10 +1029,21 @@ def chain_discharge(cfg, inp, st, out, c):
     # trickle: at night aim at pcc + bat1 = +SOFAR_TRICKLE, the Sofar battery charges a few W steadily
     target = watt(cfg.soyo_target + (cfg.sofar_trickle if r.trickle else 0.0))
     deficit = watt(c.own_discharge) - b1_def - c_div(KP_PM * (house - target), 1000)
-    prop = bm_d3(1, house < PCC_IMPORT_TH, deficit > SOYO_HOLD_TH, r.prop_hold, st.soyo_prop_prev)
-    st.soyo_prop_prev = prop
-    w = dis_amount(prop, deficit, r.idle_w, c.dis_max)
-    rule = "%s SRC:%s" % ("PROP" if prop else "IDLE", out.src_why)
+    if c.house:
+        # D7 (0.69-c): winter Z2 near 0 = exactly the AC-out1 load (feed forward, no loop); summer Z1 near 0 = the PCC
+        # deficit (SRC DAY row: a Bat1 charge is our overshoot), at least the AC-out1 load. No PROP / IDLE state
+        pcc_w = deficit if deficit > 0 else 0
+        prop = int(not c.winter and pcc_w > c.house_w)
+        w = pcc_w if prop else c.house_w
+        if w > c.dis_max:
+            w = c.dis_max
+        st.soyo_prop_prev = 0
+        rule = "%s SRC:%s" % ("PROP" if prop else "HOUSE", out.src_why)
+    else:
+        prop = bm_d3(1, house < PCC_IMPORT_TH, deficit > SOYO_HOLD_TH, r.prop_hold, st.soyo_prop_prev)
+        st.soyo_prop_prev = prop
+        w = dis_amount(prop, deficit, r.idle_w, c.dis_max)
+        rule = "%s SRC:%s" % ("PROP" if prop else "IDLE", out.src_why)
     dcap = int_caps(out.dis_cap)
     one = single_phase(cfg, inp, st, c, w, dcap)
     if one >= 0:
@@ -1073,6 +1138,7 @@ def bm_step(cfg, inp, st):
     out = Out()
     c = Chain()
     chain_inputs(inp, out, c)
+    chain_house(cfg, inp, st, out, c)
     chain_d1(cfg, inp, st, out, c)
     chain_gates(cfg, inp, st, out)
     chain_mode(cfg, inp, st, out, c)

@@ -357,14 +357,49 @@ static void check_d6(void)
 		   "reachable (ONE, OVER, ALL, ALL+over)\n", combos, one, d6_states);
 }
 
+/* ---- D7: house on AC-out1 (0.69-c) ----------------------------------------------------------------------------- */
+static int d7_states;
+static void check_d7(void)
+{
+	long combos = 0, on_n = 0;
+	int seen[4] = {0};
+	for (unsigned v = 0; v < 32; v++)
+		for (int k = 0; k < 4; k++) {
+			struct bm_d7_in b = {BIT(v, 0), BIT(v, 1), BIT(v, 2), BIT(v, 3), BIT(v, 4)};
+			int on = BIT(k, 0), under = BIT(k, 1), un, un2;
+			if (b.mode_off && b.mode_on)                      /* HOUSE_ACOUT is one value */
+				continue;
+			if (b.over_on && b.under_off)                     /* HOUSE_OFF_W < HOUSE_ON_W */
+				continue;
+			if (b.under_long && !under)                       /* the timer runs only while under is set */
+				continue;
+			int r = bm_d7(&b, on, under, &un);
+			combos++;
+			on_n += r;
+			seen[r + 2 * un] = 1;
+			INV(!b.mode_off || (!r && !un), "HOUSE_ACOUT 0: never, timer stopped");
+			INV(!b.mode_on || (r && !un), "HOUSE_ACOUT 1: always, timer stopped");
+			int aut = !b.mode_off && !b.mode_on;
+			INV(!aut || !b.over_on || r, "auto: on at once above HOUSE_ON_W");
+			INV(!aut || r || on == 0 || (b.under_off && b.under_long), "auto: off only after HOUSE_OFF_S below HOUSE_OFF_W");
+			INV(!aut || !r || on || b.over_on, "auto: on only above HOUSE_ON_W");
+			INV(!aut || un == b.under_off, "auto: the timer runs exactly while below HOUSE_OFF_W");
+			int r2 = bm_d7(&b, r, un, &un2);
+			INV(r2 == r && un2 == un, "D7 fixed point after one step");
+		}
+	d7_states = seen[0] + seen[1] + seen[2] + seen[3];
+	printf("\nD7 house on AC-out1: %ld consistent combinations (5 bits x 4 states), %ld on, %d states reachable\n",
+		   combos, on_n, d7_states);
+}
+
 /* the largest persistent decision state, the product of the state bits of every D function (0.65-c) */
 static void state_space(void)
 {
-	long d1 = 2, d2 = 8 * 8 * 2, lead = 3, d3 = 2, d4 = 2, unit = 3, d6 = d6_states;
+	long d1 = 2, d2 = 8 * 8 * 2, lead = 3, d3 = 2, d4 = 2, unit = 3, d6 = d6_states, d7 = d7_states;
 	long before = d1 * d2 * lead * d3 * d4;
 	printf("\nstate space (max persistent decision states): D1 %ld (bat1_first) x D2 %ld (prot/force/low per stack, "
-		   "chg_prev) x lead %ld x D3 %ld x D4 %ld x D6 %ld x unit %ld (none/L1/L2) = %ld (0.62-c: %ld)\n",
-		   d1, d2, lead, d3, d4, d6, unit, before * d6 * unit, before);
+		   "chg_prev) x lead %ld x D3 %ld x D4 %ld x D6 %ld x unit %ld (none/L1/L2) x D7 %ld = %ld (0.62-c: %ld)\n",
+		   d1, d2, lead, d3, d4, d6, unit, d7, before * d6 * unit * d7, before);
 }
 
 /* ---- amounts: properties of bm_step on random inputs ----------------------------------------------------------- */
@@ -477,6 +512,7 @@ int main(void)
 	check_lead();
 	check_d3();
 	check_d6();
+	check_d7();
 	state_space();
 	check_amounts();
 	printf("\n%ld checks, %ld failed\n", checks, fails);

@@ -57,6 +57,7 @@ struct bm_cfg {
 	                                                    at the top (0.67-c) */
 	double single_dis_w, single_dis_hyst_w;   /* grid there: one MultiPlus discharges up to this total (0.63-c) */
 	double single_dis_up_s;                   /* ... all phases only after this long above it (0.64-c) */
+	double house_acout;                       /* the house on AC-out1 (0.69-c): 0 never, 1 always, 2 auto (D7) */
 };
 
 /* parameter table: name (env BATMONITOR_<name>), default, allowed range, unit, meaning */
@@ -138,7 +139,9 @@ struct bm_state {
 	int single_ph;                               /* the one discharging phase with the grid there, -1 = none (0.63-c) */
 	int single_all;                              /* the discharge is above SINGLE_DIS_W: all phases (0.63-c) */
 	double single_over_since;                    /* monotonic s since the discharge is above SINGLE_DIS_W, 0 = not (0.64-c) */
-	int setpoints[NPH];                          /* sent last cycle (the PI's u_applied) */
+	int house_on;                                /* D7: the house hangs on AC-out1 (0.69-c) */
+	double house_under_since;                    /* monotonic s since the AC-out total is below HOUSE_OFF_W, 0 = not */
+	int setpoints[NPH];                         /* sent last cycle (the PI's u_applied) */
 };
 
 struct bm_out {
@@ -161,6 +164,8 @@ struct bm_out {
 	double dis_cap[NPH];                         /* W AC: discharge ceiling per phase used this cycle */
 	int ccl_bind[NPH], dcl_bind[NPH];            /* 1 = the BMS current limit is below the charger / phase limit */
 	int ff_done;                                 /* end the force_full command (0.62-c): BM_FF_HOLD, _SPREAD, _MAX, 0 = no */
+	int house;                                   /* D7 this cycle: 1 = house on AC-out1, the Z1 / Z2 rule (0.69-c) */
+	int house_w;                                 /* AC-out1 load W (sum of the positive phases) */
 };
 
 /* ---- decision layer (0.43-c): the discrete part of the rule chain as pure functions of predicates ("bits", each a
@@ -315,6 +320,24 @@ struct bm_d6_in {
 	int over_long;                               /* w above since at least SINGLE_DIS_UP_S (over set before) */
 };
 int bm_d6(const struct bm_d6_in *b, int all, int over, int *all_next, int *over_next);   /* 1 = one unit, 0 = all */
+
+/* D7 (0.69-c, user 2026-10-27): the house hangs on AC-out1, so the Multis measure the house load themselves.
+   House on AC-out1: winter half-year Z2 near 0 (discharge = the AC-out1 load, AC-in total 0; the heat pump stays on
+   the cheap Z1 grid), summer half-year Z1 near 0 (PROP on the PCC, the heat pump included, never below the house
+   load). The rule matrix of 0.68-c (git tag batmonitor-0.68-c-house-on-grid: D1 SRC / B1FIRST / night floor / WPMAX,
+   D3 PROP / IDLE) stays for the house on the grid (rotary switch position I, AC-out1 unloaded).
+   Auto: on as soon as the AC-out total is above HOUSE_ON_W, off only after HOUSE_OFF_S below HOUSE_OFF_W (the unloaded
+   AC-out reads -80..-86 W while charging). State: on, under (house_under_since set) */
+struct bm_d7_in {
+	int mode_off, mode_on;                       /* HOUSE_ACOUT 0 / 1 (2 = auto: both 0) */
+	int over_on;                                 /* AC-out total > HOUSE_ON_W */
+	int under_off;                               /* AC-out total < HOUSE_OFF_W */
+	int under_long;                              /* ... since at least HOUSE_OFF_S (under set before) */
+};
+int bm_d7(const struct bm_d7_in *b, int on, int under, int *under_next);    /* next on */
+#define HOUSE_ON_W 99.0
+#define HOUSE_OFF_W 30.0
+#define HOUSE_OFF_S 60.0
 
 void bm_init(struct bm_state *st);
 /* charge ceiling of one phase (W AC): charger_a x BMS voltage of its bank / charge_eff, at most CHARGE_MAX_PHASE;

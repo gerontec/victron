@@ -39,10 +39,13 @@ struct plant {
 	int grid_off;                  /* 1 = grid offline (island, transfer relay open) */
 	int force_full;                /* batmonitor/force_full_from_pv: 0 off, 1 = S1, 2 = S2 (0.62-c) */
 	double cell_min[NBANK], cell_max[NBANK];   /* BMS lowest / highest cell V, 0 = not sent (0.67-c) */
+	int house_acout;               /* 1 = the house hangs on AC-out1 (0.69-c): its load passes the Multis, split
+	                                  evenly over the phases; 0 = house on the grid, 30 W per phase on AC-out1 */
 };
 
 static double r_override_w_max;     /* > 0: W_MAX for the next simulate() (parameter test) */
 static int r_override_cap_off;   /* 1: EXPORT_CAP 0 in simulate */
+static int r_override_house = -1;   /* >= 0: HOUSE_ACOUT for the next simulate() (0.69-c) */
 
 struct run {
 	struct bm_cfg cfg;
@@ -76,11 +79,20 @@ static void simulate(struct run *r, const struct plant *pl, time_t t0, int n)
 		bm_param_set(&r->cfg, 0, r_override_w_max);
 	if (r_override_cap_off)
 		r->cfg.export_cap = 0;
+	if (r_override_house >= 0)
+		r->cfg.house_acout = r_override_house;
 	bm_init(&r->st);
 	double now = 1000.0;
 	for (int k = 0; k < n; k++, now += CYCLE_SECONDS) {
+		/* r->ac is the battery side (as batmonitor.c hands it over, 0.66-c); the grid side of each Multi adds its
+		   AC-out1 load. House on AC-out1 (0.69-c): the house load is not at the PCC directly but behind the Multis */
+		double acout[NPH];
+		for (int p = 0; p < NPH; p++)
+			acout[p] = (pl->house_acout ? pl->house / NPH : 30.0) - pl->acout_feed[p];
 		double multis = r->ac[0] + r->ac[1] + r->ac[2];
-		double net = pl->pv - pl->house - pl->wp - multis;
+		if (pl->house_acout)
+			multis += acout[0] + acout[1] + acout[2];
+		double net = pl->pv - (pl->house_acout ? 0 : pl->house) - pl->wp - multis;
 		double b1 = 0;
 		if (net < 0 && pl->sofar_dis)
 			b1 = fmax(net, -2500);
@@ -123,7 +135,7 @@ static void simulate(struct run *r, const struct plant *pl, time_t t0, int n)
 			in->ac_ok[p] = 1;
 			in->ac_in[p] = r->ac[p];
 			in->ac_out_ok[p] = 1;
-			in->ac_out[p] = 50 - pl->acout_feed[p];         /* 50 W loads, - = feed */
+			in->ac_out[p] = acout[p];                       /* - = feed */
 		}
 		for (int b = 0; b < NBANK; b++) {
 			in->bms_ok[b] = 1;
@@ -267,6 +279,71 @@ static void test_bank_split(void)
 	CHECK(abs(r.out.sp[1] + 2600) <= 30 && abs(r.out.sp[2] + 2600) <= 30, "L2/L3 take the spill, got %d %d",
 		  r.out.sp[1], r.out.sp[2]);
 	CHECK(fabs(r.pcc) <= 80, "house covered, pcc %.0f", r.pcc);
+}
+
+/* 0.69-c D7: the house on AC-out1. Winter Z2 near 0: the stacks give exactly the AC-out1 load, the heat pump stays on
+   the Z1 grid (or the Sofar Bat1); summer Z1 near 0: the PCC, heat pump included, at least the house load */
+static double grid_side(const struct run *r)
+{
+	double s = 0;
+	for (int p = 0; p < NPH; p++)
+		s += r->out.sp[p] + r->in.ac_out[p];
+	return s;
+}
+
+static void test_house_acout(void)
+{
+	struct run r;
+	struct plant pl = BASE(.house = 600, .wp = 4000, .house_acout = 1);
+	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 60);
+	print_state("winter night, house 600 on AC-out1, WP 4 kW", &r);
+	CHECK(r.out.house && r.out.house_w == 600, "D7 on, house_w %d", r.out.house_w);
+	CHECK(abs(sum_sp(&r) + 600) <= 2 && rule_has(&r, "HOUSE SRC:Z2"), "exactly the house from the stacks, sp sum %d",
+		  sum_sp(&r));
+	CHECK(fabs(grid_side(&r)) <= 2, "Z2 near 0: AC-in total %.0f", grid_side(&r));
+	CHECK(fabs(r.pcc + 4000) <= 5, "the heat pump from the Z1 grid, pcc %.0f", r.pcc);
+	CHECK(!rule_has(&r, "WPMAX"), "no winter heat pump cap");
+
+	pl = BASE(.house = 600, .wp = 4000, .house_acout = 1, .sofar_dis = 1, .bat1_soc = 50);
+	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 60);
+	print_state("winter night, Sofar Bat1 covers the WP", &r);
+	CHECK(abs(sum_sp(&r) + 600) <= 2, "the stacks still give the house, sp sum %d", sum_sp(&r));
+	CHECK(fabs(r.bat1 + 2500) <= 5 && fabs(r.pcc + 1500) <= 5, "the Sofar takes 2.5 kW of the WP, bat1 %.0f pcc %.0f",
+		  r.bat1, r.pcc);
+
+	pl = BASE(.house = 600, .wp = 2000, .house_acout = 1);
+	simulate(&r, &pl, local_time(2026, 7, 15, 23, 0), 60);
+	print_state("summer night, house 600 + WP 2 kW", &r);
+	CHECK(abs(sum_sp(&r) + 2600) <= 40 && rule_has(&r, "PROP SRC:Z1"), "Z1 near 0: house + WP, sp sum %d", sum_sp(&r));
+	CHECK(fabs(r.pcc) <= 80, "pcc %.0f", r.pcc);
+
+	pl = BASE(.house = 600, .house_acout = 1, .sofar_chg = 1);
+	simulate(&r, &pl, local_time(2026, 7, 15, 23, 0), 60);
+	print_state("summer night, house 600, WP off", &r);
+	CHECK(abs(sum_sp(&r) + 600) <= 2 && rule_has(&r, "HOUSE SRC:Z1"), "the house floor, sp sum %d", sum_sp(&r));
+	CHECK(fabs(r.pcc) <= 5 && fabs(r.bat1) <= 5, "nothing into the Sofar battery, pcc %.0f bat1 %.0f", r.pcc, r.bat1);
+
+	pl = BASE(.house = 600, .wp = 500, .pv = 3000, .house_acout = 1);
+	simulate(&r, &pl, local_time(2026, 1, 15, 12, 0), 60);
+	print_state("winter noon, PV 3 kW > house + WP", &r);
+	CHECK(rule_has(&r, "CHARGE SRC:Z2") && sum_sp(&r) > 1800 && fabs(r.pcc) <= 80,
+		  "the PV surplus into the stacks, sp sum %d pcc %.0f", sum_sp(&r), r.pcc);
+
+	pl = BASE(.house = 600, .wp = 4000, .house_acout = 1, .soc = {4, 4});
+	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 60);
+	print_state("winter night, stacks at SOC_MIN", &r);
+	CHECK(sum_sp(&r) == 0 && rule_has(&r, "PROT"), "no discharge: the grid feeds the house, sp sum %d", sum_sp(&r));
+
+	pl = BASE(.house = 600, .wp = 4000, .house_acout = 1);
+	r_override_house = 0;
+	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 60);
+	r_override_house = -1;
+	print_state("HOUSE_ACOUT 0: the 0.68-c matrix", &r);
+	CHECK(!r.out.house && !rule_has(&r, "SRC:Z") && rule_has(&r, "WPMAX"), "old rule chain, %s", r.out.why[0]);
+
+	pl = BASE(.house = 90, .house_acout = 1);
+	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 30);
+	CHECK(!r.out.house, "AC-out total 90 W: house on the grid (below HOUSE_ON_W)");
 }
 
 /* 0.63-c: with the grid there one MultiPlus discharges up to SINGLE_DIS_W (the meter nets the phases) */
@@ -1022,6 +1099,7 @@ int main(void)
 	test_w_max_and_phase_cap();
 	test_bank_split();
 	test_single_unit();
+	test_house_acout();
 	test_bms_current_limits();
 	test_winter_night_floor();
 	test_wp_running_night_floor();

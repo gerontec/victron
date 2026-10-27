@@ -68,6 +68,12 @@
  *   - bank limits from /Info/Pack/... when the service has them (0.68-c, dbus-ebox-battery 1.5): the EBox service is
  *     the DVCC BMS of the whole VE.Bus system and now publishes both banks' limits on /Info/...; the Pytes alone is on
  *     /Info/Pack/.... The MUST (can0) has no Pack paths and keeps /Info/....
+ *   - house on AC-out1 (0.69-c, user 2026-10-27: the Multis measure the house load, Z2, themselves on AC-out1; it may
+ *     and shall always come 100 % from the batteries): D7 in bm_logic.c. Winter half-year Z2 near 0 (discharge = the
+ *     AC-out1 load, the heat pump stays on the cheap Z1 grid / the Sofar Bat1), summer half-year Z1 near 0 (PCC, heat
+ *     pump included, at least the house load). Auto above 99 W AC-out total, off after 60 s below 30 W; env
+ *     BATMONITOR_HOUSE_ACOUT 0 = the 0.68-c matrix (git tag batmonitor-0.68-c-house-on-grid, house on the grid),
+ *     1 = always. state.json house.
  *   - full_at with the measured charger power (0.31-c, user 2026-10-09): each MultiPlus delivers ~3.6 kW DC at the BMS
  *     at its limit (65-67 A, flat over 53.6-54.6 V; AC-in ~4040 W), not 70 A x U: CHARGER_DC_W caps the forecast.
  *   - full_at (0.32-c, user 2026-10-09): the forecast splits the power each step like alloc_charge and lets the SoC lead
@@ -102,7 +108,7 @@
 #include "bm_logic.h"
 #include "bm_parse.h"
 
-#define VERSION "0.68-c"
+#define VERSION "0.69-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
@@ -581,6 +587,9 @@ static void write_state(const int *sp, char why[][WHY_LEN], double surplus)
 			cJSON_AddNumberToObject(o, BM_PH[p], round(in_last.ac_out[p]));
 		else
 			cJSON_AddNullToObject(o, BM_PH[p]);
+	o = cJSON_AddObjectToObject(js, "house");                  /* 0.69-c: D7 house on AC-out1 */
+	cJSON_AddBoolToObject(o, "on", o_.house);
+	cJSON_AddNumberToObject(o, "w", o_.house_w);
 	o = cJSON_AddObjectToObject(js, "discharge_cap_w");
 	for (int p = 0; p < NPH; p++)
 		cJSON_AddNumberToObject(o, BM_PH[p], round(o_.dis_cap[p]));

@@ -171,6 +171,7 @@ Without data for 120 s the service exits and only registers again with fresh dat
   | `DCL_FORCE_A` | 1 A | LOW force charge while the BMS discharge limit is below this, no discharge (0 = off; 0.52-c) |
   | `CELL_FORCE_V` / `CELL_FORCE_RELEASE_V` | 3.00 / 3.25 V | LOW force charge while the lowest cell is below this; ends when DCL is back and the cell has reached the release value (0.52-c; since 0.55-c LOW also waits for `SOC_MIN_RELEASE`, otherwise the cell recovers within minutes under the force charge current and LOW and discharge take turns; Lenggries env since 2026-10-24: `CELL_FORCE_V=3.05`, so batmonitor stops before the 49 V ESS cut-off, where the weakest MUST cell was already at 2.997 V) |
   | `WP_WINTER_W` | 1000 W | winter half-year (October..March) with the heat pump running (>= 300 W): the stacks discharge 0 W while the Sofar Bat1 discharges (< -100 W), else at most this; rule text `WPMAX(W)`, state.json `wp_max_w` (-1 = not active); heat pump off or summer half-year: PCC near 0; charging unchanged (0.61-c, replaces `WP_SOC_MIN`) |
+  | `HOUSE_ACOUT` | 2 (auto) | house on AC-out1 (0.69-c, D7): auto on above 99 W AC-out total, off after 60 s below 30 W; 0 = never (the 0.68-c matrix for the house on the grid), 1 = always; state.json `house` |
   | `SOC_BALANCE_ON` / `SOC_BALANCE_OFF` | 3 / 1 % | SoC balancing between the stacks |
   | `SOYO_TARGET` | 0 W | PCC target |
   | `B_NIGHT` | 936 W | night base discharge |
@@ -181,6 +182,16 @@ Without data for 120 s the service exits and only registers again with fresh dat
   while the grid pays the heat pump, and the Sofar Bat1 covered the heat pump instead of the grid anyway. 0.61-c
   (2026-10-25): `WP_SOC_MIN` replaced by the winter heat pump rule `WP_WINTER_W` (see the table): supporting the 22 ct
   heat pump and charging back from the grid at 30 ct loses money. The season (`readers/season.py`) is only shown in `state.json`.
+- **House on AC-out1** (0.69-c, D7, user 2026-10-27): the house (Z2) hangs on AC-out1 of the three MultiPlus, so they
+  measure its load themselves (`/Ac/Out/L1..L3/P`) and it may and shall always come 100 % from the batteries:
+  - winter half-year (October..March): **Z2 near 0**, discharge = exactly the AC-out1 load (feed forward, no control
+    loop), AC-in total 0; the heat pump stays on the cheap Z1 grid or the Sofar Bat1. Rule text `HOUSE SRC:Z2`.
+  - summer half-year (April..September): **Z1 near 0**, discharge = the PCC deficit (heat pump included), never below
+    the AC-out1 load. Rule text `PROP SRC:Z1` (PCC deficit above the house load) or `HOUSE SRC:Z1`.
+  - no D1 source (B1FIRST, night floor, trickle), no `WPMAX`, no PROP/IDLE state; protection, charging, ceilings,
+    balancing, one-unit discharge (D6), D4 and D5 unchanged.
+  - with AC-out1 unloaded (rotary switch on the grid, position I) the 0.68-c matrix applies unchanged (git tag
+    `batmonitor-0.68-c-house-on-grid`; `make fuzz-compare` against 0.68-c is identical without AC-out1 load).
 - Several days without sun (Lenggries settings, 2026-10-24): there is no time-based force charge (the TOU window was
   removed on 2026-10-11), so the stacks are simply parked:
   1. The stacks discharge down to `SOC_MIN` (8 %) and then stop; from there the house runs on the grid.

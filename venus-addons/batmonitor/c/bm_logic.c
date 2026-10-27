@@ -114,6 +114,7 @@ const struct bm_param BM_PARAMS[] = {
 	{"SINGLE_DIS_W",          P(single_dis_w),              3000,    0,       5000,    "W", "grid there: discharge through one MultiPlus only up to this total (unbalanced phases, the meter nets them; less idle loss), above it all phases (0 = off)"},
 	{"SINGLE_DIS_HYST_W",     P(single_dis_hyst_w),         500,     0,       3000,    "W", "back to one MultiPlus below SINGLE_DIS_W minus this"},
 	{"SINGLE_DIS_UP_S",       P(single_dis_up_s),           60,      0,       600,     "s", "all phases only after the discharge stayed above SINGLE_DIS_W this long (one unit carries up to its cap meanwhile)"},
+	{"HOUSE_ACOUT",           P(house_acout),               2,       0,       2,       "",  "house on AC-out1 (0.69-c): winter Z2 near 0 (discharge = AC-out1 load), summer Z1 near 0 (PCC, at least the AC-out1 load); 0 = never (0.68-c matrix, house on the grid), 1 = always, 2 = auto (AC-out total > 99 W, off after 60 s < 30 W)"},
 };
 const int BM_NPARAMS = sizeof(BM_PARAMS) / sizeof(BM_PARAMS[0]);
 
@@ -622,6 +623,25 @@ int bm_d6(const struct bm_d6_in *b, int all, int over, int *all_next, int *over_
 	return !*all_next;
 }
 
+/* D7. HOUSE_ACOUT 0 / 1 fixes the state; auto: above HOUSE_ON_W on at once, below HOUSE_OFF_W the timer runs and after
+   HOUSE_OFF_S off, in between the state holds and the timer stops */
+int bm_d7(const struct bm_d7_in *b, int on, int under, int *under_next)
+{
+	(void)under;
+	*under_next = 0;
+	if (b->mode_off)
+		return 0;
+	if (b->mode_on)
+		return 1;
+	if (b->over_on)
+		return 1;
+	if (b->under_off) {
+		*under_next = 1;
+		return on && !b->under_long;
+	}
+	return on;
+}
+
 /* ---- the rule chain (0.41-c): one function per stage, run in this order by bm_step ---------------------------------
    inputs     derived facts: data age, heat pump on, season (display), night, own AC-in
    S0 gates   per bank: SoC protection / force charge state, charge and discharge ceilings (charger, BMS CCL/DCL)
@@ -640,6 +660,8 @@ int bm_d6(const struct bm_d6_in *b, int all, int over, int *all_next, int *over_
             HOLD(soc) (force_full_from_pv stack without surplus, 0.62-c)
      SRC    DAY  STK (night floor: stacks take over the Sofar)  B1 (Sofar first, B1FIRST)  WPG (winter, WP running,
             no B1FIRST)
+            Z2 / Z1 (D7, 0.69-c, house on AC-out1: winter Z2 near 0 / summer Z1 near 0; mode HOUSE = the AC-out1
+            load, PROP = the PCC deficit above it)
      split  EQ (same power per stack)  BAL (lead stack alone / charged last)  SPILL (lead at its cap, rest to the
             others)  WAIT (the other stack while the lead discharges)  FF (charge: the force_full_from_pv stack first,
             0.62-c)
@@ -657,6 +679,7 @@ struct chain {
 	int cap_active;                    /* D4: charge only the export above EXPORT_CAP */
 	int ff;                            /* force_full_from_pv bank, -1 = off (0.62-c) */
 	int discharge[NPH], charge[NPH], n_dis, n_chg;
+	int house, house_w;                /* D7: house on AC-out1, its load W (0.69-c) */
 };
 
 static void chain_inputs(const struct bm_in *in, struct bm_out *out, struct chain *c)
@@ -686,6 +709,30 @@ static void chain_inputs(const struct bm_in *in, struct bm_out *out, struct chai
 		}
 }
 
+/* D7 house on AC-out1 (0.69-c): the AC-out total of the phases that report it, the load = its positive phases */
+static void chain_house(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *st, struct bm_out *out,
+						struct chain *c)
+{
+	double sum = 0, load = 0;
+	for (int p = 0; p < NPH; p++)
+		if (in->ac_out_ok[p]) {
+			sum += in->ac_out[p];
+			load += in->ac_out[p] > 0 ? in->ac_out[p] : 0;
+		}
+	int mode = (int)lround(cfg->house_acout), under = st->house_under_since > 0, under_next;
+	struct bm_d7_in d = {mode == 0, mode == 1, sum > HOUSE_ON_W, sum < HOUSE_OFF_W,
+						 (under ? in->now - st->house_under_since : 0) >= HOUSE_OFF_S};
+	st->house_on = bm_d7(&d, st->house_on, under, &under_next);
+	if (!under_next)
+		st->house_under_since = 0;
+	else if (!under)
+		st->house_under_since = in->now;
+	c->house = st->house_on;
+	c->house_w = watt(load);
+	out->house = c->house;
+	out->house_w = c->house_w;
+}
+
 /* S3 source: bits for bm_d1 (tests/cbmc_harness.c proves the constraints check_matrix assumes) */
 static void chain_d1(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *st, struct bm_out *out,
 					 struct chain *c)
@@ -704,6 +751,14 @@ static void chain_d1(const struct bm_cfg *cfg, const struct bm_in *in, struct bm
 	c->night_floor = o.night_floor;
 	c->src = o.src_reason;
 	snprintf(out->src_why, sizeof(out->src_why), "%s", BM_SRC_NAME[o.src_reason]);
+	if (c->house) {                    /* D7 (0.69-c): Z1 / Z2 rule, no source, night floor or heat pump cap */
+		c->wp_max = out->wp_max_w = -1;
+		c->dis_max = (int)cfg->w_max;
+		c->b1_first = out->bat1_first = 0;
+		c->night_floor = 0;
+		c->src = BM_SRC_DAY;
+		snprintf(out->src_why, sizeof(out->src_why), "%s", c->winter ? "Z2" : "Z1");
+	}
 }
 
 /* S0: the BMS SoC, per phase ceilings: charger (bm_charge_cap), DISCHARGE_MAX_PHASE, the BMS's own CCL / DCL (0.35-c) */
@@ -909,10 +964,22 @@ static void chain_discharge(const struct bm_cfg *cfg, const struct bm_in *in, st
 	   few W steadily instead of swinging between charge and discharge around 0 */
 	int target = watt(cfg->soyo_target + (r->trickle ? cfg->sofar_trickle : 0.0));
 	int deficit = watt(c->own_discharge) - b1_def - (int)((long)KP_PM * (house - target) / 1000);
-	struct bm_d3_in d = {1, house < PCC_IMPORT_TH, deficit > SOYO_HOLD_TH, r->prop_hold};
-	int prop = bm_d3(&d, st->soyo_prop_prev, &st->soyo_prop_prev);
-	int w = dis_amount(prop, deficit, r->idle_w, c->dis_max);
-	snprintf(rule, sizeof(rule), "%s SRC:%s", prop ? "PROP" : "IDLE", out->src_why);
+	int w;
+	if (c->house) {
+		/* D7 (0.69-c): winter Z2 near 0 = exactly the AC-out1 load (feed forward, no loop); summer Z1 near 0 = the PCC
+		   deficit (SRC DAY row: a Bat1 charge is our overshoot), at least the AC-out1 load. No PROP / IDLE state */
+		int pcc_w = deficit > 0 ? deficit : 0, prop = !c->winter && pcc_w > c->house_w;
+		w = prop ? pcc_w : c->house_w;
+		if (w > c->dis_max)
+			w = c->dis_max;
+		st->soyo_prop_prev = 0;
+		snprintf(rule, sizeof(rule), "%s SRC:%s", prop ? "PROP" : "HOUSE", out->src_why);
+	} else {
+		struct bm_d3_in d = {1, house < PCC_IMPORT_TH, deficit > SOYO_HOLD_TH, r->prop_hold};
+		int prop = bm_d3(&d, st->soyo_prop_prev, &st->soyo_prop_prev);
+		w = dis_amount(prop, deficit, r->idle_w, c->dis_max);
+		snprintf(rule, sizeof(rule), "%s SRC:%s", prop ? "PROP" : "IDLE", out->src_why);
+	}
 	dis_caps(out, dcap);
 	int one = single_phase(cfg, in, st, c, w, dcap);
 	if (one >= 0)
@@ -1043,6 +1110,7 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 	memset(out, 0, sizeof(*out));
 	memset(&c, 0, sizeof(c));
 	chain_inputs(in, out, &c);
+	chain_house(cfg, in, st, out, &c);
 	chain_d1(cfg, in, st, out, &c);
 	chain_gates(cfg, in, st, out);
 	chain_mode(cfg, in, st, out, &c);

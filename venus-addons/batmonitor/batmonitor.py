@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bm_logic as L  # noqa: E402
 import bm_parse  # noqa: E402
 
-VERSION = "0.68-py"
+VERSION = "0.69-py"
 INVERTER_TOPIC = "inverter/power_grid_exchange/json"
 R290_TOPIC = "r290/heatpump/all"
 AUSSEN_TOPIC = "aussen/temp"
@@ -363,6 +363,7 @@ class Batmonitor:
             "chain": {"src": o.src_why},
             "wp_max_w": o.wp_max_w,
             "d1_id": o.d1_id,
+            "house": {"on": bool(o.house), "w": o.house_w},                      # 0.69-c: D7 house on AC-out1
             "force_full_from_pv": {                 # 0.62-c: stack None = off; held_min at 100 % SoC
                 "stack": L.BM_BANKS[il.force_full - 1].name if 1 <= il.force_full <= L.NBANK else None,
                 "held_min": (c_round((il.now - st.ff_full_since) / 6.0) / 10
