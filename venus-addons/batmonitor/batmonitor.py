@@ -32,8 +32,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bm_logic as L  # noqa: E402
 import bm_parse  # noqa: E402
 
-VERSION = "0.70-py"
+VERSION = "0.71-py"
 INVERTER_TOPIC = "inverter/power_grid_exchange/json"
+FAST_HOLD_S = 15.0   # s: while a sofar_fast sample is this fresh, pivot2db samples on the topic are ignored (0.71)
 R290_TOPIC = "r290/heatpump/all"
 AUSSEN_TOPIC = "aussen/temp"
 WP_TOPIC = "em0/power"                     # SDM72D heat pump W (sdm72d.py on .218, once a minute)
@@ -92,6 +93,7 @@ class Batmonitor:
         self.last_log = 0.0
         self.last_peak_model = 0.0
         self.last_inv_err = 0.0
+        self.fast_time = -1e9
         self.stop = False
         # MQTT inputs, written by the paho thread under mq_lock
         self.mq_lock = threading.Lock()
@@ -188,6 +190,11 @@ class Batmonitor:
                     loge("inverter sample rejected (PCC / Power_Bat1 missing or invalid): %.200s" % text)
                     self.last_inv_err = mono()
                 return
+            fast = s.pop("fast")
+            if fast:
+                self.fast_time = mono()
+            elif mono() - self.fast_time < FAST_HOLD_S:
+                return      # stale pivot2db sample while the live stream runs
             with self.mq_lock:
                 self.mq.update(s, have_pcc=1, inv_time=mono())
             return

@@ -38,6 +38,8 @@ int bm_parse_inverter(const char *json, struct bm_inv_sample *s)
 		s->pv = s->have_pv ? (pv1 + pv2) * 1000.0 : 0.0;
 		s->have_soc_bat1 = num(d, "SOC_Bat1", 0.0, 100.0, &v);
 		s->soc_bat1 = s->have_soc_bat1 ? v : -1.0;
+		const cJSON *src = cJSON_GetObjectItemCaseSensitive(d, "source");
+		s->fast = cJSON_IsString(src) && strcmp(src->valuestring, "sofar_fast") == 0;
 	}
 	cJSON_Delete(d);
 	return ok;

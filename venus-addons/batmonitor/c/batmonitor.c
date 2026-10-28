@@ -78,6 +78,11 @@
  *     discharge always goes to all discharging phases as up to 0.62-c. Measured pv_victron 17.-27.10.2026: the loss
  *     stayed ~110-130 W with one unit (a STBY unit on the grid still draws ~45-65 W from its stack), 1-2 kW AC 89.6 %
  *     vs 92.2 % before; it only fed one phase into Z1. BATMONITOR_SINGLE_DIS_* no longer exist.
+ *   - only the live PCC (0.71-c, user 2026-10-28 "pcc bei 0 halten, nicht -100 W in der Spitze"): pivot2db.py
+ *     publishes its retained value on the same topic once a minute, up to ~45 s old (sofar_fast.py: every 4 s,
+ *     "source":"sofar_fast"); the stale sample replaced the live one for a cycle and soyo (KP ~1) corrected an error
+ *     that no longer existed. Samples without that source are ignored while a sofar_fast sample is younger than
+ *     FAST_HOLD_S; without sofar_fast the pivot2db value still counts (fallback).
  *   - full_at with the measured charger power (0.31-c, user 2026-10-09): each MultiPlus delivers ~3.6 kW DC at the BMS
  *     at its limit (65-67 A, flat over 53.6-54.6 V; AC-in ~4040 W), not 70 A x U: CHARGER_DC_W caps the forecast.
  *   - full_at (0.32-c, user 2026-10-09): the forecast splits the power each step like alloc_charge and lets the SoC lead
@@ -112,8 +117,9 @@
 #include "bm_logic.h"
 #include "bm_parse.h"
 
-#define VERSION "0.70-c"
+#define VERSION "0.71-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
+#define FAST_HOLD_S 15.0   /* s: while a sofar_fast sample is this fresh, pivot2db samples on the topic are ignored */
 #define R290_TOPIC "r290/heatpump/all"
 #define AUSSEN_TOPIC "aussen/temp"
 #define WP_TOPIC "em0/power"          /* SDM72D, heat pump electrical power in W (sdm72d.py on .218, once a minute) */
@@ -353,7 +359,7 @@ static void on_message(struct mosquitto *m, void *ud, const struct mosquitto_mes
 	/* 0.48-c: a sample counts only with valid numbers (bm_parse); a rejected one does not refresh the timestamp, so
 	   the stale logic takes over instead of a missing key becoming 0 W */
 	if (strcmp(msg->topic, INVERTER_TOPIC) == 0) {
-		static double last_err;
+		static double last_err, fast_time = -1e9;
 		struct bm_inv_sample s;
 		if (!bm_parse_inverter(buf, &s)) {
 			if (mono() - last_err > 300.0) {
@@ -362,6 +368,10 @@ static void on_message(struct mosquitto *m, void *ud, const struct mosquitto_mes
 			}
 			return;
 		}
+		if (s.fast)
+			fast_time = mono();
+		else if (mono() - fast_time < FAST_HOLD_S)
+			return;   /* 0.71-c: stale pivot2db sample while the live stream runs */
 		pthread_mutex_lock(&mq_lock);
 		mq.pcc = s.pcc;
 		mq.bat1 = s.bat1;

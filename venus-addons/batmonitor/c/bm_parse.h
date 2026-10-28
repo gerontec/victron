@@ -14,6 +14,7 @@ struct bm_inv_sample {
 	double pv;                               /* W */
 	int have_soc_bat1;
 	double soc_bat1;                         /* % */
+	int fast;                                /* "source":"sofar_fast" (4 s live value), 0 = pivot2db retained (1/min) */
 };
 int bm_parse_inverter(const char *json, struct bm_inv_sample *s);   /* 1 = PCC and Bat1 valid, sample usable */
 

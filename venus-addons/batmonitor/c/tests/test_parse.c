@@ -20,6 +20,11 @@ static void test_inverter(void)
 	CHECK(bm_parse_inverter("{" FULL "}", &s), "full message accepted");
 	CHECK(s.pcc == -1250 && s.pcc_avg5 == -1500 && s.bat1 == 400 && s.bat1_avg5 == 300, "kW -> W");
 	CHECK(s.have_pv && s.pv == 3500 && s.have_soc_bat1 && s.soc_bat1 == 37, "PV and SOC_Bat1");
+	CHECK(!s.fast, "no source: pivot2db sample, not fast");
+	CHECK(bm_parse_inverter("{" FULL ",\"source\":\"sofar_fast\",\"plausible\":1}", &s) && s.fast,
+		  "source sofar_fast: fast");
+	CHECK(bm_parse_inverter("{" FULL ",\"source\":\"pivot2db\"}", &s) && !s.fast, "other source: not fast");
+	CHECK(bm_parse_inverter("{" FULL ",\"source\":7}", &s) && !s.fast, "source not a string: not fast");
 
 	/* the reported case: a message without the PCC must not be a valid PCC of 0 W */
 	CHECK(!bm_parse_inverter("{\"Power_Bat1\":0.4,\"Power_PV1\":2,\"Power_PV2\":1}", &s), "PCC missing: rejected");

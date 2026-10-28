@@ -58,6 +58,7 @@ def parse_inverter(text):
         "pv": (pv1 + pv2) * 1000.0 if have_pv else 0.0,
         "have_soc_bat1": int(soc1 is not None),
         "soc_bat1": soc1 if soc1 is not None else -1.0,
+        "fast": int(d.get("source") == "sofar_fast"),                 # 4 s live value, 0 = pivot2db retained (1/min)
     }
 
 
