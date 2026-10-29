@@ -978,13 +978,25 @@ static void chain_discharge(const struct bm_cfg *cfg, const struct bm_in *in, st
 	int w;
 	if (c->house) {
 		/* D7 (0.69-c): winter Z2 near 0 = exactly the AC-out1 load (feed forward, no loop); summer Z1 near 0 = the PCC
-		   deficit (SRC DAY row: a Bat1 charge is our overshoot), at least the AC-out1 load. No PROP / IDLE state */
-		int pcc_w = deficit > 0 ? deficit : 0, prop = !c->winter && pcc_w > c->house_w;
+		   deficit (SRC DAY row: a Bat1 charge is our overshoot), at least the AC-out1 load. No PROP / IDLE state.
+		   Winter export cap (0.74-c, user 2026-10-29: "nur max 100 w ins grid", seen 550 W export at Z1 with the Sofar
+		   battery full while the stacks fed the house): the stacks give at most what keeps the PCC export at
+		   CHARGE_RESERVE, so the PV covers the house first; at 0 W the surplus rule (CHARGE) takes over */
+		int pcc_w = deficit > 0 ? deficit : 0, prop = !c->winter && pcc_w > c->house_w, exp = 0;
 		w = prop ? pcc_w : c->house_w;
+		if (c->winter) {
+			int cap = watt(c->own_discharge) - (int)((long)KP_PM * (house - watt(cfg->charge_reserve)) / 1000);
+			if (cap < 0)
+				cap = 0;
+			if (cap < w) {
+				w = cap;
+				exp = 1;
+			}
+		}
 		if (w > c->dis_max)
 			w = c->dis_max;
 		st->soyo_prop_prev = 0;
-		snprintf(rule, sizeof(rule), "%s SRC:%s", prop ? "PROP" : "HOUSE", out->src_why);
+		snprintf(rule, sizeof(rule), "%s SRC:%s", prop ? "PROP" : exp ? "EXPCAP" : "HOUSE", out->src_why);
 	} else {
 		struct bm_d3_in d = {1, house < PCC_IMPORT_TH, deficit > SOYO_HOLD_TH, r->prop_hold};
 		int prop = bm_d3(&d, st->soyo_prop_prev, &st->soyo_prop_prev);

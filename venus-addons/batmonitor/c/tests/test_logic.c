@@ -329,6 +329,20 @@ static void test_house_acout(void)
 	CHECK(rule_has(&r, "CHARGE SRC:Z2") && sum_sp(&r) > 1800 && fabs(r.pcc) <= 80,
 		  "the PV surplus into the stacks, sp sum %d pcc %.0f", sum_sp(&r), r.pcc);
 
+	pl = BASE(.house = 600, .pv = 450, .house_acout = 1);
+	simulate(&r, &pl, local_time(2026, 10, 29, 16, 15), 60);
+	print_state("winter afternoon, PV 450 W, house 600, Sofar battery full (0.74-c)", &r);
+	CHECK(rule_has(&r, "EXPCAP SRC:Z2") && fabs(r.pcc - r.cfg.charge_reserve) <= 10,
+		  "export capped at CHARGE_RESERVE %.0f, pcc %.0f, %s", r.cfg.charge_reserve, r.pcc, r.out.why[0]);
+	CHECK(abs(sum_sp(&r) + 150 + (int)r.cfg.charge_reserve) <= 15,
+		  "the stacks give only house - (PV - CHARGE_RESERVE), sp sum %d", sum_sp(&r));
+
+	pl = BASE(.house = 600, .pv = 900, .house_acout = 1);
+	simulate(&r, &pl, local_time(2026, 10, 29, 16, 15), 60);
+	print_state("winter afternoon, PV 900 W > house 600 (0.74-c)", &r);
+	CHECK(sum_sp(&r) >= 0 && r.pcc <= 210, "no discharge while PV covers the house, sp sum %d pcc %.0f", sum_sp(&r),
+		  r.pcc);
+
 	pl = BASE(.house = 600, .wp = 4000, .house_acout = 1, .soc = {4, 4});
 	simulate(&r, &pl, local_time(2026, 1, 15, 22, 0), 60);
 	print_state("winter night, stacks at SOC_MIN", &r);
