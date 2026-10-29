@@ -179,6 +179,7 @@ BM_PARAMS = [
     Param("SOC_BALANCE_ON", "soc_balance_on", 3, 0.5, 50, "%", "SoC difference that starts balancing"),
     Param("SOC_BALANCE_OFF", "soc_balance_off", 1, 0, 50, "%", "balancing ends below"),
     Param("SOYO_TARGET", "soyo_target", 0, -500, 500, "W", "PCC target (+ = export)"),
+    Param("CHARGE_RESERVE", "charge_reserve", 0, 0, 1000, "W", "charge: this much less into the stacks than the PCC surplus (0.72-c, user 2026-10-29: 100 W)"),
     Param("SOFAR_TRICKLE", "sofar_trickle", 30, 0, 500, "W", "night: stacks give this much more than the house needs"),
     Param("CHARGER_A", "charger_a", 70, 0, 70, "A", "MultiPlus-II charger current per unit (DC), ceiling = this x BMS voltage"),
     Param("CHARGE_EFF", "charge_eff", 0.93, 0.7, 1.0, "", "AC-in per DC at the charger limit"),
@@ -987,8 +988,9 @@ def chain_charge(cfg, st, out, c):
     below 0"""
     cap = int_caps(out.chg_cap)
     cap_sum = sum(cap[p] for p in range(NPH) if c.charge[p])
-    # D4 cap (0.49-c): aim at PCC = +EXPORT_CAP, so only the export above the cap goes into the stacks
-    target = watt(cfg.soyo_target + (cfg.export_cap if c.cap_active else 0.0))
+    # D4 cap (0.49-c): aim at PCC = +EXPORT_CAP, so only the export above the cap goes into the stacks;
+    # CHARGE_RESERVE (0.72-c): always this much less than the surplus
+    target = watt(cfg.soyo_target + cfg.charge_reserve + (cfg.export_cap if c.cap_active else 0.0))
     want = watt(c.own_charge) + c_div(KP_PM * (watt(c.chg_ref + c.bat1_eff) - target), 1000)
     if want < 0:
         want = 0

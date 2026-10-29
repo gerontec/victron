@@ -42,6 +42,7 @@ struct bm_cfg {
 	double dcl_force_a, cell_force_v, cell_force_release_v;   /* LOW force charge: BMS DCL / lowest cell (0.52-c) */
 	double soc_balance_on, soc_balance_off;
 	double soyo_target;
+	double charge_reserve;           /* charge aims at PCC = +this: always this much less into the stacks than the surplus (0.72-c) */
 	double sofar_trickle;
 	double charger_a, charge_eff;   /* real charge ceiling per phase = charger_a x BMS voltage / charge_eff (0.29-c) */
 	double charger_dc_w;            /* measured DC at the BMS per MultiPlus at its limit, full_at forecast (0.31-c) */

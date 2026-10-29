@@ -95,6 +95,7 @@ const struct bm_param BM_PARAMS[] = {
 	{"SOC_BALANCE_ON",        P(soc_balance_on),            3,       0.5,     50,      "%", "SoC difference that starts balancing"},
 	{"SOC_BALANCE_OFF",       P(soc_balance_off),           1,       0,       50,      "%", "balancing ends below"},
 	{"SOYO_TARGET",           P(soyo_target),               0,       -500,    500,     "W", "PCC target (+ = export)"},
+	{"CHARGE_RESERVE",        P(charge_reserve),            0,       0,       1000,    "W", "charge: this much less into the stacks than the PCC surplus (0.72-c, user 2026-10-29: 100 W)"},
 	{"SOFAR_TRICKLE",         P(sofar_trickle),             30,      0,       500,     "W", "night: stacks give this much more than the house needs, the Sofar battery charges gently instead of swinging"},
 	{"CHARGER_A",             P(charger_a),                 70,      0,       70,      "A", "MultiPlus-II 48/5000 charger current per unit (DC), ceiling = this x BMS voltage"},
 	{"CHARGE_EFF",            P(charge_eff),                0.93,    0.7,     1.0,     "",  "AC-in per DC at the charger limit (measured 2026-10-09: 4050 W AC at 70 A x 53.7 V)"},
@@ -922,8 +923,9 @@ static void chain_charge(const struct bm_cfg *cfg, const struct bm_state *st, st
 	for (int p = 0; p < NPH; p++)
 		if (c->charge[p])
 			cap_sum += cap[p];
-	/* D4 cap (0.49-c): aim at PCC = +EXPORT_CAP, so only the export above the cap goes into the stacks */
-	int target = watt(cfg->soyo_target + (c->cap_active ? cfg->export_cap : 0.0));
+	/* D4 cap (0.49-c): aim at PCC = +EXPORT_CAP, so only the export above the cap goes into the stacks;
+	   CHARGE_RESERVE (0.72-c): always this much less than the surplus */
+	int target = watt(cfg->soyo_target + cfg->charge_reserve + (c->cap_active ? cfg->export_cap : 0.0));
 	int want = watt(c->own_charge) + (int)((long)KP_PM * (watt(c->chg_ref + c->bat1_eff) - target) / 1000);
 	if (want < 0)
 		want = 0;

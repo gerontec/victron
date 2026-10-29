@@ -117,7 +117,7 @@
 #include "bm_logic.h"
 #include "bm_parse.h"
 
-#define VERSION "0.71-c"
+#define VERSION "0.72-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define FAST_HOLD_S 15.0   /* s: while a sofar_fast sample is this fresh, pivot2db samples on the topic are ignored */
 #define R290_TOPIC "r290/heatpump/all"
