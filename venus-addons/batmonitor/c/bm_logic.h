@@ -24,6 +24,8 @@ extern "C" {                         /* the ESP32 shadow (ESPHome, C++) calls th
 #define BM_FF_SPREAD 2             /* cell spread down to FORCE_FULL_SPREAD_MV for FF_SPREAD_STABLE_S (0.67-c) */
 #define BM_FF_MAX 3                /* FORCE_FULL_MAX_MIN after the command (0.67-c) */
 #define FF_SPREAD_STABLE_S 60
+#define BM_TH_SPREAD 1             /* bm_out.th_end: top hold window ended at the cell spread (0.73-c) */
+#define BM_TH_MAX 2                /* ... after TOP_HOLD_MAX_MIN */
 
 struct bm_bank {
 	const char *name, *service;
@@ -57,6 +59,9 @@ struct bm_cfg {
 	double force_full_spread_mv, force_full_top_v;   /* ... once the cell spread is down to this with the highest cell
 	                                                    at the top (0.67-c) */
 	double house_acout;                       /* the house on AC-out1 (0.69-c): 0 never, 1 always, 2 auto (D7) */
+	double top_hold_stack;                    /* top hold (0.73-c): 0 off, 1 = STACK1, 2 = STACK2 */
+	double top_hold_cell_v;                   /* ... its charge is capped so the highest cell stays at this */
+	double top_hold_max_min, top_hold_spread_mv;   /* ... the window (CHARGE at 100 %) ends after this or at this spread */
 };
 
 /* parameter table: name (env BATMONITOR_<name>), default, allowed range, unit, meaning */
@@ -137,6 +142,11 @@ struct bm_state {
 	double ff_spread_since;                      /* monotonic s since its cell spread is down at the top, 0 = not */
 	int house_on;                                /* D7: the house hangs on AC-out1 (0.69-c) */
 	double house_under_since;                    /* monotonic s since the AC-out total is below HOUSE_OFF_W, 0 = not */
+	double th_cap;                               /* top hold (0.73-c): charge ceiling of its stack, W AC */
+	double th_t_prev;                            /* monotonic s of the last top hold cycle, 0 = off */
+	double th_since;                             /* monotonic s since the highest cell reached TOP_HOLD_CELL_V, 0 = not */
+	double th_spread_since;                      /* monotonic s since the cell spread is down at the top, 0 = not */
+	int th_done, th_yday;                        /* window over for today; its local day (-1 = none yet) */
 	int setpoints[NPH];                         /* sent last cycle (the PI's u_applied) */
 };
 
@@ -162,6 +172,10 @@ struct bm_out {
 	int ff_done;                                 /* end the force_full command (0.62-c): BM_FF_HOLD, _SPREAD, _MAX, 0 = no */
 	int house;                                   /* D7 this cycle: 1 = house on AC-out1, the Z1 / Z2 rule (0.69-c) */
 	int house_w;                                 /* AC-out1 load W (sum of the positive phases) */
+	double th_cap;                               /* top hold (0.73-c): charge ceiling of its stack W AC, -1 = off */
+	int th_active;                               /* 1 = the window is on: CHARGE also at 100 % SoC */
+	int th_end;                                  /* the window ended this cycle: BM_TH_SPREAD, BM_TH_MAX, 0 = no */
+	int th_bind[NPH];                            /* 1 = the top hold cap is below the charger / BMS ceiling */
 };
 
 /* ---- decision layer (0.43-c): the discrete part of the rule chain as pure functions of predicates ("bits", each a
@@ -235,6 +249,8 @@ struct bm_d2_bank {
 	                                                CELL_FORCE_RELEASE_V (or not sent) */
 	int ff;                                      /* force_full_from_pv names this bank (0.62-c): CHARGE also at 100 %,
 	                                                HOLD (no discharge) without surplus */
+	int top;                                     /* top hold window on for this bank (0.73-c): CHARGE also at 100 %;
+	                                                without surplus as before (FULL / PROT / CHARGING / DIS) */
 };
 struct bm_d2_in {
 	int stale;                                   /* inverter data older than STALE_SECONDS */

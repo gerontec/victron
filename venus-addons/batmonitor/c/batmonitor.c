@@ -83,6 +83,12 @@
  *     "source":"sofar_fast"); the stale sample replaced the live one for a cycle and soyo (KP ~1) corrected an error
  *     that no longer existed. Samples without that source are ignored while a sofar_fast sample is younger than
  *     FAST_HOLD_S; without sofar_fast the pivot2db value still counts (fallback).
+ *   - top hold (0.73-c, user 2026-10-29: "lange bei 56,5 halten bis die schwache zelle aufholt"): measured that day the
+ *     MUST BMS sent CCL 0 and jumped to SoC 100 at the highest cell 3.646 V (cell 8, spread 271 mV); CCL came back an
+ *     hour later, but FULL kept the stack off. BATMONITOR_TOP_HOLD_STACK 1 / 2 caps that stack's charge so its highest
+ *     cell stays at TOP_HOLD_CELL_V (3.55 V; integral on the cell error, rule tag CELL); once there a window opens once
+ *     per local day: CHARGE also at 100 % SoC (tag TOP) until TOP_HOLD_MAX_MIN (240) or the cell spread stayed at or
+ *     below TOP_HOLD_SPREAD_MV (30) for 60 s. PV only: without surplus FULL / DIS as before. state.json top_hold.
  *   - full_at with the measured charger power (0.31-c, user 2026-10-09): each MultiPlus delivers ~3.6 kW DC at the BMS
  *     at its limit (65-67 A, flat over 53.6-54.6 V; AC-in ~4040 W), not 70 A x U: CHARGER_DC_W caps the forecast.
  *   - full_at (0.32-c, user 2026-10-09): the forecast splits the power each step like alloc_charge and lets the SoC lead
@@ -117,7 +123,7 @@
 #include "bm_logic.h"
 #include "bm_parse.h"
 
-#define VERSION "0.72-c"
+#define VERSION "0.73-c"
 #define INVERTER_TOPIC "inverter/power_grid_exchange/json"
 #define FAST_HOLD_S 15.0   /* s: while a sofar_fast sample is this fresh, pivot2db samples on the topic are ignored */
 #define R290_TOPIC "r290/heatpump/all"
@@ -652,6 +658,24 @@ static void write_state(const int *sp, char why[][WHY_LEN], double surplus)
 		cJSON_AddNullToObject(o, "on_min");
 	cJSON_AddNumberToObject(o, "max_min", cfg.force_full_max_min);
 	cJSON_AddNumberToObject(o, "spread_mv", cfg.force_full_spread_mv);
+	o = cJSON_AddObjectToObject(js, "top_hold");               /* 0.73-c: stack null = off */
+	int thb = (int)lround(cfg.top_hold_stack) - 1;
+	if (thb >= 0 && thb < NBANK) {
+		cJSON_AddStringToObject(o, "stack", BM_BANKS[thb].name);
+		cJSON_AddNumberToObject(o, "cap_w", round(o_.th_cap));
+	} else {
+		cJSON_AddNullToObject(o, "stack");
+		cJSON_AddNullToObject(o, "cap_w");
+	}
+	cJSON_AddNumberToObject(o, "active", o_.th_active);
+	if (st.th_since > 0)
+		cJSON_AddNumberToObject(o, "on_min", round((in_last.now - st.th_since) / 6.0) / 10);
+	else
+		cJSON_AddNullToObject(o, "on_min");
+	cJSON_AddNumberToObject(o, "done_today", st.th_done);
+	cJSON_AddNumberToObject(o, "cell_v", cfg.top_hold_cell_v);
+	cJSON_AddNumberToObject(o, "max_min", cfg.top_hold_max_min);
+	cJSON_AddNumberToObject(o, "spread_mv", cfg.top_hold_spread_mv);
 	o = cJSON_AddObjectToObject(js, "chain");                  /* 0.42-c: S3 reason, as in the rule text */
 	cJSON_AddStringToObject(o, "src", o_.src_why);
 	o = cJSON_AddObjectToObject(js, "pi");
@@ -828,6 +852,19 @@ static void calc(void)
 				LOGE("force_full_from_pv: publish off failed");
 		}
 	}
+	static int th_was;                            /* top hold window (0.73-c): log its start and end */
+	int thb = (int)lround(cfg.top_hold_stack) - 1;
+	if (thb >= 0 && thb < NBANK) {
+		if (o_.th_active && !th_was)
+			LOG("top hold: %s highest cell %.3f V reached %.3f V, window on for %.0f min (cells %.3f..%.3f V, cap %.0f W)",
+				BM_BANKS[thb].name, in.cell_max[thb], cfg.top_hold_cell_v, cfg.top_hold_max_min, in.cell_min[thb],
+				in.cell_max[thb], o_.th_cap);
+		if (o_.th_end)
+			LOG("top hold: %s window done, %s (cells %.3f..%.3f V, spread %.0f mV)", BM_BANKS[thb].name,
+				o_.th_end == BM_TH_SPREAD ? "cell spread down" : "TOP_HOLD_MAX_MIN over", in.cell_min[thb],
+				in.cell_max[thb], (in.cell_max[thb] - in.cell_min[thb]) * 1000.0);
+	}
+	th_was = o_.th_active;
 	if (o_.lead_event > 0)
 		LOG("SoC balance: %s ahead by %.1f %%", BM_BANKS[st.lead].name, o_.lead_diff);
 	else if (o_.lead_event < 0)

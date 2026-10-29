@@ -62,6 +62,13 @@
 #define FC_ANCHOR_MIN_W 500.0   /* modelled Sofar PV below this: no anchor (dawn, dusk) */
 #define FC_SLOT_REACH 5400      /* s: an OWM slot stands for its time +- 1.5 h */
 #define FC_CHARGE_EFF 0.90      /* AC-in -> stack DC at the BMS (measured 2026-10-09: 0.90-0.92) */
+/* top hold (0.73-c): integral ceiling on the highest cell. Plant at the top ~0.1 mV per W AC (MUST 2026-10-29: 46 mV
+   down from 7.4 A to 0 A), so TH_KI x 5 s x 0.1 = 0.25 of the error per cycle */
+#define TH_KI 0.5               /* W per mV and s */
+#define TH_TRACK_W 200.0        /* above the target: the ceiling at most the measured AC-in + this (no windup) */
+#define TH_FAST_MV 20.0         /* more than this above the target: the ceiling x TH_FAST_FACTOR per cycle */
+#define TH_FAST_FACTOR 0.7
+#define TH_NEAR_V 0.05          /* the spread end counts only with the highest cell at most this below the target */
 
 const char *BM_PH[NPH] = {"L1", "L2", "L3"};
 /* Stack1 MUST feeds the middle unit = HQ2606P4NCH = Devices/0 = L1 (user photo 2026-10-08) */
@@ -113,6 +120,10 @@ const struct bm_param BM_PARAMS[] = {
 	{"FORCE_FULL_SPREAD_MV",  P(force_full_spread_mv),      30,      0,       500,     "mV", "force_full_from_pv: the command ends once the cell spread of its stack stayed at or below this for 60 s with the highest cell at FORCE_FULL_TOP_V (0 = off)"},
 	{"FORCE_FULL_TOP_V",      P(force_full_top_v),          3.45,    3.0,     3.7,     "V", "... the highest cell at least this: the spread counts only at the top of the charge, not at rest"},
 	{"HOUSE_ACOUT",           P(house_acout),               2,       0,       2,       "",  "house on AC-out1 (0.69-c): winter Z2 near 0 (discharge = AC-out1 load), summer Z1 near 0 (PCC, at least the AC-out1 load); 0 = never (0.68-c matrix, house on the grid), 1 = always, 2 = auto (AC-out total > 99 W, off after 60 s < 30 W)"},
+	{"TOP_HOLD_STACK",        P(top_hold_stack),            0,       0,       2,       "",  "top hold (0.73-c): 1 = STACK1, 2 = STACK2, 0 = off. Its charge is capped so the highest cell stays at TOP_HOLD_CELL_V (no BMS CCL 0 / SoC 100 jump); once there it keeps charging from PV at 100 % SoC (cell balancing), once per day"},
+	{"TOP_HOLD_CELL_V",       P(top_hold_cell_v),           3.55,    3.40,    3.62,    "V", "top hold: target of the highest cell (MUST BMS cuts off at ~3.65 V)"},
+	{"TOP_HOLD_MAX_MIN",      P(top_hold_max_min),          240,     0,       1440,    "min", "top hold: the window (CHARGE at 100 % SoC) ends this long after the highest cell first reached the target (0 = no window, only the cap)"},
+	{"TOP_HOLD_SPREAD_MV",    P(top_hold_spread_mv),        30,      0,       500,     "mV", "top hold: the window ends earlier once the cell spread stayed at or below this for 60 s near the target (0 = off)"},
 };
 const int BM_NPARAMS = sizeof(BM_PARAMS) / sizeof(BM_PARAMS[0]);
 
@@ -142,6 +153,7 @@ void bm_init(struct bm_state *st)
 	memset(st, 0, sizeof(*st));
 	st->lead = -1;
 	st->ls_yday = -1;
+	st->th_yday = -1;
 }
 
 /* ---- clear-sky DC model (fox2db_logic.h) -------------------------------------------------------- */
@@ -516,7 +528,8 @@ int bm_d1_id(const struct bm_d1_in *b, int bat1_first)
    CELL_FORCE_RELEASE_V within minutes, without the SoC term LOW and discharge would take turns.
    force_full_from_pv (0.62-c, user 2026-10-26: force balancing): the named bank (ff) stays in CHARGE at 100 % (the
    Multi keeps offering current, the BMS CCL tapers it while the cells balance) and without surplus HOLDs instead of
-   PROT / CHARGING / DIS: it never discharges while the command is on. BMS_MISSING, FORCE, STALE and LADESPERRE first */
+   PROT / CHARGING / DIS: it never discharges while the command is on. BMS_MISSING, FORCE, STALE and LADESPERRE first.
+   Top hold window (0.73-c, top): CHARGE also at 100 %, without surplus unchanged */
 void bm_d2(const struct bm_d2_in *b, const int *prot, const int *force, const int *low, int chg_prev,
 		   struct bm_d2_out *o)
 {
@@ -543,7 +556,7 @@ void bm_d2(const struct bm_d2_in *b, const int *prot, const int *force, const in
 		}
 		o->mode[k] = !x->bms_ok ? BM_M_BMS_MISSING : o->force[k] || o->low[k] ? BM_M_FORCE : b->stale ? BM_M_STALE
 					 : o->charge_mode && b->block ? BM_M_LADESPERRE
-					 : o->charge_mode ? (x->soc_lt_100 || x->ff ? BM_M_CHARGE : BM_M_FULL)
+					 : o->charge_mode ? (x->soc_lt_100 || x->ff || x->top ? BM_M_CHARGE : BM_M_FULL)
 					 : x->ff ? BM_M_HOLD : o->prot[k] ? BM_M_PROT : x->charging ? BM_M_CHARGING : BM_M_DIS;
 		if (o->mode[k] == BM_M_CHARGE)
 			o->chg_prev = 1;
@@ -656,6 +669,7 @@ struct chain {
 	int ff;                            /* force_full_from_pv bank, -1 = off (0.62-c) */
 	int discharge[NPH], charge[NPH], n_dis, n_chg;
 	int house, house_w;                /* D7: house on AC-out1, its load W (0.69-c) */
+	int top;                           /* top hold window bank, -1 = off (0.73-c) */
 };
 
 static void chain_inputs(const struct bm_in *in, struct bm_out *out, struct chain *c)
@@ -762,6 +776,83 @@ static void chain_gates(const struct bm_cfg *cfg, const struct bm_in *in, struct
 	}
 }
 
+/* top hold (0.73-c, user 2026-10-29: "lange bei 56,5 halten bis die schwache zelle aufholt"). Measured 2026-10-29: the
+   MUST BMS tapers its CCL from 92 % SoC, at the highest cell 3.646 V (cell 8, spread 271 mV) it sends CCL 0 and jumps
+   to SoC 100; about an hour later CCL is back, but FULL keeps the stack off. So the charge of TOP_HOLD_STACK gets a
+   ceiling that holds its highest cell at TOP_HOLD_CELL_V, always (bulk charge stays below it), so the BMS cut-off is
+   not reached. Once the highest cell reached the target the window opens, once per local day: CHARGE also at 100 % SoC
+   until TOP_HOLD_MAX_MIN, or earlier once the cell spread stayed at or below TOP_HOLD_SPREAD_MV for FF_SPREAD_STABLE_S
+   near the target. PV only: without surplus nothing changes */
+static void chain_top(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *st, struct bm_out *out,
+					  struct chain *c)
+{
+	int b = (int)lround(cfg->top_hold_stack) - 1;
+	struct tm loc;
+	localtime_r(&in->t, &loc);
+	c->top = -1;
+	out->th_cap = -1;
+	if (loc.tm_yday != st->th_yday) {
+		st->th_yday = loc.tm_yday;
+		st->th_done = 0;
+		st->th_since = st->th_spread_since = 0;
+	}
+	if (b < 0 || b >= NBANK) {
+		st->th_cap = st->th_t_prev = st->th_since = st->th_spread_since = 0;
+		return;
+	}
+	double cap = 0, ac = 0;
+	for (int i = 0; i < BM_BANKS[b].nph; i++) {
+		int p = BM_BANKS[b].ph[i];
+		cap += out->chg_cap[p];
+		if (in->ac_ok[p])
+			ac += in->ac_in[p];
+	}
+	if (st->th_t_prev <= 0)
+		st->th_cap = cap;
+	double dt = st->th_t_prev > 0 ? fmin(fmax(in->now - st->th_t_prev, 1.0), 30.0) : CYCLE_SECONDS;
+	st->th_t_prev = in->now;
+	int cell = in->cell_max_ok[b];
+	if (cell) {
+		double e = (cfg->top_hold_cell_v - in->cell_max[b]) * 1000.0;   /* mV, + = below the target */
+		if (e < 0)
+			st->th_cap = fmin(st->th_cap, fmax(ac, 0.0) + TH_TRACK_W);
+		if (e < -TH_FAST_MV)
+			st->th_cap *= TH_FAST_FACTOR;
+		st->th_cap += TH_KI * e * dt;
+	}
+	st->th_cap = fmax(0.0, fmin(cap, st->th_cap));
+	out->th_cap = st->th_cap;
+	for (int i = 0; i < BM_BANKS[b].nph; i++) {
+		int p = BM_BANKS[b].ph[i];
+		double share = st->th_cap / BM_BANKS[b].nph;
+		out->th_bind[p] = share < out->chg_cap[p] - 1;
+		if (out->th_bind[p]) {
+			out->chg_cap[p] = share;
+			out->ccl_bind[p] = 0;
+		}
+	}
+	if (cell && !st->th_done && st->th_since <= 0 && cfg->top_hold_max_min > 0 &&
+		in->cell_max[b] >= cfg->top_hold_cell_v)
+		st->th_since = in->now;
+	if (st->th_since > 0 && !st->th_done) {
+		if (cfg->top_hold_spread_mv > 0 && cell && in->cell_ok[b] && in->cell_max[b] >= cfg->top_hold_cell_v - TH_NEAR_V &&
+			(in->cell_max[b] - in->cell_min[b]) * 1000.0 <= cfg->top_hold_spread_mv) {
+			if (st->th_spread_since <= 0)
+				st->th_spread_since = in->now;
+		} else
+			st->th_spread_since = 0;
+		if (st->th_spread_since > 0 && in->now - st->th_spread_since >= FF_SPREAD_STABLE_S)
+			out->th_end = BM_TH_SPREAD;
+		else if (in->now - st->th_since >= cfg->top_hold_max_min * 60.0)
+			out->th_end = BM_TH_MAX;
+		if (out->th_end)
+			st->th_done = 1;
+		else
+			c->top = b;
+	}
+	out->th_active = c->top >= 0;
+}
+
 /* the per-bank predicates of bm_d2 (tests/cbmc_harness.c proves the constraints check_matrix assumes) */
 static void d2_bank_bits(const struct bm_cfg *cfg, int soc_ok, double soc, int power_ok, double power, int lim_ok,
 						 double dcl, int cell_ok, double cell_min, struct bm_d2_bank *x)
@@ -803,6 +894,7 @@ static void chain_mode(const struct bm_cfg *cfg, const struct bm_in *in, struct 
 		d2_bank_bits(cfg, st->soc_ok[b], st->soc[b], in->power_ok[b], in->power[b], in->lim_ok[b], in->dcl[b],
 					 in->cell_ok[b], in->cell_min[b], &d.bank[b]);
 		d.bank[b].ff = b == c->ff;
+		d.bank[b].top = b == c->top;
 	}
 	bm_d2(&d, st->prot, st->force, st->low, st->soyo_chg_prev, &o);
 	memcpy(st->prot, o.prot, sizeof(st->prot));
@@ -935,6 +1027,8 @@ static void chain_charge(const struct bm_cfg *cfg, const struct bm_state *st, st
 			strncat(out->why[p], c->ff >= 0 ? " FF" : st->lead >= 0 ? " BAL" : " EQ", WHY_LEN - 1 - strlen(out->why[p]));
 			if (c->cap_active)
 				strncat(out->why[p], " CAP", WHY_LEN - 1 - strlen(out->why[p]));
+			if (bank_of(p) == c->top)          /* top hold window (0.73-c) */
+				strncat(out->why[p], " TOP", WHY_LEN - 1 - strlen(out->why[p]));
 		}
 }
 
@@ -952,7 +1046,7 @@ static void chain_pi(const struct bm_cfg *cfg, const struct bm_in *in, struct bm
 			if (!st->soc_ok[b] || st->force[b] || st->low[b] || c->stale)
 				continue;
 			pi_ok[p] = 1;
-			if (!c->block && (st->soc[b] < 100.0 || b == c->ff)) {
+			if (!c->block && (st->soc[b] < 100.0 || b == c->ff || b == c->top)) {
 				pi_chg[p] = 1;
 				n_pichg++;
 			}
@@ -1027,6 +1121,7 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 	chain_house(cfg, in, st, out, &c);
 	chain_d1(cfg, in, st, out, &c);
 	chain_gates(cfg, in, st, out);
+	chain_top(cfg, in, st, out, &c);
 	chain_mode(cfg, in, st, out, &c);
 	chain_lead(cfg, st, out);
 	if (c.n_dis)
@@ -1037,6 +1132,8 @@ void bm_step(const struct bm_cfg *cfg, const struct bm_in *in, struct bm_state *
 		if ((out->sp[p] > 0 && out->ccl_bind[p] && out->sp[p] >= (int)out->chg_cap[p] - 1) ||
 			(out->sp[p] < 0 && out->dcl_bind[p] && -out->sp[p] >= (int)out->dis_cap[p] - 1))
 			strncat(out->why[p], out->sp[p] > 0 ? " CCL" : " DCL", WHY_LEN - 1 - strlen(out->why[p]));
+		else if (out->sp[p] > 0 && out->th_bind[p] && out->sp[p] >= (int)out->chg_cap[p] - 1)
+			strncat(out->why[p], " CELL", WHY_LEN - 1 - strlen(out->why[p]));   /* the top hold cap (0.73-c) */
 	st->soyo_chg_prev = c.n_chg > 0;
 	/* force_full_from_pv (0.62-c): done once its stack held 100 % for FORCE_FULL_HOLD_MIN; a missing BMS keeps the clock */
 	if (c.ff >= 0 && st->soc_ok[c.ff] && st->soc[c.ff] >= 100.0) {

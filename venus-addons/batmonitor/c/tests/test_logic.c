@@ -1062,6 +1062,86 @@ static void test_fc_charger_limit(void)
 	CHECK(o.full_at[1] - t <= (time_t)(0.8 * 15360 / 7200 * 3600) + 600, "Stack2 at the 3.6 kW limit, not slower");
 }
 
+/* 0.73-c top hold: own loop with a cell model of STACK1 at the top of the charge. Highest cell = OCV + 0.1 mV per W
+   AC-in (as measured at the MUST 2026-10-29), the OCV rising with the charged energy up to 3.52 V; PV surplus 6 kW,
+   STACK2 full. The cap must hold the highest cell at TOP_HOLD_CELL_V without swinging, keep charging when the BMS jumps
+   to SoC 100 (window, tag TOP) and stop after TOP_HOLD_MAX_MIN (FULL) */
+static void test_top_hold(void)
+{
+	struct bm_cfg cfg;
+	struct bm_state st;
+	struct bm_out out;
+	struct bm_in in;
+	bm_cfg_default(&cfg);
+	cfg.top_hold_stack = 1;
+	cfg.top_hold_max_min = 60;
+	cfg.top_hold_spread_mv = 0;
+	bm_init(&st);
+	time_t t0 = local_time(2026, 10, 29, 12, 0);
+	double e_wh = 0, ac[NPH] = {0}, cmax = 0, dev_max = 0, soc0 = 97;
+	int n_over = 0, window_seen = 0, top_tag = 0, cell_tag = 0, end = 0, full_after = 0;
+	for (int k = 0; k < 1000; k++) {                    /* 83 min */
+		memset(&in, 0, sizeof(in));
+		in.now = 1000 + 5.0 * k;
+		in.t = t0 + 5 * k;
+		in.have_pcc = in.have_pv = 1;
+		in.pv = 9000;
+		in.pcc = 6000 - (ac[0] + ac[1] + ac[2]);
+		in.pcc_avg5 = in.pcc;
+		in.inv_time = in.now;
+		in.grid_ok = 1;
+		for (int p = 0; p < NPH; p++) {
+			in.ac_ok[p] = 1;
+			in.ac_in[p] = ac[p];
+			in.ac_out_ok[p] = 1;
+		}
+		double ocv = fmin(3.52, 3.40 + e_wh / 2000.0);
+		cmax = ocv + 0.0001 * ac[0];
+		if (cmax > cfg.top_hold_cell_v + 0.005)
+			n_over++;
+		if (k >= 120 && st.th_since > 0 && !st.th_done && fabs(cmax - cfg.top_hold_cell_v) > dev_max)
+			dev_max = fabs(cmax - cfg.top_hold_cell_v);
+		if (k == 240)
+			soc0 = 100;                                  /* the BMS jumps to 100 % */
+		for (int b = 0; b < NBANK; b++) {
+			in.bms_ok[b] = in.power_ok[b] = in.volt_ok[b] = in.lim_ok[b] = in.cell_ok[b] = in.cell_max_ok[b] = 1;
+			in.soc[b] = b ? 100 : soc0;
+			in.power[b] = b ? 0 : ac[0] * 0.88;
+			in.volt[b] = 56;
+			in.ccl[b] = 100;
+			in.dcl[b] = 200;
+			in.cell_max[b] = b ? 3.33 : cmax;
+			in.cell_min[b] = b ? 3.32 : cmax - 0.2;
+		}
+		bm_step(&cfg, &in, &st, &out);
+		window_seen |= out.th_active;
+		top_tag |= out.th_active && strstr(out.why[0], " TOP") != NULL;
+		cell_tag |= strstr(out.why[0], " CELL") != NULL;
+		if (out.th_end) {
+			CHECK(out.th_end == BM_TH_MAX && end == 0, "window ends once by TOP_HOLD_MAX_MIN, th_end %d", out.th_end);
+			end = k;
+		}
+		if (end && k > end)
+			full_after |= !strncmp(out.why[0], "FULL", 4) && out.sp[0] == 0;
+		if (k == 480)
+			CHECK(soc0 >= 100 && out.th_active && !strncmp(out.why[0], "CHARGE", 6) && abs(out.sp[0] - 300) <= 60,
+				  "100 %% SoC in the window: still CHARGE ~300 W (OCV 3.52 + 0.1 mV/W), got %d %s", out.sp[0], out.why[0]);
+		for (int p = 0; p < NPH; p++)
+			ac[p] = out.sp[p];
+		e_wh += fmax(0.0, ac[0]) * 5.0 / 3600.0;
+	}
+	printf("  top hold: highest cell %.3f V, max deviation in the window after 10 min %.1f mV, %d cycles > target + 5 mV, window end"
+		   " cycle %d\n", cmax, dev_max * 1000, n_over, end);
+	CHECK(window_seen && top_tag && cell_tag, "window on, tags TOP and CELL seen (%d %d %d)", window_seen, top_tag, cell_tag);
+	CHECK(dev_max <= 0.010, "the highest cell held within 10 mV of the target, got %.1f mV", dev_max * 1000);
+	CHECK(n_over <= 12, "at most a minute above target + 5 mV (the approach), got %d cycles", n_over);
+	CHECK(end > 0 && full_after, "after TOP_HOLD_MAX_MIN FULL at 100 %%, 0 W (end %d)", end);
+	bm_init(&st);                                         /* off: nothing changes, th_cap -1 */
+	cfg.top_hold_stack = 0;
+	bm_step(&cfg, &in, &st, &out);
+	CHECK(out.th_cap < 0 && !out.th_active && !strstr(out.why[0], " CELL"), "TOP_HOLD_STACK 0: off, %s", out.why[0]);
+}
+
 int main(void)
 {
 	setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
@@ -1107,6 +1187,7 @@ int main(void)
 	test_fc_full_stack_moves_power();
 	test_fc_charger_limit();
 	test_fc_paused_stack_catches_up();
+	test_top_hold();
 	printf("%d checks, %d failed\n", checks, fails);
 	return fails ? 1 : 0;
 }

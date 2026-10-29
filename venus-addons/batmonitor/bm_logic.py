@@ -28,6 +28,8 @@ BM_FF_HOLD = 1                 # Out.ff_done: held 100 % SoC for FORCE_FULL_HOLD
 BM_FF_SPREAD = 2               # cell spread down to FORCE_FULL_SPREAD_MV for FF_SPREAD_STABLE_S (0.67-c)
 BM_FF_MAX = 3                  # FORCE_FULL_MAX_MIN after the command (0.67-c)
 FF_SPREAD_STABLE_S = 60
+BM_TH_SPREAD = 1               # Out.th_end: top hold window ended at the cell spread (0.73-c)
+BM_TH_MAX = 2                  # ... after TOP_HOLD_MAX_MIN
 
 # soyo, 1:1 from sofar_waveshare.yaml, power values doubled (POWER_SCALE)
 POWER_SCALE = 2
@@ -67,6 +69,12 @@ FC_ANCHOR_TAU = 5400.0
 FC_ANCHOR_MIN_W = 500.0
 FC_SLOT_REACH = 5400
 FC_CHARGE_EFF = 0.90
+# top hold (0.73-c): integral ceiling on the highest cell (plant at the top ~0.1 mV per W AC, MUST 2026-10-29)
+TH_KI = 0.5                    # W per mV and s
+TH_TRACK_W = 200.0             # above the target: the ceiling at most the measured AC-in + this (no windup)
+TH_FAST_MV = 20.0              # more than this above the target: the ceiling x TH_FAST_FACTOR per cycle
+TH_FAST_FACTOR = 0.7
+TH_NEAR_V = 0.05               # the spread end counts only with the highest cell at most this below the target
 BM_FC_SLOTS = 24
 # D5 DO4 pulse (0.46-c)
 DO4_LOCKOUT = 300.0
@@ -197,6 +205,10 @@ BM_PARAMS = [
     Param("FORCE_FULL_SPREAD_MV", "force_full_spread_mv", 30, 0, 500, "mV", "force_full_from_pv: the command ends once the cell spread of its stack stayed at or below this for 60 s with the highest cell at FORCE_FULL_TOP_V (0 = off)"),
     Param("FORCE_FULL_TOP_V", "force_full_top_v", 3.45, 3.0, 3.7, "V", "... the highest cell at least this: the spread counts only at the top of the charge, not at rest"),
     Param("HOUSE_ACOUT", "house_acout", 2, 0, 2, "", "house on AC-out1 (0.69-c): winter Z2 near 0 (discharge = AC-out1 load), summer Z1 near 0 (PCC, at least the AC-out1 load); 0 = never (0.68-c matrix, house on the grid), 1 = always, 2 = auto (AC-out total > 99 W, off after 60 s < 30 W)"),
+    Param("TOP_HOLD_STACK", "top_hold_stack", 0, 0, 2, "", "top hold (0.73-c): 1 = STACK1, 2 = STACK2, 0 = off. Its charge is capped so the highest cell stays at TOP_HOLD_CELL_V (no BMS CCL 0 / SoC 100 jump); once there it keeps charging from PV at 100 % SoC (cell balancing), once per day"),
+    Param("TOP_HOLD_CELL_V", "top_hold_cell_v", 3.55, 3.40, 3.62, "V", "top hold: target of the highest cell (MUST BMS cuts off at ~3.65 V)"),
+    Param("TOP_HOLD_MAX_MIN", "top_hold_max_min", 240, 0, 1440, "min", "top hold: the window (CHARGE at 100 % SoC) ends this long after the highest cell first reached the target (0 = no window, only the cap)"),
+    Param("TOP_HOLD_SPREAD_MV", "top_hold_spread_mv", 30, 0, 500, "mV", "top hold: the window ends earlier once the cell spread stayed at or below this for 60 s near the target (0 = off)"),
 ]
 
 
@@ -290,6 +302,12 @@ class State:
     ff_spread_since: float = 0.0                # monotonic s since its cell spread is down at the top, 0 = not
     house_on: int = 0                           # D7: the house hangs on AC-out1 (0.69-c)
     house_under_since: float = 0.0              # monotonic s since the AC-out total is below HOUSE_OFF_W, 0 = not
+    th_cap: float = 0.0                         # top hold (0.73-c): charge ceiling of its stack, W AC
+    th_t_prev: float = 0.0                      # monotonic s of the last top hold cycle, 0 = off
+    th_since: float = 0.0                       # monotonic s since the highest cell reached TOP_HOLD_CELL_V, 0 = not
+    th_spread_since: float = 0.0                # monotonic s since the cell spread is down at the top, 0 = not
+    th_done: int = 0                            # window over for today
+    th_yday: int = -1                           # its local day
     setpoints: list = field(default_factory=lambda: [0] * NPH)
 
 
@@ -342,6 +360,10 @@ class Out:
     ff_done: int = 0                            # end the force_full command (0.62-c): BM_FF_HOLD, _SPREAD, _MAX, 0 = no
     house: int = 0                              # D7 this cycle: 1 = house on AC-out1, the Z1 / Z2 rule (0.69-c)
     house_w: int = 0                            # AC-out1 load W (sum of the positive phases)
+    th_cap: float = 0.0                         # top hold (0.73-c): charge ceiling of its stack W AC, -1 = off
+    th_active: int = 0                          # 1 = the window is on: CHARGE also at 100 % SoC
+    th_end: int = 0                             # the window ended this cycle: BM_TH_SPREAD, BM_TH_MAX, 0 = no
+    th_bind: list = field(default_factory=lambda: [0] * NPH)     # 1 = the top hold cap is below the other ceilings
 
 
 # ---- clear-sky DC model (fox2db_logic.h) ---------------------------------------------------------------------
@@ -598,6 +620,7 @@ def bm_d2(b, prot, force, low, chg_prev):
     surplus, held down to SOYO_HOLD_TH once charging. LOW (0.52-c): DCL 0 or the lowest cell below CELL_FORCE_V force
     charge too and stop the discharge, until DCL is back and the cell has recovered. force_full_from_pv (0.62-c): the
     named bank (ff) stays in CHARGE at 100 % and without surplus HOLDs instead of PROT / CHARGING / DIS.
+    Top hold window (0.73-c, top): CHARGE also at 100 %, without surplus unchanged.
     Returns (prot, force, low, chg_prev, charge_mode, mode per bank)."""
     charge_mode = bool(b["surplus_gt_on"] or (chg_prev and b["surplus_gt_hold"]))
     prot, force, low, mode, chg_next = list(prot), list(force), list(low), [0] * NBANK, 0
@@ -625,7 +648,7 @@ def bm_d2(b, prot, force, low, chg_prev):
         elif charge_mode and b["block"]:
             mode[k] = BM_M_LADESPERRE
         elif charge_mode:
-            mode[k] = BM_M_CHARGE if x["soc_lt_100"] or x.get("ff") else BM_M_FULL
+            mode[k] = BM_M_CHARGE if x["soc_lt_100"] or x.get("ff") or x.get("top") else BM_M_FULL
         elif x.get("ff"):
             mode[k] = BM_M_HOLD
         elif prot[k]:
@@ -718,6 +741,7 @@ class Chain:
         self.charge = [0] * NPH
         self.n_dis = self.n_chg = 0
         self.house = self.house_w = 0           # D7: house on AC-out1, its load W (0.69-c)
+        self.top = -1                           # top hold window bank, -1 = off (0.73-c)
 
 
 def chain_inputs(inp, out, c):
@@ -814,6 +838,68 @@ def chain_gates(cfg, inp, st, out):
             out.dis_cap[p] = d
 
 
+def chain_top(cfg, inp, st, out, c):
+    """top hold (0.73-c, see bm_logic.c): the charge of TOP_HOLD_STACK capped so its highest cell stays at
+    TOP_HOLD_CELL_V; once there the window (CHARGE also at 100 % SoC) until TOP_HOLD_MAX_MIN or the cell spread end,
+    once per local day"""
+    b = lround(cfg.top_hold_stack) - 1
+    _, yday, _ = localtime(inp.t)
+    c.top = -1
+    out.th_cap = -1.0
+    if yday != st.th_yday:
+        st.th_yday = yday
+        st.th_done = 0
+        st.th_since = st.th_spread_since = 0.0
+    if b < 0 or b >= NBANK:
+        st.th_cap = st.th_t_prev = st.th_since = st.th_spread_since = 0.0
+        return
+    cap = ac = 0.0
+    for p in BM_BANKS[b].phases:
+        cap += out.chg_cap[p]
+        if inp.ac_ok[p]:
+            ac += inp.ac_in[p]
+    if st.th_t_prev <= 0:
+        st.th_cap = cap
+    dt = fmin(fmax(inp.now - st.th_t_prev, 1.0), 30.0) if st.th_t_prev > 0 else CYCLE_SECONDS
+    st.th_t_prev = inp.now
+    cell = inp.cell_max_ok[b]
+    if cell:
+        e = (cfg.top_hold_cell_v - inp.cell_max[b]) * 1000.0     # mV, + = below the target
+        if e < 0:
+            st.th_cap = fmin(st.th_cap, fmax(ac, 0.0) + TH_TRACK_W)
+        if e < -TH_FAST_MV:
+            st.th_cap *= TH_FAST_FACTOR
+        st.th_cap += TH_KI * e * dt
+    st.th_cap = fmax(0.0, fmin(cap, st.th_cap))
+    out.th_cap = st.th_cap
+    for p in BM_BANKS[b].phases:
+        share = st.th_cap / len(BM_BANKS[b].phases)
+        out.th_bind[p] = int(share < out.chg_cap[p] - 1)
+        if out.th_bind[p]:
+            out.chg_cap[p] = share
+            out.ccl_bind[p] = 0
+    if cell and not st.th_done and st.th_since <= 0 and cfg.top_hold_max_min > 0 \
+            and inp.cell_max[b] >= cfg.top_hold_cell_v:
+        st.th_since = inp.now
+    if st.th_since > 0 and not st.th_done:
+        if (cfg.top_hold_spread_mv > 0 and cell and inp.cell_ok[b]
+                and inp.cell_max[b] >= cfg.top_hold_cell_v - TH_NEAR_V
+                and (inp.cell_max[b] - inp.cell_min[b]) * 1000.0 <= cfg.top_hold_spread_mv):
+            if st.th_spread_since <= 0:
+                st.th_spread_since = inp.now
+        else:
+            st.th_spread_since = 0.0
+        if st.th_spread_since > 0 and inp.now - st.th_spread_since >= FF_SPREAD_STABLE_S:
+            out.th_end = BM_TH_SPREAD
+        elif inp.now - st.th_since >= cfg.top_hold_max_min * 60.0:
+            out.th_end = BM_TH_MAX
+        if out.th_end:
+            st.th_done = 1
+        else:
+            c.top = b
+    out.th_active = int(c.top >= 0)
+
+
 def d2_bank_bits(cfg, soc_ok, soc, power_ok, power, lim_ok, dcl, cell_ok, cell_min):
     dcl_zero = bool(lim_ok and dcl < cfg.dcl_force_a)
     return {
@@ -905,6 +991,7 @@ def chain_mode(cfg, inp, st, out, c):
     }
     for b in range(NBANK):
         d["bank"][b]["ff"] = b == c.ff
+        d["bank"][b]["top"] = b == c.top
     st.prot, st.force, st.low, _, c.charge_mode, mode = bm_d2(d, st.prot, st.force, st.low, st.soyo_chg_prev)
     for b, bank in enumerate(BM_BANKS):
         r = BM_MODE_RULE[mode[b]]
@@ -1001,6 +1088,8 @@ def chain_charge(cfg, st, out, c):
             out.why[p] = (out.why[p] + tag)[:WHY_LEN - 1]
             if c.cap_active:
                 out.why[p] = (out.why[p] + " CAP")[:WHY_LEN - 1]
+            if bank_of(p) == c.top:            # top hold window (0.73-c)
+                out.why[p] = (out.why[p] + " TOP")[:WHY_LEN - 1]
 
 
 def chain_pi(cfg, inp, st, out, c):
@@ -1012,7 +1101,7 @@ def chain_pi(cfg, inp, st, out, c):
             if not st.soc_ok[b] or st.force[b] or st.low[b] or c.stale:
                 continue
             pi_ok[p] = 1
-            if not c.block and (st.soc[b] < 100.0 or b == c.ff):
+            if not c.block and (st.soc[b] < 100.0 or b == c.ff or b == c.top):
                 pi_chg[p] = 1
                 n_pichg += 1
             if not st.prot[b] and b != c.ff:          # force_full_from_pv: that stack never discharges
@@ -1066,6 +1155,7 @@ def bm_step(cfg, inp, st):
     chain_house(cfg, inp, st, out, c)
     chain_d1(cfg, inp, st, out, c)
     chain_gates(cfg, inp, st, out)
+    chain_top(cfg, inp, st, out, c)
     chain_mode(cfg, inp, st, out, c)
     chain_lead(cfg, st, out)
     if c.n_dis:
@@ -1076,6 +1166,8 @@ def bm_step(cfg, inp, st):
         if ((out.sp[p] > 0 and out.ccl_bind[p] and out.sp[p] >= int(out.chg_cap[p]) - 1)
                 or (out.sp[p] < 0 and out.dcl_bind[p] and -out.sp[p] >= int(out.dis_cap[p]) - 1)):
             out.why[p] = (out.why[p] + (" CCL" if out.sp[p] > 0 else " DCL"))[:WHY_LEN - 1]
+        elif out.sp[p] > 0 and out.th_bind[p] and out.sp[p] >= int(out.chg_cap[p]) - 1:
+            out.why[p] = (out.why[p] + " CELL")[:WHY_LEN - 1]     # the top hold cap (0.73-c)
     st.soyo_chg_prev = int(c.n_chg > 0)
     # force_full_from_pv (0.62-c): done once its stack held 100 % for FORCE_FULL_HOLD_MIN; a missing BMS keeps the clock
     if c.ff >= 0 and st.soc_ok[c.ff] and st.soc[c.ff] >= 100.0:

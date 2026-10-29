@@ -20,6 +20,11 @@ int main(int argc, char **argv)
 		cfg.pi_armed = ri(4) == 0;
 		/* 0.69-c: HOUSE_ACOUT never / always in some runs, else auto (deterministic, no rand; fuzz_replay.py the same) */
 		cfg.house_acout = run % 13 == 6 ? 0 : run % 13 == 7 ? 1 : 2;
+		/* 0.73-c: top hold S1 / S2 in some runs, the target inside the fuzzed cell range (no rand, fuzz_replay.py the same) */
+		cfg.top_hold_stack = run % 9 == 5 ? 1 + (run / 9) % 2 : 0;
+		cfg.top_hold_cell_v = 3.48;
+		cfg.top_hold_max_min = 3;
+		cfg.top_hold_spread_mv = 20;
 		int fc_flag = ri(5) != 0;                   /* 0.59-c: no forecast rule; drawn to keep the input sequence */
 		bm_init(&st);
 		time_t t0 = 1767225600 + (time_t)ri(365) * 86400 + ri(86400);
@@ -148,7 +153,8 @@ int main(int argc, char **argv)
 				   out.why[0], out.why[1], out.why[2], out.surplus, out.pi.u, out.pi.y, out.pi.sp[0], out.pi.sp[1],
 				   out.pi.sp[2], out.bat1_first);
 			if (io)                       /* the DO4 pulse too (D5 changes no setpoint), the D1 cell (0.60-c), ff_done (0.62-c) */
-				printf("D5 %d %d %d %d %d %d %d\n", run, k, out.do4_pulse, out.d1_id, out.ff_done, out.house, out.house_w);
+				printf("D5 %d %d %d %d %d %d %d %.6f %d %d\n", run, k, out.do4_pulse, out.d1_id, out.ff_done, out.house,
+					   out.house_w, out.th_cap, out.th_active, out.th_end);   /* top hold (0.73-c) */
 		}
 	}
 	return 0;

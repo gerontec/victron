@@ -139,9 +139,12 @@ static void d2_bank_inv(const struct bm_d2_in *b, int k, int prot, int force, in
 						   && !x->charging), "DIS only with BMS, unprotected, fresh data, no surplus");
 	INV(!(x->bms_ok && x->soc_lt_min) || m != BM_M_DIS, "never discharge below SOC_MIN");
 	INV(!(x->bms_ok && x->soc_lt_force) || m == BM_M_FORCE, "below SOC_FORCE always force charge");
-	INV(m != BM_M_CHARGE || ((x->soc_lt_100 || x->ff) && o->charge_mode && !b->block && !o->force[k] && !o->low[k]
-							  && !b->stale), "CHARGE only below 100 %% (force_full also at 100), with surplus, no charge"
-		" block, no force, fresh data");
+	INV(m != BM_M_CHARGE || ((x->soc_lt_100 || x->ff || x->top) && o->charge_mode && !b->block && !o->force[k]
+							  && !o->low[k] && !b->stale), "CHARGE only below 100 %% (force_full / top hold also at 100), with"
+		" surplus, no charge block, no force, fresh data");
+	INV(!(x->top && x->bms_ok && o->charge_mode && !b->block && !o->force[k] && !o->low[k] && !b->stale) || m == BM_M_CHARGE,
+		"top hold window with surplus: CHARGE, also at 100 %% (0.73-c)");
+	INV(x->ff || !x->top || o->charge_mode || m != BM_M_HOLD, "top hold without surplus: no HOLD (0.73-c)");
 	INV(!x->ff || m != BM_M_DIS, "force_full_from_pv: that stack never discharges (0.62-c)");
 	INV((m == BM_M_HOLD) == (x->ff && x->bms_ok && !o->force[k] && !o->low[k] && !b->stale && !o->charge_mode),
 		"HOLD exactly for the force_full stack without surplus, after BMS_MISSING / FORCE / STALE");
@@ -167,11 +170,11 @@ static void d2_bank_inv(const struct bm_d2_in *b, int k, int prot, int force, in
    each bank's result equals its single-bank result, and chg_prev = OR(mode == CHARGE) */
 static void check_d2(void)
 {
-	struct bm_d2_bank banks[1024], inert;
+	struct bm_d2_bank banks[2048], inert;
 	int nb = 0;
-	for (unsigned v = 0; v < 1024; v++) {                /* bit 9: ff, force_full_from_pv (0.62-c) */
+	for (unsigned v = 0; v < 2048; v++) {                /* bit 9: ff, force_full_from_pv (0.62-c); bit 10: top hold */
 		struct bm_d2_bank x = {BIT(v, 0), BIT(v, 1), BIT(v, 2), BIT(v, 3), BIT(v, 4), BIT(v, 5), BIT(v, 6), BIT(v, 7),
-							   BIT(v, 8), BIT(v, 9)};
+							   BIT(v, 8), BIT(v, 9), BIT(v, 10)};
 		if (bank_ok(&x))
 			banks[nb++] = x;
 	}
@@ -234,7 +237,7 @@ static void check_d2(void)
 		}
 		INV(o.chg_prev == any, "chg_prev = OR(mode == CHARGE)");
 	}
-	printf("\nD2 protection / mode per stack: %ld consistent combinations (%d bank bit sets of 1024 x 12 global bits x 16"
+	printf("\nD2 protection / mode per stack: %ld consistent combinations (%d bank bit sets of 2048 x 12 global bits x 16"
 		   " states), both positions; coupling: %ld random joint inputs\n", combos, nb, joint);
 	printf("  mode reached (per stack):");
 	for (int m = 0; m < BM_M_N; m++)
@@ -386,6 +389,8 @@ static void check_amounts(void)
 		struct bm_in in;
 		bm_cfg_default(&cfg);
 		(void)ri(5);                               /* the old forecast flag, drawn to keep the random sequence */
+		cfg.top_hold_stack = run % 5 == 2 ? 1 + (run / 5) % 2 : 0;   /* 0.73-c: top hold S1 / S2 (no rand) */
+		cfg.top_hold_max_min = 2;
 		bm_init(&st);
 		time_t t0 = 1767225600 + (time_t)ri(365) * 86400 + ri(86400);
 		double now = 1000, soc[2] = {r(0, 100), r(0, 100)};
@@ -428,6 +433,11 @@ static void check_amounts(void)
 				in.dcl[b] = r(0, 250);
 			}
 			in.force_full = run % 3;                   /* 0.62-c: off, S1, S2 (deterministic, no rand) */
+			for (int b = 0; b < NBANK; b++) {          /* 0.73-c: the top of the charge (deterministic, no rand) */
+				in.cell_ok[b] = in.cell_max_ok[b] = (run + k + b) % 9 != 0;
+				in.cell_max[b] = 3.45 + 0.01 * ((run + k / 4 + b) % 20);
+				in.cell_min[b] = in.cell_max[b] - 0.01 * ((run + k / 30) % 6);
+			}
 			bm_step(&cfg, &in, &st, &out);
 			cycles++;
 			int dis_sum = 0;
@@ -460,13 +470,26 @@ static void check_amounts(void)
 				INV(sp >= 0 || out.wp_max_w < 0 || strstr(w, "WPMAX("), "0.61-c: a discharge under the WP rule is tagged, got %s", w);
 			}
 			INV(dis_sum <= cfg.w_max + NPH, "total discharge %d <= W_MAX", dis_sum);
+			int thb = (int)cfg.top_hold_stack - 1, th_sum = 0;   /* 0.73-c: the top hold stack within its cap */
+			if (thb >= 0) {
+				for (int i = 0; i < BM_BANKS[thb].nph; i++) {
+					int p = BM_BANKS[thb].ph[i];
+					if (!strncmp(out.why[p], "CHARGE", 6))
+						th_sum += out.sp[p];
+					INV(!out.th_active || strncmp(out.why[p], "CHARGE", 6) || strstr(out.why[p], " TOP"),
+						"0.73-c: a charge in the top hold window is tagged TOP, got %s", out.why[p]);
+				}
+				INV(out.th_cap >= 0 && th_sum <= out.th_cap + NPH, "0.73-c: top hold stack charges %d within its cap %.0f",
+					th_sum, out.th_cap);
+			} else
+				INV(out.th_cap < 0 && !out.th_active, "0.73-c: top hold off, got cap %.0f", out.th_cap);
 			INV(out.wp_max_w < 0 || dis_sum <= out.wp_max_w + NPH, "0.61-c: winter heat pump rule caps the discharge at "
 				"%d, got %d", out.wp_max_w, dis_sum);
 		}
 	}
 	printf("\namounts: %ld random bm_step cycles, properties checked (discharge / charge only in their modes, phase and\n"
 		   "  total caps, no power in PROT / STALE / BMS_MISSING / FULL / CHARGING / LADESPERRE / HOLD, no heat pump rule,\n"
-		   "  the force_full stack never discharges)\n", cycles);
+		   "  the force_full stack never discharges, the top hold stack within its cap)\n", cycles);
 }
 
 int main(void)

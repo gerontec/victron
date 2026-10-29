@@ -56,6 +56,8 @@ def main():
             cfg = L.Cfg()
             cfg.pi_armed = int(f[2])                # f[3]: the old forecast flag, unused since 0.59-c
             cfg.house_acout = 0 if run % 13 == 6 else 1 if run % 13 == 7 else 2   # 0.69-c, as fuzz_dump.c
+            cfg.top_hold_stack = 1 + (run // 9) % 2 if run % 9 == 5 else 0          # 0.73-c, as fuzz_dump.c
+            cfg.top_hold_cell_v, cfg.top_hold_max_min, cfg.top_hold_spread_mv = 3.48, 3, 20
             st = L.State()
             run_prev = run
         it = iter(f[4:])
@@ -102,7 +104,8 @@ def main():
         out_lines.append("%d %d %d %d %d\t%s\t%s\t%s\t%.3f %.3f %.3f %d %d %d %d\n" % (
             run, k, o.sp[0], o.sp[1], o.sp[2], o.why[0], o.why[1], o.why[2], o.surplus, o.pi.u, o.pi.y,
             o.pi.sp[0], o.pi.sp[1], o.pi.sp[2], o.bat1_first))
-        out_lines.append("D5 %d %d %d %d %d %d %d\n" % (run, k, o.do4_pulse, o.d1_id, o.ff_done, o.house, o.house_w))
+        out_lines.append("D5 %d %d %d %d %d %d %d %.6f %d %d\n" % (run, k, o.do4_pulse, o.d1_id, o.ff_done, o.house,
+                                                                o.house_w, o.th_cap, o.th_active, o.th_end))
     sys.stdout.writelines(out_lines)
 
 
