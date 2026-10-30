@@ -45,6 +45,9 @@ alarm (0 ok, 1 warning, 2 alarm), worst pack wins. Alarms only, the charge / dis
   (300 A, about 14.4 kW at 48 V); below that all is ok. /Module/<n>/CurrSt still shows the console state.
 - Temp.St, B.T.St: only Normal seen so far
 
+Charge block also on B.V.St (1.9, user 2026-10-30 "OV beachten": 2026-10-29 13:07 + 13:32 pack 1 bvolt OV raised only the
+alarm, charging went on): High / OV in the Volt.St or B.V.St column of any pack in pack_st blocks charging like volt_st.
+
 Charge current derating on COC (1.8, user 2026-10-30: "high charge muss beachtet werden, strom leicht absenken"; COCAlm
 packs 1 + 3 at 09:57-11:05 with 44-50 A per pack, only 2 packs present): a COC* state of any pack sets the Pytes CCL
 to COC_DERATE x the stack charge current at that moment (at least TAPER_CURRENT); a further COC lowers it again from
@@ -72,7 +75,7 @@ from gi.repository import GLib
 sys.path.insert(1, '/opt/victronenergy/dbus-systemcalc-py/ext/velib_python')
 from vedbus import VeDbusService  # noqa: E402
 
-VERSION = '1.8'
+VERSION = '1.9'
 # can-bus-bms (Speicher A on can0) registers as battery instance 512; 513 keeps the MQTT topics
 # N/<portal>/battery/<instance>/... of the two batteries apart
 DEVICE_INSTANCE = 513
@@ -233,7 +236,12 @@ class EboxBattery:
 		vlow = d.get('vlow_mv')
 
 		volt_st = str(d.get('volt_st') or 'Normal')
-		if volt_st.lower().startswith('high') or volt_st == 'OV':      # 1.6: OV (protection) is worse than High
+		# 1.9: also Volt.St / B.V.St of each pack (ebox_mqtt's volt_st carries only the Volt.St column)
+		bad = ['pack %s %s %s' % (pk.get('n'), f, pk.get(f)) for pk in d.get('pack_st') or [] for f in ('volt', 'bvolt')
+			if str(pk.get(f) or '').lower().startswith('high') or pk.get(f) == 'OV']
+		if volt_st.lower().startswith('high') or volt_st == 'OV' or bad:   # 1.6: OV (protection) is worse than High
+			if bad and not (volt_st.lower().startswith('high') or volt_st == 'OV'):
+				volt_st = ', '.join(bad)
 			if not self.high_block:
 				log.warning('EBox reports %s voltage (cell max %s mV): charging blocked', volt_st, vhigh)
 			self.high_block = True
