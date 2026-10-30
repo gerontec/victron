@@ -39,8 +39,17 @@ alarm (0 ok, 1 warning, 2 alarm), worst pack wins. Alarms only, the charge / dis
 - pack of 1..PACKS_EXPECTED missing (Absent) -> BmsCable 2 (link between the packs), /System/NrOfModulesOffline;
   "pack_st": null (console not readable, CAN fallback) -> BmsCable 1
 - Volt.St, B.V.St: High -> HighVoltage 1, OV -> HighVoltage 2
-- Curr.St: COCAlm -> HighChargeCurrent 1, DOCAlm -> HighDischargeCurrent 1, other COC* / DOC* -> 2
+- Curr.St: COCAlm -> HighChargeCurrent 1, other COC* -> 2; and the Pytes charge current is lowered (1.8, see below)
+- Curr.St DOC* is no longer passed on (1.7, user 2026-10-30: pack 3 DOCAlm at 06:46 while the Pytes allows 300 A = 1C):
+  HighDischargeCurrent comes from the summed stack current "current_a" instead, 1 at >= DISCHARGE_ALARM_CURRENT
+  (300 A, about 14.4 kW at 48 V); below that all is ok. /Module/<n>/CurrSt still shows the console state.
 - Temp.St, B.T.St: only Normal seen so far
+
+Charge current derating on COC (1.8, user 2026-10-30: "high charge muss beachtet werden, strom leicht absenken"; COCAlm
+packs 1 + 3 at 09:57-11:05 with 44-50 A per pack, only 2 packs present): a COC* state of any pack sets the Pytes CCL
+to COC_DERATE x the stack charge current at that moment (at least TAPER_CURRENT); a further COC lowers it again from
+the then current. COC_HOLD_SECONDS after the last COC sighting the limit rises by COC_RAMP_A per EBox update (30 s)
+and is dropped once it reaches MAX_CHARGE_CURRENT. Acts on /Info/Pack/MaxChargeCurrent and the summed /Info/*.
 - seen so far (pv_ebox2 since 2026-07-29): Base.St Charge Dischg Idle SysError Absent, Volt.St Normal High OV,
   Curr.St Normal COCAlm DOCAlm, Temp.St Normal. Not seen, assumed by symmetry: Low / UV -> LowVoltage 1 / 2,
   High / OT -> HighTemperature 1 / 2, Low / UT -> LowTemperature 1 / 2
@@ -63,7 +72,7 @@ from gi.repository import GLib
 sys.path.insert(1, '/opt/victronenergy/dbus-systemcalc-py/ext/velib_python')
 from vedbus import VeDbusService  # noqa: E402
 
-VERSION = '1.6'
+VERSION = '1.8'
 # can-bus-bms (Speicher A on can0) registers as battery instance 512; 513 keeps the MQTT topics
 # N/<portal>/battery/<instance>/... of the two batteries apart
 DEVICE_INSTANCE = 513
@@ -86,6 +95,10 @@ MUST_SERVICE = 'com.victronenergy.battery.socketcan_can0'   # Stack1 MUST on L1 
 REFRESH_SECONDS = 5             # system limits follow the MUST BMS this often (the EBox data comes every 30 s)
 PACKS_EXPECTED = 3              # modules 1..3 of the Pytes stack (1.6)
 ALARM_HOLD_SECONDS = 300        # alarm stays up this long after its last sighting (1.6)
+DISCHARGE_ALARM_CURRENT = 300.0 # A, summed discharge current of the stack: HighDischargeCurrent 1 from here (1.7)
+COC_DERATE = 0.9                # on COC*: Pytes CCL = this x stack charge current (1.8)
+COC_HOLD_SECONDS = 1800         # derated CCL held this long after the last COC sighting (1.8)
+COC_RAMP_A = 1.0                # A per EBox update (30 s) back up after the hold (1.8)
 
 # console state -> (alarm path, level) per status column of `ebox pwr` (1.6); 'Normal' and BASE_OK are 0
 BASE_OK = ('Charge', 'Dischg', 'Idle')
@@ -93,7 +106,7 @@ STATE_ALARMS = {
 	'base':  {'SysError': ('/Alarms/InternalFailure', 2)},
 	'volt':  {'High': ('/Alarms/HighVoltage', 1), 'OV': ('/Alarms/HighVoltage', 2),
 	          'Low': ('/Alarms/LowVoltage', 1), 'UV': ('/Alarms/LowVoltage', 2)},
-	'curr':  {'COCAlm': ('/Alarms/HighChargeCurrent', 1), 'DOCAlm': ('/Alarms/HighDischargeCurrent', 1)},
+	'curr':  {'COCAlm': ('/Alarms/HighChargeCurrent', 1)},
 	'temp':  {'High': ('/Alarms/HighTemperature', 1), 'OT': ('/Alarms/HighTemperature', 2),
 	          'Low': ('/Alarms/LowTemperature', 1), 'UT': ('/Alarms/LowTemperature', 2)},
 }
@@ -112,8 +125,10 @@ def state_alarm(field, state):
 	hit = STATE_ALARMS[field].get(state)
 	if hit:
 		return hit
-	if field == 'curr' and state[:3] in ('COC', 'DOC'):
-		return ('/Alarms/HighChargeCurrent' if state[0] == 'C' else '/Alarms/HighDischargeCurrent'), 2
+	if field == 'curr' and state[:3] == 'DOC':        # 1.7: from the summed current, see update_alarms
+		return None, 0
+	if field == 'curr' and state[:3] == 'COC':
+		return '/Alarms/HighChargeCurrent', 2
 	return '/Alarms/InternalFailure', 1
 
 
@@ -155,6 +170,8 @@ class EboxBattery:
 		self.clock = time.monotonic
 		self.alarm_seen = {}            # path -> {level: last sighting} (1.6)
 		self.alarm_shown = {}           # path -> level on the D-Bus (1.6)
+		self.coc_limit = None           # derated Pytes CCL after a COC* state, None = not derated (1.8)
+		self.coc_seen = 0.0             # last COC sighting (1.8)
 
 	def register(self):
 		s = VeDbusService('com.victronenergy.battery.ebox', self.bus, register=False)
@@ -244,6 +261,7 @@ class EboxBattery:
 			ctx['/Info/ChargeRequest'] = 1 if force_charge else 0
 			ctx['/Alarms/LowSoc'] = 1 if self.low_soc else 0
 		self.update_alarms(d, 2 if self.high_block else (1 if (vhigh or 0) >= CELL_STOP_MV else 0))
+		self.update_coc(d.get('pack_st'), current)
 		self.pack = {'soc': soc, 'voltage': voltage, 'vhigh': vhigh}
 		self.last_update = time.monotonic()
 		self.publish_limits()
@@ -256,6 +274,10 @@ class EboxBattery:
 		else:
 			raw, why = {}, {}
 		raw['/Alarms/HighVoltage'] = max(raw.get('/Alarms/HighVoltage', 0), high_voltage)
+		discharge = -float(d['current_a'])          # 1.7: summed stack current, negative = discharge
+		if discharge >= DISCHARGE_ALARM_CURRENT:
+			raw['/Alarms/HighDischargeCurrent'] = 1
+			why.setdefault('/Alarms/HighDischargeCurrent', []).append('stack discharge %.0f A' % discharge)
 		now = self.clock()
 		with self.service as ctx:
 			pack_st = d.get('pack_st')
@@ -280,6 +302,23 @@ class EboxBattery:
 						log.info('%s %d (clear for %d s)', path, shown, ALARM_HOLD_SECONDS)
 				self.alarm_shown[path] = shown
 				ctx[path] = shown
+
+	def update_coc(self, pack_st, current):
+		"""COC derating (1.8): lower the Pytes CCL on a COC* state, ramp it back after COC_HOLD_SECONDS"""
+		now = self.clock()
+		coc = [p.get('n') for p in pack_st or [] if str(p.get('curr') or '')[:3] == 'COC']
+		if coc:
+			limit = max(TAPER_CURRENT, round(COC_DERATE * max(current, 0.0), 1))
+			if self.coc_limit is None or limit < self.coc_limit:
+				log.warning('COC on pack %s at %.1f A: Pytes charge current limited to %.1f A',
+					','.join(map(str, coc)), current, limit)
+				self.coc_limit = limit
+			self.coc_seen = now
+		elif self.coc_limit is not None and now - self.coc_seen >= COC_HOLD_SECONDS:
+			self.coc_limit += COC_RAMP_A
+			if self.coc_limit >= MAX_CHARGE_CURRENT:
+				log.info('COC derating ended')
+				self.coc_limit = None
 
 	def must_limits(self):
 		"""CVL, CCL, DCL of the MUST BMS on L1 from the D-Bus (its CAN-bus BMS values, same Venus), None if it is
@@ -309,6 +348,8 @@ class EboxBattery:
 			return True
 		p = self.pack
 		pack_ccl = 0.0 if self.high_block else self.charge_current(p['vhigh'])
+		if self.coc_limit is not None:                      # 1.8
+			pack_ccl = min(pack_ccl, self.coc_limit)
 		pack_dcl = 0.0 if self.low_soc else MAX_DISCHARGE_CURRENT
 		must = self.must_limits()
 		cvl = MAX_CHARGE_VOLTAGE                            # 1.6: never the MUST request, it would reach L2 + L3 too

@@ -130,8 +130,26 @@ b.update(dict(pwr, pack_st=three))
 check(s['/Alarms/InternalFailure'] == 0 and s['/Alarms/BmsCable'] == 0, 'clear after hold')
 t[0] += 1000
 b.update(dict(pwr, pack_st=[dict(ok, n=1, curr='COCAlm', volt='OV'), dict(ok, n=2, curr='DOCAlm'), dict(ok, n=3, curr='COCPro')]))
-check(s['/Alarms/HighChargeCurrent'] == 2 and s['/Alarms/HighDischargeCurrent'] == 1 and s['/Alarms/HighVoltage'] == 2,
-	'COCAlm+COCPro -> HighChargeCurrent 2, DOCAlm 1, OV -> HighVoltage 2')
+check(s['/Alarms/HighChargeCurrent'] == 2 and s['/Alarms/HighDischargeCurrent'] == 0 and s['/Alarms/HighVoltage'] == 2,
+	'COCAlm+COCPro -> HighChargeCurrent 2, DOCAlm not passed on (1.7), OV -> HighVoltage 2')
+check(b.coc_limit == 45.0, 'COC at 50 A: Pytes CCL 45 A')
+t[0] += 1000
+b.update(dict(pwr, current_a=96.0, pack_st=[dict(ok, n=1, curr='COCAlm'), dict(ok, n=3)]))
+check(b.coc_limit == 45.0, 'COC at 96 A: limit not raised')
+b.coc_limit = None
+b.update(dict(pwr, current_a=96.0, pack_st=[dict(ok, n=1, curr='COCAlm'), dict(ok, n=3)]))
+check(b.coc_limit == 86.4 and s['/Info/Pack/MaxChargeCurrent'] == 86.4, 'COC at 96 A: Pytes CCL 86.4 A')
+b.update(dict(pwr, current_a=86.0, pack_st=[dict(ok, n=1, curr='COCAlm'), dict(ok, n=3)]))
+check(b.coc_limit == 77.4, 'COC again at 86 A: 77.4 A')
+t[0] += eb.COC_HOLD_SECONDS - 1
+b.update(dict(pwr, current_a=77.0, pack_st=three))
+check(b.coc_limit == 77.4, 'within hold: unchanged')
+t[0] += 1
+b.update(dict(pwr, current_a=77.0, pack_st=three))
+check(b.coc_limit == 78.4 and s['/Info/Pack/MaxChargeCurrent'] == 78.4, 'after hold: +1 A per update')
+b.coc_limit = eb.MAX_CHARGE_CURRENT - 0.5
+b.update(dict(pwr, pack_st=three))
+check(b.coc_limit is None and s['/Info/Pack/MaxChargeCurrent'] == 586, 'ramp reaches max: derating ended')
 t[0] += 1000
 b.update(dict(pwr, pack_st=[dict(ok, n=1, temp='Weird'), dict(ok, n=2), dict(ok, n=3)]))
 check(s['/Alarms/InternalFailure'] == 1, 'unknown state -> InternalFailure 1')
