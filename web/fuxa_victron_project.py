@@ -192,6 +192,7 @@ value(720, 196, 'ac_in_export_w', 'W', 0, 12, anchor='end')
 # blade on II while AC-out1 feeds the house (ups_active: AC-out total > 99 W or grid failure, user 2026-10-27)
 ATS_BG = '#2a1a1c'
 box(840, 60, 230, 130, ATS_BG)
+text(1060, 82, '63 A 3-Ph', 14, 'bold', 'end')              # rating label (user 2026-10-29)
 shape('path', dict(G, d='M840,95 L890,95'))                 # I
 shape('path', {'d': 'M890,190 L890,160', 'fill': 'none', 'stroke': '#a78bfa', 'stroke-width': 5, 'stroke-linecap': 'round'})  # II
 shape('path', dict(G, d='M1010,125 L1110,125'))             # common -> house box
@@ -214,6 +215,9 @@ for cx, cy in ((890, 95), (890, 160), (1010, 125)):
 PURPLE = '#a78bfa'
 box(1110, 60, 320, 130, '#251a33')
 text(1126, 84, 'House', 15, 'bold')
+# reactive power at Z1 (user 2026-10-30), total only, unsigned: the Sofar gives no Q, derived from U*I and P at the PCC
+value(1185, 84, 'pcc_q_var', 'var', 0, 14, anchor='start')
+text(1255, 84, 'reactive at Z1, sign unknown', 11, fill=MUTED)
 text(1126, 104, 'AC-out1 = UPS leg of the ATS', 11, fill=MUTED)
 for i, (ph, key) in enumerate((('L1', 'l1_ac_out_w'), ('L2', 'l2_ac_out_w'), ('L3', 'l3_ac_out_w'))):
     text(1126, 126 + i * 20, f'AC-out1 {ph}', 13, fill=MUTED)

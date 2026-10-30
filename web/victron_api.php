@@ -16,6 +16,7 @@ $r = null;
 $ext = [];
 $wp = null;
 $pcc = null;
+$pccq = null;
 try {
     $pdo = new PDO("mysql:host=$db_host;dbname=$db_name;charset=utf8mb4", $db_user, $db_pass, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
     $r = $pdo->query("SELECT * FROM pv_victron ORDER BY ts DESC LIMIT 1")->fetch(PDO::FETCH_ASSOC) ?: null;
@@ -27,6 +28,13 @@ try {
     // Sofar PCC at Z1: last non-null minute value of the last 5 min (inverter_data has empty rows)
     $pcc = $pdo->query("SELECT ActivePower_PCC_Total AS kw FROM inverter_data WHERE device_id = 1
         AND timestamp >= NOW() - INTERVAL 5 MINUTE AND ActivePower_PCC_Total IS NOT NULL
+        ORDER BY timestamp DESC LIMIT 1")->fetch(PDO::FETCH_ASSOC) ?: null;
+    // Sofar PCC reactive power: the Sofar masks out ReactivePower_PCC_*, so per phase |Q| = sqrt((U*I)^2 - P^2) from
+    // U, I, P at the PCC (read.py every 5 min); unsigned, inductive or capacitive cannot be told apart
+    $pccq = $pdo->query("SELECT Voltage_Phase_R AS u1, Voltage_Phase_S AS u2, Voltage_Phase_T AS u3,
+        Current_PCC_R AS i1, Current_PCC_S AS i2, Current_PCC_T AS i3,
+        ActivePower_PCC_R AS p1, ActivePower_PCC_S AS p2, ActivePower_PCC_T AS p3
+        FROM inverter_data WHERE device_id = 1 AND timestamp >= NOW() - INTERVAL 10 MINUTE AND Current_PCC_R IS NOT NULL
         ORDER BY timestamp DESC LIMIT 1")->fetch(PDO::FETCH_ASSOC) ?: null;
 } catch (Exception $e) {
     $errors[] = 'database: ' . $e->getMessage();
@@ -106,6 +114,16 @@ if ($r) {
     foreach (['l1', 'l2', 'l3'] as $p) {
         $in = $r["ac_in_{$p}_w"];
         if ($in !== null && $in < -50) { $exp_w += -$in; $exp_ph[] = strtoupper($p); }
+    }
+    $pcc_q = null;
+    if ($pccq) {
+        $pcc_q = 0;
+        foreach ([1, 2, 3] as $n) {
+            $u = $pccq["u$n"]; $i = $pccq["i$n"]; $p = $pccq["p$n"];
+            if ($u === null || $i === null || $p === null) { $pcc_q = null; break; }
+            $sa = $u * $i; $pw = 1000 * $p;
+            $pcc_q += sqrt(max(0, $sa * $sa - $pw * $pw));
+        }
     }
     $values = [
         // VE.Bus system
@@ -189,6 +207,7 @@ if ($r) {
         'system_state' => v(num($r['system_state']), '', 'Venus system state', 'pv_victron.system_state'),
         'ess_setpoint_w' => v(num($r['ess_setpoint_w']), 'W', 'ESS grid setpoint (+ = import)', 'pv_victron.ess_setpoint_w'),
         'pcc_kw' => v($pcc ? num($pcc['kw']) : null, 'kW', 'Grid exchange measured by the Sofar at the point of common coupling (meter Z1), minute value, + = export (Sofar convention)', 'inverter_data.ActivePower_PCC_Total (device_id 1)'),
+        'pcc_q_var' => v($pcc_q === null ? null : (int)round($pcc_q), 'var', 'Reactive power at the PCC (meter Z1), sum over phases of sqrt((U*I)^2 - P^2) from the Sofar PCC values, unsigned (inductive/capacitive unknown), 5-min value', 'derived: inverter_data.Voltage_Phase_*, Current_PCC_*, ActivePower_PCC_* (device_id 1)'),
         'grid_kw' => v(kw($grid), 'kW', 'Grid value used by ESS: -(Sofar PCC + Bat1) with observer (dbus-pcc-grid), + = import', 'derived: pv_victron.grid_l1..l3_w'),
         // batmonitor decisions (venus-addons/batmonitor, Hub4Mode 3)
         'bm_l1_sp_w' => v(num($r['bm_l1_sp_w'] ?? null), 'W', 'batmonitor setpoint L1 (dev0, middle, Stack1), + = charging', 'pv_victron.bm_l1_sp_w'),
