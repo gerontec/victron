@@ -173,5 +173,15 @@ b.update(dict(pwr, vhigh_mv=3400, pack_st=[dict(ok, n=1, bvolt='High'), dict(ok,
 check(b.high_block, '1.9: bvolt High still there, cell 3400 mV: still blocked')
 b.update(dict(pwr, vhigh_mv=3400, pack_st=three))
 check(not b.high_block and s['/Info/Pack/MaxChargeCurrent'] > 0, '1.9: bvolt Normal, cell 3400 mV: released')
+b.update(dict(pwr, vlow_mv=3000, pack_st=[dict(ok, n=1, bvolt='UV'), dict(ok, n=2), dict(ok, n=3)]))
+check(b.low_volt and s['/Info/Pack/MaxDischargeCurrent'] == 0 and s['/Info/ChargeRequest'] == 1,
+	'1.10: pack bvolt UV: DCL 0, charge request')
+b.update(dict(pwr, vlow_mv=3260, pack_st=[dict(ok, n=1, volt='Low'), dict(ok, n=2), dict(ok, n=3)]))
+check(b.low_volt, '1.10: volt Low still there: held')
+b.update(dict(pwr, vlow_mv=3150, pack_st=three))
+check(b.low_volt and s['/Info/Pack/MaxDischargeCurrent'] == 0, '1.10: Low gone, cell 3150 mV: held')
+b.update(dict(pwr, vlow_mv=3250, pack_st=three))
+check(not b.low_volt and s['/Info/Pack/MaxDischargeCurrent'] == 586 and s['/Info/ChargeRequest'] == 0,
+	'1.10: cell 3250 mV: released')
 print('%d failed' % fails)
 sys.exit(1 if fails else 0)

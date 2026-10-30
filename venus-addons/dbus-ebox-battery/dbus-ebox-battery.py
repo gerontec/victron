@@ -48,6 +48,12 @@ alarm (0 ok, 1 warning, 2 alarm), worst pack wins. Alarms only, the charge / dis
 Charge block also on B.V.St (1.9, user 2026-10-30 "OV beachten": 2026-10-29 13:07 + 13:32 pack 1 bvolt OV raised only the
 alarm, charging went on): High / OV in the Volt.St or B.V.St column of any pack in pack_st blocks charging like volt_st.
 
+Low voltage force charge (1.10, user 2026-10-30: "Low/UV muss Zwangsladung ausloesen, notfalls auch ohne pv excess"):
+Low / UV in volt_st or in the Volt.St / B.V.St column of any pack latches low_volt: Pytes DCL 0, AllowToDischarge 0
+(when the MUST gives no DCL either) and /Info/ChargeRequest 1. batmonitor sees /Info/Pack/MaxDischargeCurrent below
+DCL_FORCE_A and goes to LOW / FORCE: FORCE_CHARGE_W per phase from the grid, with or without PV surplus, no discharge.
+Released once no pack reports Low / UV and the lowest cell is at least LOW_RELEASE_MV (= batmonitor CELL_FORCE_RELEASE_V, 3.20 V in the Pi env).
+
 Charge current derating on COC (1.8, user 2026-10-30: "high charge muss beachtet werden, strom leicht absenken"; COCAlm
 packs 1 + 3 at 09:57-11:05 with 44-50 A per pack, only 2 packs present): a COC* state of any pack sets the Pytes CCL
 to COC_DERATE x the stack charge current at that moment (at least TAPER_CURRENT); a further COC lowers it again from
@@ -75,7 +81,7 @@ from gi.repository import GLib
 sys.path.insert(1, '/opt/victronenergy/dbus-systemcalc-py/ext/velib_python')
 from vedbus import VeDbusService  # noqa: E402
 
-VERSION = '1.9'
+VERSION = '1.10'
 # can-bus-bms (Speicher A on can0) registers as battery instance 512; 513 keeps the MQTT topics
 # N/<portal>/battery/<instance>/... of the two batteries apart
 DEVICE_INSTANCE = 513
@@ -90,6 +96,7 @@ CELL_TAPER_MV = 3600            # highest cell: charge current down to TAPER_CUR
 CELL_STOP_MV = 3650             # highest cell: no charge current
 TAPER_CURRENT = 10.0            # A
 HIGH_RELEASE_MV = 3450          # highest cell: release the charge block after a "High" event
+LOW_RELEASE_MV = 3200           # lowest cell: release the Low / UV force charge (1.10), = CELL_FORCE_RELEASE_V in the Pi env
 FORCE_CHARGE_SOC = 5.0          # %
 FORCE_CHARGE_RELEASE_SOC = 8.0  # %
 STALE_SECONDS = 120
@@ -168,6 +175,7 @@ class EboxBattery:
 		self.last_update = 0.0
 		self.low_soc = False
 		self.high_block = False
+		self.low_volt = False           # Low / UV latched: DCL 0 + charge request (1.10)
 		self.bus = dbus.SystemBus()
 		self.pack = None                # last Pytes values from update(): soc, voltage, vhigh (1.5)
 		self.clock = time.monotonic
@@ -249,11 +257,24 @@ class EboxBattery:
 			log.info('EBox voltage %s, cell max %s mV: charging released', volt_st, vhigh)
 			self.high_block = False
 
+		# 1.10: Low / UV -> force charge
+		low = ['pack %s %s %s' % (pk.get('n'), f, pk.get(f)) for pk in d.get('pack_st') or [] for f in ('volt', 'bvolt')
+			if str(pk.get(f) or '').lower().startswith('low') or pk.get(f) == 'UV']
+		if volt_st.lower().startswith('low') or volt_st == 'UV':
+			low.append('volt_st ' + volt_st)
+		if low:
+			if not self.low_volt:
+				log.warning('EBox reports %s (cell min %s mV): discharge blocked, force charge', ', '.join(low), vlow)
+			self.low_volt = True
+		elif self.low_volt and vlow is not None and vlow >= LOW_RELEASE_MV:
+			log.info('EBox voltage no longer low, cell min %s mV: force charge released', vlow)
+			self.low_volt = False
+
 		if soc < FORCE_CHARGE_SOC:
 			self.low_soc = True
 		elif soc >= FORCE_CHARGE_RELEASE_SOC:
 			self.low_soc = False
-		force_charge = self.low_soc
+		force_charge = self.low_soc or self.low_volt
 
 		if self.service is None:
 			self.register()
@@ -358,7 +379,7 @@ class EboxBattery:
 		pack_ccl = 0.0 if self.high_block else self.charge_current(p['vhigh'])
 		if self.coc_limit is not None:                      # 1.8
 			pack_ccl = min(pack_ccl, self.coc_limit)
-		pack_dcl = 0.0 if self.low_soc else MAX_DISCHARGE_CURRENT
+		pack_dcl = 0.0 if self.low_soc or self.low_volt else MAX_DISCHARGE_CURRENT
 		must = self.must_limits()
 		cvl = MAX_CHARGE_VOLTAGE                            # 1.6: never the MUST request, it would reach L2 + L3 too
 		ccl = pack_ccl + (must[1] if must else 0.0)
