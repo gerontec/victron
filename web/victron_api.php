@@ -120,7 +120,10 @@ if ($r) {
         $pcc_q = 0;
         foreach ([1, 2, 3] as $n) {
             $u = $pccq["u$n"]; $i = $pccq["i$n"]; $p = $pccq["p$n"];
-            if ($u === null || $i === null || $p === null) { $pcc_q = null; break; }
+            // P is NULL when all PCC phases read 0.00 kW (pivot2db treats that as a read error), while batmonitor
+            // regulates the PCC to 0: take P = 0 then, below 10 W it does not change |Q|
+            if ($u === null || $i === null) { $pcc_q = null; break; }
+            if ($p === null) $p = 0;
             $sa = $u * $i; $pw = 1000 * $p;
             $pcc_q += sqrt(max(0, $sa * $sa - $pw * $pw));
         }
