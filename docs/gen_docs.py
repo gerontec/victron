@@ -2,7 +2,7 @@
 """
 gen_docs.py - the batmonitor diagrams in docs/.
 
-1. decision_tables.dot from venus-addons/batmonitor/c/bm_tables.h (read with the loader batmonitor itself uses), plus
+1. decision_tables.dot and decision_flow.pdf (one A4 page per topic, FLOW_PAGES) from venus-addons/batmonitor/c/bm_tables.h (read with the loader batmonitor itself uses), plus
    the effect tables BM_MODE_RULE / BM_SRC_RULE of bm_logic.py. Arrows: the output of one table is a column of
    another. Per row the share of all input combinations it decides (hit policy FIRST); a row that decides none is
    dead (shadowed by the rows above) and is reported.
@@ -187,59 +187,113 @@ def cond_text(cols, row):
     return " and ".join(parts) if parts else "otherwise"
 
 
-def gen_flow_dot():
-    """decision_flow.dot: every table as a chain of questions in row order (hit policy FIRST): row matches? yes ->
-    its output, no -> the next row; the last row (all -) is the "otherwise" output. Arrows between tables as in
-    decision_tables.dot."""
+# decision_flow.pdf: one A4 portrait page per topic, the tables of a page one below the other
+FLOW_PAGES = [
+    ("D1 - Sofar first, S3 source of the discharge, winter heat pump rule",
+     ["D1_LATCH", "D1_B1_FIRST", "D1_SRC", "D1_WP_CAP"]),
+    ("D2 - per stack: charge mode and the latches protection / force charge / LOW",
+     ["D2_CHARGE_MODE", "D2_PROT", "D2_FORCE", "D2_LOW"]),
+    ("D2 - mode per stack (priority top to bottom)", ["D2_MODE"]),
+    ("SoC balancing and D3 discharge PROP / IDLE", ["DLEAD", "D3"]),
+    ("D4 - summer peak window", ["D4", "D4_PEAK"]),
+    ("D5 - DO4 pulse, D7 - house on AC-out1", ["D5", "D7"]),
+]
+
+
+def links(tables, outs):
+    """per table: (inputs from [(table, column)], used by [(table, column)])"""
+    frm, to = collections.defaultdict(list), collections.defaultdict(list)
+    for a in tables:
+        for o in outs[a]:
+            for b, (cols, _) in tables.items():
+                if a != b and o in cols:
+                    to[a].append((b, o))
+                    frm[b].append((a, o))
+            if o in EFFECT_IN:
+                to[a].append((EFFECT_IN[o], o))
+    return frm, to
+
+
+def flow_page_dot(no, n_pages, title, names, tables, outs, note, frm, to):
+    """one page: each table a chain of questions in row order (first match), the tables one below the other"""
+    d = ["digraph flow {",
+         '\tgraph [rankdir=TB, fontname="Helvetica", fontsize=14, nodesep=0.3, ranksep=0.3, labelloc=t, '
+         'compound=true, newrank=true, label=<<b>batmonitor %s - decision flow %d / %d: %s</b><br/>'
+         '<font point-size="10">from c/bm_tables.h: each table is asked row by row, top to bottom; the first row that '
+         'matches decides (yes -&gt; its result, no -&gt; the next row)</font>>];' % (
+             L_version(), no, n_pages, esc(title)),
+         '\tnode [fontname="Helvetica", fontsize=11];',
+         '\tedge [fontname="Helvetica", fontsize=10];']
+    last = None
+    for n in names:
+        cols, rows = tables[n]
+        extra = []
+        if note.get(n):
+            extra += [esc(x) for x in wrap(note[n], 90)]
+        if frm[n]:
+            extra.append("<i>inputs from: %s</i>" % esc(", ".join("%s (%s)" % x for x in frm[n])))
+        if to[n]:
+            extra.append("<i>used by: %s</i>" % esc(", ".join("%s (%s)" % x for x in to[n])))
+        d.append('\tsubgraph cluster_t_%s {' % n)
+        d.append('\t\tlabel=<<b>%s</b> -&gt; %s<br/><font point-size="9">%s</font>>; style="rounded,filled"; '
+                 'fillcolor="#f7f9fc"; color="#4a7fb5"; fontsize=13;' % (n, esc(", ".join(outs[n])),
+                                                                         "<br/>".join(extra)))
+        d.append('\t\t%s_in [shape=point, width=0.1];' % n)
+        prev = n + "_in"
+        for i, row in enumerate(rows):
+            res = ", ".join("%s = %s" % (o, w) for o, w in zip(outs[n], RAW[n][i]))
+            res_id = "%s_r%d" % (n, i)
+            d.append('\t\t%s [shape=box, style="rounded,filled", fillcolor="#e8e8e8", label=<<b>%s</b>>];' % (
+                res_id, esc(res)))
+            if all(c is None for c in row[:len(cols)]):
+                d.append('\t\t%s -> %s [label=" otherwise"];' % (prev, res_id))
+                last = res_id
+                break
+            q = "%s_q%d" % (n, i)
+            d.append('\t\t%s [shape=diamond, style=filled, fillcolor="#dbe8fb", margin=0.03, label=<%s?>];' % (
+                q, "<br/>".join(esc(x) for x in wrap(cond_text(cols, row[:len(cols)]), 30))))
+            d.append('\t\t%s -> %s%s;' % (prev, q, ' [label=" no"]' if i else ""))
+            d.append('\t\t%s -> %s [label=" yes", color="#3c7a30", fontcolor="#3c7a30"];' % (q, res_id))
+            prev = q
+        d.append("\t}")
+        if last and names.index(n) + 1 < len(names):     # the next table below this one
+            d.append("\t%s -> %s_in [style=invis, weight=10];" % (last, names[names.index(n) + 1]))
+    for a in names:                                       # links inside the page
+        for b, o in to[a]:
+            if b in names:
+                d.append('\t%s_r0 -> %s_in [ltail=cluster_t_%s, lhead=cluster_t_%s, color="#4a7fb5", style=dashed, '
+                         'label=" %s", constraint=false];' % (a, b, a, b, o))
+    d.append("}")
+    return "\n".join(d) + "\n"
+
+
+def gen_flow_pdf(render_it=True):
+    """decision_flow.pdf: the pages of FLOW_PAGES, each fitted to A4 portrait (ghostscript)"""
+    import tempfile
     tables = L.load_tables()
     outs = {}
     for line in open(L.TABLES_FILE):
         m = re.match(r'\s*TABLE\((\w+),\s*"[\w ]+",\s*"([\w ]+)"\)', line)
         if m:
             outs[m.group(1)] = m.group(2).split()
-    d = ["// generated by docs/gen_docs.py from venus-addons/batmonitor/c/bm_tables.h - do not edit",
-         "digraph flow {",
-         '\tgraph [rankdir=TB, fontname="Helvetica", fontsize=12, nodesep=0.2, ranksep=0.25, labelloc=t, '
-         'newrank=true, label=<<b>batmonitor %s: decision flow</b> from c/bm_tables.h - each table is asked row by '
-         'row, top to bottom; the first row that matches decides>];' % L_version(),
-         '\tnode [fontname="Helvetica", fontsize=9];',
-         '\tedge [fontname="Helvetica", fontsize=8];']
-    for pre, title in GROUPS:
-        names = [n for n in tables if n == pre or n.startswith(pre + "_")]
-        d.append('\tsubgraph cluster_g_%s {' % pre)
-        d.append('\t\tlabel=<<b>%s</b>>; style="rounded,filled"; fillcolor="#f7f9fc"; color="#4a7fb5";' % esc(title))
-        for n in names:
-            cols, rows = tables[n]
-            d.append('\t\tsubgraph cluster_t_%s {' % n)
-            d.append('\t\t\tlabel=<<b>%s</b> -&gt; %s>; style="rounded"; color="#9fb7d4";' % (
-                n, esc(", ".join(outs[n]))))
-            d.append('\t\t\t%s_in [shape=point, width=0.08];' % n)
-            prev = n + "_in"
-            for i, row in enumerate(rows):
-                res = ", ".join("%s = %s" % (o, w) for o, w in zip(outs[n], RAW[n][i]))
-                res_id = "%s_r%d" % (n, i)
-                d.append('\t\t\t%s [shape=box, style="rounded,filled", fillcolor="#e8e8e8", label=<<b>%s</b>>];' % (
-                    res_id, esc(res)))
-                if all(c is None for c in row[:len(cols)]):
-                    d.append('\t\t\t%s -> %s [label=" otherwise"];' % (prev, res_id))
-                    break
-                q = "%s_q%d" % (n, i)
-                d.append('\t\t\t%s [shape=diamond, style=filled, fillcolor="#dbe8fb", margin=0.02, label=<%s?>];' % (
-                    q, "<br/>".join(esc(x) for x in wrap(cond_text(cols, row[:len(cols)]), 28))))
-                d.append('\t\t\t%s -> %s%s;' % (prev, q, ' [label=" no"]' if i else ""))
-                d.append('\t\t\t%s -> %s [label=" yes", color="#3c7a30"];' % (q, res_id))
-                prev = q
-            d.append("\t\t}")
-        d.append("\t}")
-    for a in tables:
-        for o in outs[a]:
-            for b, (cols, _) in tables.items():
-                if a != b and o in cols:
-                    d.append('\t%s_r0 -> %s_in [ltail=cluster_t_%s, lhead=cluster_t_%s, color="#4a7fb5", style=dashed, '
-                             'label=" %s", constraint=false];' % (a, b, a, b, o))
-    d.append("}")
-    d[2] = d[2].replace("newrank=true,", "newrank=true, compound=true,")
-    open(os.path.join(DOCS, "decision_flow.dot"), "w").write("\n".join(d) + "\n")
+    paged = [n for _, ns in FLOW_PAGES for n in ns]
+    missing = [n for n in tables if n not in paged]
+    if missing or len(paged) != len(set(paged)):
+        raise SystemExit("FLOW_PAGES must hold every table of bm_tables.h once; missing: %s" % missing)
+    note = notes(L.TABLES_FILE)
+    frm, to = links(tables, outs)
+    if not render_it:
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        pdfs = []
+        for i, (title, names) in enumerate(FLOW_PAGES, 1):
+            dot = os.path.join(tmp, "p%02d.dot" % i)
+            open(dot, "w").write(flow_page_dot(i, len(FLOW_PAGES), title, names, tables, outs, note, frm, to))
+            pdfs.append(dot[:-4] + ".pdf")
+            subprocess.run(["dot", "-Tpdf", dot, "-o", pdfs[-1]], check=True)
+        subprocess.run(["gs", "-q", "-dBATCH", "-dNOPAUSE", "-sDEVICE=pdfwrite", "-sPAPERSIZE=a4", "-dFIXEDMEDIA",
+                        "-dPDFFitPage", "-o", os.path.join(DOCS, "decision_flow.pdf")] + pdfs, check=True)
+    print("rendered decision_flow.pdf (%d A4 pages)" % len(FLOW_PAGES))
 
 
 MEASURED = re.compile(r"\b(FORCE|PROT|CHARGING|LADESPERRE|HOLD)\([^)]*\)")   # measured values, not part of a state
@@ -360,12 +414,13 @@ if __name__ == "__main__":
     elif os.path.exists(os.path.join(DOCS, "observed_states.dot")):
         os.remove(os.path.join(DOCS, "observed_states.dot"))
     dead = gen_tables_dot()
-    gen_flow_dot()
-    print("decision_tables.dot, decision_flow.dot written from", os.path.relpath(L.TABLES_FILE))
+    gen_flow_pdf(render_it=False)                          # checks that every table has a page
+    print("decision_tables.dot written from", os.path.relpath(L.TABLES_FILE))
     for n in dead:
         print("WARNING: table %s has a DEAD row (shadowed by the rows above)" % n)
     if "--no-render" not in sys.argv:
         render()
+        gen_flow_pdf()
         if obs:                                             # the observed states as the last page of decision_tables.pdf
             t = os.path.join(DOCS, "decision_tables.pdf")
             subprocess.run(["pdfunite", t, os.path.join(DOCS, "observed_states.pdf"), t + ".tmp"], check=True)
