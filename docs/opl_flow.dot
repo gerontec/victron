@@ -1,0 +1,81 @@
+// batmonitor + opportunity loads (proposal, not built): one cycle with the load layer added.
+// Grey/blue/green = as in batmonitor 0.74-c (control_flow.dot), orange with a thick border = new for the OPL wishes
+// (status page, forecast threshold, DC loads, bridge time, minimum run time). Solution path: chat 2026-11-04.
+// render: dot -Tpng -Gdpi=110 opl_flow.dot -o opl_flow.png
+digraph opl {
+	graph [rankdir=TB, fontname="Helvetica", fontsize=11, nodesep=0.45, ranksep=0.38, newrank=true,
+		   label=<<b>batmonitor + opportunity loads (PROPOSAL, not built)</b> - one cycle every 5 s<br/>blue = decision (bits + state, make check) · green = amount · orange, thick border = new · dashed = data only>,
+		   labelloc=t];
+	node [shape=box, style="rounded,filled", fillcolor="#f4f4f4", fontname="Helvetica", fontsize=10];
+	edge [fontname="Helvetica", fontsize=9];
+
+	// ---- inputs ----
+	in [label=<<b>inputs</b> (bm_parse)<br/>PCC, Sofar Bat1, PV, heat pump W, BMS SoC / U / CCL / DCL / cells, AC-in / AC-out per phase>, fillcolor="#ffffff"];
+	inl [label=<<b>NEW load inputs</b> per load<br/>relay read-back, measured power (W), age of the feedback<br/>DC load: AC-in x eta - BMS /Dc/0/Power of its bank>, fillcolor="#ffe3c4", penwidth=2.5, color="#d9822b"];
+	infc [label=<<b>forecast inputs</b><br/>fc_slots 24 x 3 h OWM (3 days), fc_corr, fc_ts<br/><b>NEW</b>: measured daily base load (MQTT from wagodb)>, fillcolor="#ffe3c4", penwidth=2.5, color="#d9822b"];
+	tbl [label=<<b>NEW table BM_LOADS</b> (like BM_BANKS)<br/>name · priority · nominal W · AC phase or DC bank · actuator<br/>soc_on / soc_off · allow_grid · min_run_s · bridge_s>, fillcolor="#ffe3c4", penwidth=2.5, color="#d9822b", shape=note];
+
+	// ---- existing trunk ----
+	d7 [label=<<b>D7</b> house on AC-out1 (Z1 / Z2)>, fillcolor="#dbe8fb"];
+	d1 [label=<<b>D1</b> source DAY / B1 / STK / WPG, winter heat pump cap>, fillcolor="#dbe8fb"];
+	gates [label=<<b>S0 caps</b> per phase: chg_cap, dis_cap (charger, CCL / DCL), top hold>];
+	d4 [label=<<b>D4</b> summer peak window (export cap)>, fillcolor="#dbe8fb"];
+	d2 [label=<<b>D2 mode</b> per stack, first match<br/>BMS_MISSING &gt; FORCE &gt; STALE &gt; LADESPERRE &gt; CHARGE / FULL &gt; HOLD &gt; PROT &gt; CHARGING &gt; DIS>, fillcolor="#dbe8fb"];
+	lead [label=<<b>D-lead</b> SoC balancing>, fillcolor="#dbe8fb"];
+	mode [label=<<b>mode matrix</b> BM_MODE_RULE>, fillcolor="#eaf6e6"];
+
+	// ---- new: threshold ----
+	thr [label=<<b>NEW OPL threshold</b> (amount layer)<br/>E_PV(next N days) - base load x h - (TARGET_SOC - SoC) x capacity_wh<br/>-&gt; soc_release = clamp(MIN_RESERVE ... )<br/>reason FC_GOOD / FC_POOR / FC_STALE -&gt; OPL_SOC_FIXED>, fillcolor="#ffe3c4", penwidth=2.5, color="#d9822b"];
+
+	// ---- new: load layer ----
+	subgraph cluster_loads {
+		label=<<b>NEW load layer chain_loads</b> (between chain_mode and chain_charge)>; style="rounded,filled"; fillcolor="#fff4e8"; color="#d9822b"; penwidth=2.5; fontsize=12;
+		budget [label=<<b>budget</b> = surplus - stack priority share<br/>per AC phase: 5000 VA - AC-out load (INV_LIMIT)<br/>allocation by priority, water filling as alloc_levels>, fillcolor="#eaf6e6"];
+		timers [label=<<b>timers</b> per load (state: on_since, deficit_since)<br/>min_run_over = now - on_since &ge; min_run_s<br/>bridge_over = deficit for &ge; bridge_s, reset when surplus returns>, fillcolor="#eaf6e6"];
+		d8 [label=<<b>D8</b> per load, first match -&gt; req + reason<br/>1 NO_COMM (grey) · 2 SOC_FLOOR · 3 OVERLOAD / INV_LIMIT<br/>4 MIN_RUN (green) · 5 BRIDGE (green, battery / grid if allow_grid)<br/>6 SOC_BELOW · 7 CHARGE_FIRST · 8 PRIO_OTHER · 9 NO_POWER (red)<br/>10 PROBE (force_full / top hold) · 11 ON (green)<br/>power off only if min_run_over AND bridge_over; 1-3 switch at once<br/><font point-size="9">make check: all bit x state combinations, fixed point after one step</font>>, fillcolor="#dbe8fb"];
+		ext [label=<<b>EXT_LOCK</b> (observation, not a decision)<br/>req 1 + relay 1 + power ~0 for X s<br/>= locked by the device (thermostat)<br/>no power meter -&gt; UNKNOWN (grey)>, fillcolor="#f4f4f4"];
+		budget -> d8 [label=" no_power, prio_other, inv_limit"];
+		timers -> d8 [label=" min_run_over, bridge_over"];
+		d8 -> ext [style=dashed, label=" req"];
+	}
+
+	// ---- existing paths, changed ----
+	charge [label=<<b>charge path</b> (changed)<br/>want = own + KP x (surplus - target) <b>- granted loads</b><br/>alloc_charge up to chg_cap>, fillcolor="#eaf6e6", penwidth=2.5, color="#d9822b"];
+	dis [label=<<b>discharge branch</b> (changed)<br/>BM_SRC_RULE, D3 PROP / IDLE, alloc_discharge<br/><b>BRIDGE</b>: discharge only above OPL_BAT_SUPPORT_MIN_SOC,<br/>below it without allow_grid -&gt; the load is shed>, fillcolor="#eaf6e6", penwidth=2.5, color="#d9822b"];
+	d5 [label=<<b>D5</b> DO4 pulse (FoxESS shedding)>, fillcolor="#ffd09a"];
+
+	// ---- outputs ----
+	act [label=<<b>NEW actuators</b> (batmonitor.c)<br/>GX relay /Relay/n/State · MQTT relay (pv_relay pattern) · Orion remote via relay<br/>fail-safe: restart / STALE / BMS missing -&gt; all loads off>, fillcolor="#ffe3c4", penwidth=2.5, color="#d9822b"];
+	out [label=<<b>setpoints</b> per phase -&gt; Multis<br/>rule text per phase -&gt; state.json -&gt; wagodb.pv_victron>, fillcolor="#ffffff"];
+	pub [label=<<b>NEW</b> state.json "loads" + MQTT batmonitor/loads (retained)<br/>per load: request · actual · reason · colour · min run / bridge time left<br/>threshold: soc_release + its reason>, fillcolor="#ffe3c4", penwidth=2.5, color="#d9822b"];
+	page [label=<<b>NEW OPL status page</b><br/>settings-web (nginx in the GX) or gui-v2 page (Remote Console)<br/>green = released · red = blocked · grey = no communication / unknown<br/>EXT_LOCK shown apart from the energy decision>, fillcolor="#ffe3c4", penwidth=2.5, color="#d9822b", shape=component];
+
+	// ---- edges ----
+	in -> d7 -> d1 -> gates -> d4 -> d2 -> lead -> mode;
+	mode -> budget [label=" stack modes, surplus", color="#d9822b", penwidth=1.8];
+	gates -> budget [style=dashed, label=" chg_cap / dis_cap"];
+	tbl -> budget [style=dashed, color="#d9822b"];
+	tbl -> timers [style=dashed, color="#d9822b"];
+	inl -> d8 [label=" no_comm", color="#d9822b"];
+	inl -> ext [style=dashed, color="#d9822b", label=" relay, W"];
+	infc -> thr [color="#d9822b"];
+	in -> thr [style=dashed, label=" SoC"];
+	thr -> d8 [label=" soc_ge_release", color="#d9822b"];
+	d8 -> charge [label=" granted W", color="#d9822b", penwidth=1.8];
+	d8 -> dis [label=" BRIDGE", color="#d9822b"];
+	mode -> charge [label=" CHARGE / FORCE"];
+	mode -> dis [label=" DIS"];
+	charge -> out;
+	dis -> out;
+	in -> d5 [style=dashed];
+	d8 -> act [label=" req", color="#d9822b", penwidth=1.8];
+	d8 -> pub [style=dashed, color="#d9822b"];
+	ext -> pub [style=dashed, color="#d9822b"];
+	thr -> pub [style=dashed, color="#d9822b", label=" threshold + reason"];
+	timers -> pub [style=dashed, color="#d9822b", label=" time left"];
+	pub -> page [color="#d9822b"];
+	act -> inl [style=dotted, label=" read-back next cycle", constraint=false];
+
+	{rank=same; in; inl; infc; tbl}
+	{rank=same; out; act; pub}
+}

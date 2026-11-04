@@ -191,3 +191,9 @@ make cbmc           # predicate proofs (seconds); make cbmc-full / cbmc-remote f
 On Venus: `sh install.sh` copies everything to `/data/batmonitor`, builds the C binary with the gcc of the Venus image
 and links `/service/batmonitor` from `/data/rc.local`. Without a binary `service/run` starts the Python port.
 State and rule texts: `/data/batmonitor/state.json`; PI shadow: `/data/batmonitor/pi_shadow.csv`.
+
+## Proposal: opportunity loads (not built)
+
+[`docs/opl_flow.png`](../../docs/opl_flow.png) (source `docs/opl_flow.dot`) shows how one cycle would look with a
+load layer: table `BM_LOADS`, decision D8 per load with a reason (status page colours), the forecast-based SoC
+threshold, minimum run and bridge timers, actuators with read-back and the OPL status page.
