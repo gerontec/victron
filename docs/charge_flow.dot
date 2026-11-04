@@ -1,9 +1,9 @@
-// batmonitor 0.59-c: charge path of one cycle as decision matrices, with the summer peak window (D4 LADESPERRE)
+// batmonitor 0.74: charge path of one cycle as decision matrices, with the summer peak window (D4 LADESPERRE)
 // that keeps the stacks free in the morning so they take the midday PV and the PCC export stays below 20 kW.
-// render: dot -Tpdf charge_flow.dot -o charge_flow.pdf   (or -Tpng)
+// render: python3 docs/gen_docs.py
 digraph charge {
 	graph [rankdir=TB, fontname="Helvetica", fontsize=11, nodesep=0.35, ranksep=0.35, newrank=true,
-		   label="batmonitor 0.59-c: charge path (every 5 s)   |   blue = pure decision function (bits + state, enumerated by make check)   |   green = matrix / amounts   |   [CBMC] = proved for all inputs",
+		   label="batmonitor 0.74: charge path (every 5 s)   |   blue = decision (c/bm_tables.h, enumerated by make check)   |   green = matrix / amounts   |   [CBMC] = proved for all inputs",
 		   labelloc=t];
 	node [shape=box, style="rounded,filled", fillcolor="#f4f4f4", fontname="Helvetica", fontsize=10];
 	edge [fontname="Helvetica", fontsize=9];
@@ -54,7 +54,7 @@ digraph charge {
 		d4 -> note_ls [style=dotted, arrowhead=none];
 	}
 
-	d2 [label=<<b>D2</b> bm_d2 per stack   state: prot, force, low, chg_prev<br/>charge_mode: surplus &gt; 200 W on, held while &gt; 20 W<br/>first match: BMS_MISSING &gt; FORCE (force or low) &gt; STALE &gt; LADESPERRE (charge_mode and block) &gt;<br/>CHARGE (SoC &lt; 100) / FULL &gt; PROT &gt; CHARGING &gt; DIS<br/><b>LOW</b> (0.52-c, state low): on at DCL &lt; DCL_FORCE_A 1 A or lowest cell &lt; CELL_FORCE_V,<br/>off when DCL is back, the cell &ge; CELL_FORCE_RELEASE_V 3.25 V and (0.55-c) SoC &ge; SOC_MIN_RELEASE;<br/>LOW -&gt; FORCE (charge, no discharge); Lenggries env: CELL_FORCE_V 3.05 V<br/><font point-size="9">[make check, CBMC h_d2_bits]</font><br/><font point-size="9">make check: 16128 combinations per stack (84 bit sets x 12 global x 16 states) -&gt; mode:<br/>BMS_MISSING 8064 · FORCE 5760 · STALE 1152 · LADESPERRE 288 · CHARGE 216 ·<br/>PROT 216 · CHARGING 180 · DIS 180 · FULL 72</font>>, fillcolor="#dbe8fb"];
+	d2 [label=<<b>D2</b> bm_d2 per stack   state: prot, force, low, chg_prev<br/>charge_mode: surplus &gt; 200 W on, held while &gt; 20 W<br/>first match: BMS_MISSING &gt; FORCE (force or low) &gt; STALE &gt; LADESPERRE (charge_mode and block) &gt;<br/>CHARGE (SoC &lt; 100, or force_full / top hold window) / FULL &gt; HOLD &gt; PROT &gt; CHARGING &gt; DIS<br/><b>force_full_from_pv</b> (0.62-c, MQTT S1 / S2): that stack charges first (FF), stays in CHARGE at 100 %,<br/>never discharges (HOLD without surplus); ends at 60 min at 100 %, cell spread &le; 30 mV or after 240 min<br/><b>top hold</b> (0.73-c, TOP_HOLD_STACK): window CHARGE at 100 % (TOP) once per day until 240 min / spread end<br/><b>LOW</b> (0.52-c, state low): on at DCL &lt; DCL_FORCE_A 1 A or lowest cell &lt; CELL_FORCE_V,<br/>off when DCL is back, the cell &ge; CELL_FORCE_RELEASE_V 3.25 V and (0.55-c) SoC &ge; SOC_MIN_RELEASE;<br/>LOW -&gt; FORCE (charge, no discharge); Lenggries env: CELL_FORCE_V 3.05 V / release 3.20 V<br/><font point-size="9">[make check, CBMC h_d2_bits]</font><br/><font point-size="9">make check: 64512 combinations per stack (336 bit sets x 12 global x 16 states) -&gt; mode:<br/>BMS_MISSING 32256 · FORCE 23040 · STALE 4608 · LADESPERRE 1152 · HOLD 1152 ·<br/>CHARGE 1080 · PROT 432 · CHARGING 360 · DIS 360 · FULL 72</font>>, fillcolor="#dbe8fb"];
 
 	subgraph cluster_mode {
 		label=<<b>mode matrix</b> BM_MODE_RULE[mode] (0.48-c): what each mode means for the setpoint>;
@@ -66,16 +66,17 @@ digraph charge {
 			<tr><td bgcolor="#cfe8c6">FORCE</td><td bgcolor="#cfe8c6">FORCE_CHARGE_W 500</td><td bgcolor="#cfe8c6"><b>1</b> (0.48-c)</td><td bgcolor="#cfe8c6">FORCE(soc %) [LOW]</td></tr>
 			<tr><td>STALE</td><td>0 W</td><td>-</td><td>NAME</td></tr>
 			<tr><td bgcolor="#ffd09a">LADESPERRE</td><td bgcolor="#ffd09a">0 W</td><td bgcolor="#ffd09a">-</td><td bgcolor="#ffd09a">LADESPERRE(peak h)</td></tr>
-			<tr><td bgcolor="#cfe8c6">CHARGE</td><td bgcolor="#cfe8c6">charge amount</td><td bgcolor="#cfe8c6">1</td><td bgcolor="#cfe8c6">CHARGE WP: SRC:</td></tr>
+			<tr><td bgcolor="#cfe8c6">CHARGE</td><td bgcolor="#cfe8c6">charge amount</td><td bgcolor="#cfe8c6">1</td><td bgcolor="#cfe8c6">CHARGE SRC:.. [FF] [CAP] [TOP]</td></tr>
 			<tr><td>FULL</td><td>0 W</td><td>-</td><td>NAME</td></tr>
 			<tr><td>PROT</td><td>0 W</td><td>-</td><td>PROT(soc %)</td></tr>
 			<tr><td>CHARGING</td><td>0 W</td><td>-</td><td>CHARGING(BMS W)</td></tr>
-			<tr><td>DIS</td><td>discharge amount</td><td>1</td><td>(S4: PROP / IDLE)</td></tr>
+			<tr><td>DIS</td><td>discharge amount</td><td>1</td><td>(S4: PROP / IDLE / HOUSE / EXPCAP)</td></tr>
+			<tr><td>HOLD</td><td>0 W</td><td>-</td><td>HOLD(soc %)</td></tr>
 			</table>>];
 		force [label=<<b>FORCE</b>: min(FORCE_CHARGE_W, chg_cap) per phase<br/>from the grid, obeys the BMS CCL (was: 500 W even at CCL 0)<br/>at any time of day: no TOU window (removed 2026-10-11)>, fillcolor="#ffffff"];
-		amount [label=<<b>charge amount</b> (chain_charge, whole watts since 0.48-c)<br/>want = max(0, own_charge + KP_PM 1010 x (PCC + Bat1_eff - target) / 1000)<br/>target = SOYO_TARGET, + EXPORT_CAP while D4 cap_active (0.49-c)<br/>at most the sum of chg_cap over the charging phases<br/><font point-size="9">[CBMC h_charge]</font>>, fillcolor="#ffffff"];
-		caps [label=<<b>chg_cap</b> per phase (one per stack)<br/>min(CHARGER_A 70 A x U / 0.93, CHARGE_MAX_PHASE 4900, BMS CCL)<br/>~4.0-4.2 kW per phase -&gt; ~12 kW for the three Multis>, fillcolor="#ffffff"];
-		alloc [label=<<b>alloc_levels</b> (0.48-c: one split core for charge and discharge)<br/>charge: one level per stack in CHARGE_PRIORITY order (Stack1, Stack2), the lead stack last,<br/>each up to min(chg_cap, CHARGER_CAP_PHASE); water filling within a level;<br/>only what the caps cut goes on; a rest up to CHARGE_MAX_PHASE on all charging phases<br/><font point-size="9">[CBMC h_charge without bank assumption, h_alloc_discharge]</font>>, fillcolor="#ffffff"];
+		amount [label=<<b>charge amount</b> (chain_charge, whole watts since 0.48-c)<br/>want = max(0, own_charge + KP_PM 1010 x (PCC + Bat1_eff - target) / 1000)<br/>target = SOYO_TARGET + CHARGE_RESERVE (0.72-c, Lenggries env 100 W), + EXPORT_CAP while D4 cap_active<br/>at most the sum of chg_cap over the charging phases<br/><font point-size="9">[CBMC h_charge]</font>>, fillcolor="#ffffff"];
+		caps [label=<<b>chg_cap</b> per phase (one per stack)<br/>min(CHARGER_A 70 A x U / CHARGE_EFF, CHARGE_MAX_PHASE 4900, BMS CCL)<br/>~4.0-4.2 kW per phase -&gt; ~12 kW for the three Multis<br/><b>top hold</b> (0.73-c): TOP_HOLD_STACK capped so its highest cell stays at TOP_HOLD_CELL_V 3.55 V<br/>(integral on the cell error, rule tag CELL)>, fillcolor="#ffffff"];
+		alloc [label=<<b>alloc_levels</b> (0.48-c: one split core for charge and discharge)<br/>charge: one level per stack in CHARGE_PRIORITY order (Stack1, Stack2), the lead stack last<br/>(force_full: its stack first),<br/>each up to min(chg_cap, CHARGER_CAP_PHASE); water filling within a level;<br/>only what the caps cut goes on; a rest up to CHARGE_MAX_PHASE on all charging phases<br/><font point-size="9">[CBMC h_charge without bank assumption, h_alloc_discharge]</font>>, fillcolor="#ffffff"];
 		mrule -> force [label=" FORCE"];
 		mrule -> amount [label=" CHARGE"];
 		caps -> amount [style=dashed];
@@ -99,7 +100,7 @@ digraph charge {
 			</table>>];
 	}
 
-	out [label=<<b>setpoints</b> per phase (+ = charge) -&gt; Multis<br/>rule text: CHARGE SRC:.. BAL/EQ [CAP] [CCL] | LADESPERRE(h) | FULL | FORCE(soc) [LOW]>, fillcolor="#ffffff"];
+	out [label=<<b>setpoints</b> per phase (+ = charge) -&gt; Multis<br/>rule text: CHARGE SRC:.. BAL/EQ/FF [CAP] [TOP] [CCL / CELL] | LADESPERRE(h) | FULL | HOLD(soc) | FORCE(soc) [LOW]>, fillcolor="#ffffff"];
 
 	timeline [shape=plain, label=<
 		<table border="0" cellborder="1" cellspacing="0" cellpadding="4" bgcolor="#ffffff">

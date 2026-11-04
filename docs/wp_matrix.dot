@@ -1,26 +1,36 @@
-// batmonitor 0.59-c: the decision matrix that is left - PCC near 0, one heat pump rule (WP_SOC_MIN).
-// render: dot -Tpdf wp_matrix.dot -o wp_matrix.pdf   (or -Tpng)
+// batmonitor 0.74: D1 - which source row of BM_SRC_RULE a cycle uses, and the winter heat pump rule (0.61-c).
+// The tables themselves: c/bm_tables.h D1_LATCH, D1_B1_FIRST, D1_SRC, D1_WP_CAP (decision_tables / decision_flow).
+// render: python3 docs/gen_docs.py
 digraph wp {
 	graph [rankdir=TB, fontname="Helvetica", fontsize=12, nodesep=0.3, ranksep=0.35, labelloc=t,
-		   label="batmonitor 0.59-c: decision matrix BM_SRC_RULE (bm_logic.c) - charge and discharge on the real PCC, target 0 W\nD1 picks one row per cycle (first match top-down) - make check: 192 combinations (6 bits x 2 states), all rows reachable"];
+		   label="batmonitor 0.74: D1 source (BM_SRC_RULE row) and the winter heat pump rule - charge and discharge on the real PCC, target 0 W\nmake check: 128 cells (6 bits x bat1_first), DAY 64 · B1 12 · STK 42 · WPG 10; wp_cap none 96 · zero 16 · max 16; all rows reachable"];
 	node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=11, fillcolor="#dbe8fb"];
 	edge [fontname="Helvetica", fontsize=10];
 
-	start [label=<<b>every 5 s</b><br/>PV, heat pump (em0/power), SOC_Bat1, lowest stack SoC>, fillcolor="#ffffff"];
+	start [label=<<b>every 5 s</b><br/>PV, heat pump power (SDM72D), SOC_Bat1, Sofar Bat1 W, month>, fillcolor="#ffffff"];
 	q0 [label=<night?<br/><font point-size="9">PV &lt; 100 W</font>>, shape=diamond, style=filled];
 	q1 [label=<Sofar first?<br/><font point-size="9">SOC_Bat1 &gt; BAT1_SOC_MIN 5 % (latched, back &ge; 7 %)<br/>and heat pump &ge; 300 W</font>>, shape=diamond, style=filled];
-	q2 [label=<heat pump left to the grid?<br/><font point-size="9">lowest stack &lt; WP_SOC_MIN 21 % (latched, back &ge; 23 %)<br/>and heat pump &ge; 300 W</font>>, shape=diamond, style=filled];
+	q2 [label=<winter and heat pump running?<br/><font point-size="9">October .. March, heat pump &ge; 300 W</font>>, shape=diamond, style=filled];
 
 	matrix [shape=plain, label=<
 		<table border="0" cellborder="1" cellspacing="0" cellpadding="6" bgcolor="#ffffff">
 		<tr><td bgcolor="#e8e8e8"><b>SRC</b></td><td bgcolor="#e8e8e8"><b>meaning</b></td><td bgcolor="#e8e8e8"><b>Sofar Bat1<br/>discharge counts</b></td><td bgcolor="#e8e8e8"><b>target</b></td><td bgcolor="#e8e8e8"><b>idle W</b></td><td bgcolor="#e8e8e8"><b>PROP hold</b></td><td bgcolor="#e8e8e8"><b>make check</b></td></tr>
-		<tr><td port="day"><b>DAY</b></td><td>by day: PV surplus charges, import is discharged</td><td>no</td><td>PCC 0</td><td>20</td><td>no</td><td>96</td></tr>
-		<tr><td port="b1"><b>B1</b></td><td>night, heat pump running: the Sofar Bat1 first,<br/>the stacks only what it leaves</td><td>no</td><td>PCC 0</td><td>20</td><td>no</td><td>18</td></tr>
-		<tr><td port="stk"><b>STK</b></td><td>night floor: the stacks take the Sofar over</td><td>yes (signed)</td><td>PCC + Bat1 = +30 W<br/>(SOFAR_TRICKLE)</td><td>0</td><td>yes</td><td>63</td></tr>
-		<tr><td port="wpg" bgcolor="#fde9c8"><b>WPG</b></td><td>night, low SoC, heat pump running:<br/>the grid pays the heat pump</td><td>no</td><td>PCC + WP = 0</td><td>20</td><td>no</td><td>15</td></tr>
-		<tr><td colspan="7" align="left"><font point-size="10"><b>WPLOW</b> (orange; also by day): while the lowest stack is below WP_SOC_MIN the discharge regulates on PCC + heat pump, so the stacks serve only the house; charging always on the real PCC.<br/>
-		Safety rules unchanged: SOC_MIN 8 % / release 10 %, LOW force charge (DCL 0 or cell &lt; 3.05 V), BMS CCL / DCL, W_MAX 10 kW, 3800 W per phase; summer D4 export cap (18 kW) and DO4 &gt; 20 kW.<br/>
-		Removed in 0.59-c (PCC was moved away from 0 on purpose): Z2 winter rule, 1900 W transition cap, forecast rule + bad-forecast cap, WPPV, WP_CAP, B1W.</font></td></tr>
+		<tr><td port="day"><b>DAY</b></td><td>by day: PV surplus charges, import is discharged</td><td>no</td><td>PCC 0</td><td>20</td><td>no</td><td>64</td></tr>
+		<tr><td port="b1"><b>B1</b></td><td>night, heat pump running: the Sofar Bat1 first,<br/>the stacks only what it leaves</td><td>no</td><td>PCC 0</td><td>20</td><td>no</td><td>12</td></tr>
+		<tr><td port="wpg" bgcolor="#fde9c8"><b>WPG</b></td><td>winter night, heat pump running, no Sofar first:<br/>no night floor, the heat pump rule caps the stacks</td><td>no</td><td>PCC 0</td><td>20</td><td>no</td><td>10</td></tr>
+		<tr><td port="stk"><b>STK</b></td><td>night floor: the stacks take the Sofar over</td><td>yes (signed)</td><td>PCC + Bat1 = +30 W<br/>(SOFAR_TRICKLE)</td><td>0</td><td>yes</td><td>42</td></tr>
+		</table>>];
+
+	cap [shape=plain, label=<
+		<table border="0" cellborder="1" cellspacing="0" cellpadding="6" bgcolor="#ffffff">
+		<tr><td colspan="3" bgcolor="#fde9c8"><b>winter heat pump rule</b> (D1_WP_CAP, 0.61-c, any time of day): discharge ceiling of the stacks</td></tr>
+		<tr><td bgcolor="#e8e8e8"><b>winter + heat pump running</b></td><td bgcolor="#e8e8e8"><b>Sofar Bat1</b></td><td bgcolor="#e8e8e8"><b>stacks give at most</b></td></tr>
+		<tr><td>yes</td><td>discharges (&lt; -100 W)</td><td><b>0 W</b>   rule text WPMAX(0)</td></tr>
+		<tr><td>yes</td><td>does not discharge</td><td><b>WP_WINTER_W</b> (default 1000, Lenggries env 100)   WPMAX(100)</td></tr>
+		<tr><td>no</td><td>-</td><td>W_MAX (no rule)</td></tr>
+		<tr><td colspan="3" align="left"><font point-size="10">Why (user 2026-10-25): the heat pump tariff is 22 ct/kWh, stack energy is recharged at 30 ct/kWh - the stacks do not support the heat pump while the Sofar can.<br/>
+		Safety rules unchanged: SOC_MIN / release, LOW force charge (DCL 0 or cell &lt; CELL_FORCE_V), BMS CCL / DCL, 3800 W per phase; D4 export cap, DO4 &gt; 20 kW.<br/>
+		Removed: WP_SOC_MIN / WPLOW (0.61-c), the Z2 winter rule, transition cap, forecast rule, WPPV, WP_CAP (0.59-c).</font></td></tr>
 		</table>>];
 
 	start -> q0;
@@ -30,4 +40,5 @@ digraph wp {
 	q1 -> q2 [label=" no"];
 	q2 -> matrix:wpg [label=" yes"];
 	q2 -> matrix:stk [label=" no"];
+	start -> cap [style=dashed, label=" winter, heat pump, Bat1 W"];
 }
