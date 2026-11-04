@@ -1,5 +1,5 @@
 """
-bm_logic.py - the batmonitor control logic in Python, a 1:1 port of c/bm_logic.c (0.51-c).
+bm_logic.py - the batmonitor control logic in Python, a 1:1 port of c/bm_logic.c (0.74-c); the decisions D1-D7 as decision tables (first_hit).
 
 One cycle = bm_step(cfg, inp, st) -> Out. Pure: no D-Bus, MQTT, clock or files; batmonitor.py collects the inputs and
 writes the outputs. The names, stages and tables are the ones of the C file, so both can be read side by side:
@@ -15,6 +15,8 @@ so every change must go into both files. The few C details that matter for that 
 (truncating int casts and divisions, lround, fmin/fmax with NaN, 0-based tm_yday).
 """
 import math
+import os
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -584,25 +586,97 @@ BM_MODE_RULE = {
 }
 
 
+# Decision tables: c/bm_tables.h (format see there), read once at import. A table is (columns, rows); each row holds
+# one condition per column (1, 0, or _ = any), then the outputs. Hit policy FIRST: the first matching row wins.
+_ = None
+KEEP = "KEEP"
+LEAD_NONE, LEAD_NEW, LEAD_END = "NONE", "NEW", "END"     # DLEAD outputs (LEAD_KEEP is KEEP)
+TABLES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "c", "bm_tables.h")
+
+_TABLE_RE = re.compile(r'^TABLE\((\w+),\s*"([\w ]+)",\s*"([\w ]+)"\)\s*(/\*.*\*/)?$')
+_ROW_RE = re.compile(r'^ROW\((\w+),\s*"([01\- ]+)",\s*([\w, ]+)\)\s*(/\*.*\*/)?$')
+
+
+def _output(word, where):
+    """an output word of bm_tables.h -> its value: a number, KEEP or a BM_SRC_ / BM_WP_ / BM_M_ / LEAD_ name"""
+    if re.fullmatch(r"-?\d+", word):
+        return int(word)
+    if word == "KEEP":
+        return KEEP
+    if re.fullmatch(r"(BM_SRC_|BM_WP_|BM_M_)[A-Z0-9_]+", word) and isinstance(globals().get(word), int) \
+            or re.fullmatch(r"LEAD_[A-Z]+", word) and word in globals():
+        return globals()[word]
+    raise ValueError("%s: unknown output %r" % (where, word))
+
+
+def load_tables(path=TABLES_FILE):
+    """bm_tables.h -> {name: (columns, rows)}. Refuses every line that is not TABLE, ROW, a comment or blank, and
+    checks per table: conditions = columns, outputs = output names, last row all "-"."""
+    tables, outs, comment = {}, {}, False
+    with open(path) as f:
+        for n, line in enumerate(f, 1):
+            s, where = line.strip(), "%s:%d" % (os.path.basename(path), n)
+            if comment:
+                comment = "*/" not in s
+                continue
+            if not s:
+                continue
+            if s.startswith("/*"):
+                comment = "*/" not in s
+                continue
+            m = _TABLE_RE.match(s)
+            if m:
+                if m.group(1) in tables:
+                    raise ValueError("%s: table %s defined twice" % (where, m.group(1)))
+                tables[m.group(1)] = (tuple(m.group(2).split()), [])
+                outs[m.group(1)] = m.group(3).split()
+                continue
+            m = _ROW_RE.match(s)
+            if not m:
+                raise ValueError("%s: neither TABLE, ROW nor a comment: %s" % (where, s))
+            if m.group(1) not in tables:
+                raise ValueError("%s: ROW of %s before its TABLE" % (where, m.group(1)))
+            cols, rows = tables[m.group(1)]
+            cond = m.group(2).split()
+            out = [_output(w.strip(), where) for w in m.group(3).split(",")]
+            if len(cond) != len(cols):
+                raise ValueError("%s: %d conditions for the %d columns of %s" % (where, len(cond), len(cols), m.group(1)))
+            if len(out) != len(outs[m.group(1)]):
+                raise ValueError("%s: %d outputs, %s has %d" % (where, len(out), m.group(1), len(outs[m.group(1)])))
+            rows.append(tuple(_ if c == "-" else int(c) for c in cond) + tuple(out))
+    for name, (cols, rows) in tables.items():
+        if not rows or any(c is not _ for c in rows[-1][:len(cols)]):
+            raise ValueError("%s: table %s does not end with an all \"-\" row" % (os.path.basename(path), name))
+    return tables
+
+
+def first_hit(table, bits):
+    """the outputs of the first matching row (a tuple; one output -> the value itself). A column the caller does not
+    provide is an error (a misspelled column name in bm_tables.h)."""
+    cols, rows = table
+    for row in rows:
+        if all(c is _ or bool(bits[k]) == bool(c) for k, c in zip(cols, row)):
+            out = row[len(cols):]
+            return out[0] if len(out) == 1 else out
+    raise LookupError("no row matches: %r" % (bits,))
+
+
+def keep(v, old):
+    return old if v == KEEP else v
+
+
+TABLES = load_tables()
+
+
 def bm_d1(b, bat1_first):
-    """D1. Sofar first (0.38-c): Bat1 above BAT1_SOC_MIN and the heat pump running -> the Sofar delivers first at night
-    (S3 B1); else at night the stacks take the Sofar over (night floor, S3 STK). 0.59-c (user 2026-10-24): PCC near 0
-    always - the forecast rule, the heat pump matrix, WPPV and WP_CAP are gone. 0.61-c (user 2026-10-25): WP_SOC_MIN is
-    gone; in the winter half-year with the heat pump running the stacks give 0 W while the Sofar Bat1 discharges, else
-    at most WP_WINTER_W (wp_cap); at night no night floor then (S3 B1 resp. WPG).
-    b: dict of the bm_d1_in bits. Returns a dict like bm_d1_out."""
-    o = {}
-    wp_win = bool(b["winter"] and b["wp_on"])
-    if not b["b1_above_min"]:
-        bat1_first = 0
-    elif not bat1_first and b["b1_ge_release"]:
-        bat1_first = 1
-    o["bat1_first"] = bat1_first
-    o["b1_first"] = int(bool(bat1_first and b["wp_on"]))
-    o["night_floor"] = bool(b["night"] and not o["b1_first"] and not wp_win)
-    o["src_reason"] = (BM_SRC_DAY if not b["night"] else BM_SRC_B1 if o["b1_first"]
-                       else BM_SRC_STK if o["night_floor"] else BM_SRC_WPG)
-    o["wp_cap"] = BM_WP_NONE if not wp_win else BM_WP_ZERO if b["b1_dis"] else BM_WP_MAX
+    """D1: Sofar first latch, S3 source, winter heat pump rule (tables D1_*). b: dict of the bm_d1_in bits. Returns a
+    dict like bm_d1_out."""
+    o = {"bat1_first": keep(first_hit(TABLES["D1_LATCH"], dict(b, bat1_first=bat1_first)), bat1_first)}
+    o["b1_first"] = first_hit(TABLES["D1_B1_FIRST"], dict(b, bat1_first=o["bat1_first"]))
+    src = first_hit(TABLES["D1_SRC"], dict(b, b1_first=o["b1_first"]))
+    o["night_floor"] = src == BM_SRC_STK
+    o["src_reason"] = src
+    o["wp_cap"] = first_hit(TABLES["D1_WP_CAP"], b)
     return o
 
 
@@ -615,90 +689,45 @@ def bm_d1_id(b, bat1_first):
 
 
 def bm_d2(b, prot, force, low, chg_prev):
-    """D2. Per bank: SoC protection and force charge with hysteresis (only while the BMS reports), then the mode, first
-    match: BMS_MISSING > FORCE > STALE > LADESPERRE > CHARGE / FULL > PROT > CHARGING > DIS. Charge mode on the Z2
-    surplus, held down to SOYO_HOLD_TH once charging. LOW (0.52-c): DCL 0 or the lowest cell below CELL_FORCE_V force
-    charge too and stop the discharge, until DCL is back and the cell has recovered. force_full_from_pv (0.62-c): the
-    named bank (ff) stays in CHARGE at 100 % and without surplus HOLDs instead of PROT / CHARGING / DIS.
-    Top hold window (0.73-c, top): CHARGE also at 100 %, without surplus unchanged.
-    Returns (prot, force, low, chg_prev, charge_mode, mode per bank)."""
-    charge_mode = bool(b["surplus_gt_on"] or (chg_prev and b["surplus_gt_hold"]))
-    prot, force, low, mode, chg_next = list(prot), list(force), list(low), [0] * NBANK, 0
+    """D2: charge mode, the latches prot / force / low per bank and the mode per bank (tables D2_*). ff / top missing
+    in a bank's bits count as 0. Returns (prot, force, low, chg_prev, charge_mode, mode per bank)."""
+    charge_mode = bool(first_hit(TABLES["D2_CHARGE_MODE"], dict(b, chg_prev=chg_prev)))
+    prot, force, low, mode = list(prot), list(force), list(low), [0] * NBANK
     for k in range(NBANK):
-        x = b["bank"][k]
-        if x["bms_ok"]:
-            if x["soc_lt_min"]:
-                prot[k] = 1
-            elif x["soc_ge_release"]:
-                prot[k] = 0
-            if x["soc_lt_force"]:
-                force[k] = 1
-            elif x["soc_ge_force_release"]:
-                force[k] = 0
-            if x["low_on"]:
-                low[k] = 1
-            elif x["low_off"] and x["soc_ge_release"]:   # 0.55-c: and SoC back at SOC_MIN_RELEASE
-                low[k] = 0
-        if not x["bms_ok"]:
-            mode[k] = BM_M_BMS_MISSING
-        elif force[k] or low[k]:
-            mode[k] = BM_M_FORCE
-        elif b["stale"]:
-            mode[k] = BM_M_STALE
-        elif charge_mode and b["block"]:
-            mode[k] = BM_M_LADESPERRE
-        elif charge_mode:
-            mode[k] = BM_M_CHARGE if x["soc_lt_100"] or x.get("ff") or x.get("top") else BM_M_FULL
-        elif x.get("ff"):
-            mode[k] = BM_M_HOLD
-        elif prot[k]:
-            mode[k] = BM_M_PROT
-        elif x["charging"]:
-            mode[k] = BM_M_CHARGING
-        else:
-            mode[k] = BM_M_DIS
-        if mode[k] == BM_M_CHARGE:
-            chg_next = 1
-    return prot, force, low, chg_next, charge_mode, mode
+        x = dict(b["bank"][k])
+        x.setdefault("ff", 0)
+        x.setdefault("top", 0)
+        prot[k] = keep(first_hit(TABLES["D2_PROT"], x), prot[k])
+        force[k] = keep(first_hit(TABLES["D2_FORCE"], x), force[k])
+        low[k] = keep(first_hit(TABLES["D2_LOW"], x), low[k])
+        mode[k] = first_hit(TABLES["D2_MODE"], dict(x, force=force[k], low=low[k], prot=prot[k], stale=b["stale"],
+                                                    block=b["block"], charge_mode=charge_mode))
+    return prot, force, low, int(BM_M_CHARGE in mode), charge_mode, mode
 
 
 def bm_dlead(both_ok, diff_gt_on, diff_lt_off, first_ahead, lead):
-    """SoC balancing: the bank more than SOC_BALANCE_ON ahead takes the lead; cleared below SOC_BALANCE_OFF or without
-    both BMS. Returns (lead, event: 1 new lead, -1 cleared, 0)"""
-    if not both_ok:
-        return -1, 0
-    if lead < 0 and diff_gt_on:
-        return (0 if first_ahead else 1), 1
-    if lead >= 0 and diff_lt_off:
-        return -1, -1
-    return lead, 0
+    """SoC balancing (table DLEAD). Returns (lead, event: 1 new lead, -1 cleared, 0)"""
+    a = first_hit(TABLES["DLEAD"], {"both_ok": both_ok, "has_lead": lead >= 0, "diff_gt_on": diff_gt_on,
+                                    "diff_lt_off": diff_lt_off})
+    return {LEAD_NONE: (-1, 0), LEAD_NEW: (0 if first_ahead else 1, 1), LEAD_END: (-1, -1), KEEP: (lead, 0)}[a]
 
 
 def bm_d3(any_dis, house_import, deficit_gt_hold, prop_hold, prop_prev):
-    """D3. PROPORTIONAL while importing, or (already proportional / night floor) while the deficit is above
-    SOYO_HOLD_TH; else IDLE. Returns the new prop (it is also the next state)"""
-    return int(bool(any_dis and (house_import or ((prop_prev or prop_hold) and deficit_gt_hold))))
+    """D3 PROPORTIONAL / IDLE (table D3); the result is also the next state"""
+    return first_hit(TABLES["D3"], {"any_dis": any_dis, "house_import": house_import, "prop_prev": prop_prev,
+                                    "prop_hold": prop_hold, "deficit_gt_hold": deficit_gt_hold})
 
 
 def bm_d4(b, peak_today):
-    """D4 summer peak window as a forecast export cap (0.49-c). The cap holds while enabled, in the season and the
-    forecast still expects export above EXPORT_CAP today; then the stacks charge only the surplus above the cap (charge
-    mode on that surplus, held down to SOYO_HOLD_TH) and wait below it. peak_today: PCC above PCC_PEAK_TH seen today.
-    Returns (block = wait below the cap, cap_active, peak_today)."""
-    if b["new_day"]:
-        peak_today = 0
-    if b["pcc_peak"]:
-        peak_today = 1
-    cap = bool(b["enabled"] and b["season"] and b["fc_cap_ahead"])
-    cap_charge = b["surplus_cap_on"] or (b["chg_prev"] and b["surplus_cap_hold"])
-    return int(cap and not cap_charge), int(cap), peak_today
+    """D4 summer peak window (tables D4, D4_PEAK). Returns (block = wait below the cap, cap_active, peak_today)."""
+    block, cap = first_hit(TABLES["D4"], b)
+    return block, cap, keep(first_hit(TABLES["D4_PEAK"], b), peak_today)
 
 
 def bm_d5(pcc_over, grace_over, pcc_hard, lockout_over, acout_over):
-    """D5. A fresh PCC above PCC_PEAK_TH for DO4_GRACE_S (R290 boost and air conditioning first, 0.50-c) or above
-    DO4_HARD_W, or - grid offline - PV feeding more than ACOUT_FEED_MAX_W into one MultiPlus AC-out for ACOUT_FEED_S
-    (factor 1.0 rule, the FoxESS on AC-out1, no grace, 0.51-c), and no pulse within DO4_LOCKOUT -> DO4 pulse"""
-    return int(bool(((pcc_over and (grace_over or pcc_hard)) or acout_over) and lockout_over))
+    """D5 DO4 pulse (table D5)"""
+    return first_hit(TABLES["D5"], {"lockout_over": lockout_over, "acout_over": acout_over, "pcc_over": pcc_over,
+                                    "grace_over": grace_over, "pcc_hard": pcc_hard})
 
 
 HOUSE_ON_W = 99.0
@@ -707,17 +736,10 @@ HOUSE_OFF_S = 60.0
 
 
 def bm_d7(mode_off, mode_on, over_on, under_off, under_long, on):
-    """D7 (0.69-c): the house on AC-out1; returns (on_next, under_next). HOUSE_ACOUT 0 / 1 fixes the state; auto: above
-    HOUSE_ON_W on at once, below HOUSE_OFF_W the timer runs and after HOUSE_OFF_S off, in between the state holds and
-    the timer stops. On: winter Z2 near 0 (discharge = the AC-out1 load), summer Z1 near 0 (PCC, at least the house
-    load); off: the 0.68-c matrix (git tag batmonitor-0.68-c-house-on-grid) for the house on the grid"""
-    if mode_off:
-        return 0, 0
-    if mode_on or over_on:
-        return 1, 0
-    if under_off:
-        return int(bool(on and not under_long)), 1
-    return on, 0
+    """D7 house on AC-out1 (table D7). Returns (on_next, under_next)"""
+    on_next, under = first_hit(TABLES["D7"], {"mode_off": mode_off, "mode_on": mode_on, "over_on": over_on,
+                                              "under_off": under_off, "under_long": under_long, "on": on})
+    return keep(on_next, on), under
 
 
 # ---- the rule chain: one function per stage, run in this order by bm_step ------------------------------------
@@ -1049,13 +1071,23 @@ def chain_discharge(cfg, inp, st, out, c):
     if c.house:
         # D7 (0.69-c): winter Z2 near 0 = exactly the AC-out1 load (feed forward, no loop); summer Z1 near 0 = the PCC
         # deficit (SRC DAY row: a Bat1 charge is our overshoot), at least the AC-out1 load. No PROP / IDLE state
+        # Winter export cap (0.74-c, user 2026-10-29: "nur max 100 w ins grid"): the stacks give at most what keeps the
+        # PCC export at CHARGE_RESERVE, so the PV covers the house first; at 0 W the surplus rule (CHARGE) takes over
         pcc_w = deficit if deficit > 0 else 0
         prop = int(not c.winter and pcc_w > c.house_w)
+        exp = 0
         w = pcc_w if prop else c.house_w
+        if c.winter:
+            cap = watt(c.own_discharge) - c_div(KP_PM * (house - watt(cfg.charge_reserve)), 1000)
+            if cap < 0:
+                cap = 0
+            if cap < w:
+                w = cap
+                exp = 1
         if w > c.dis_max:
             w = c.dis_max
         st.soyo_prop_prev = 0
-        rule = "%s SRC:%s" % ("PROP" if prop else "HOUSE", out.src_why)
+        rule = "%s SRC:%s" % ("PROP" if prop else "EXPCAP" if exp else "HOUSE", out.src_why)
     else:
         prop = bm_d3(1, house < PCC_IMPORT_TH, deficit > SOYO_HOLD_TH, r.prop_hold, st.soyo_prop_prev)
         st.soyo_prop_prev = prop
@@ -1341,3 +1373,22 @@ def bm_full_forecast(cfg, fi):
         if active[b]:
             out.soc_sunset[b] = soc[b]
     return out
+
+
+def _check_tables():
+    """at import: call every decision once with all bits 0, so a misspelled column in bm_tables.h fails at start,
+    before the first setpoint (first_hit raises KeyError on a column no caller provides)"""
+    z = dict.fromkeys
+    bm_d1(z(["night", "wp_on", "b1_above_min", "b1_ge_release", "winter", "b1_dis"], 0), 0)
+    bank = dict(d2_bank_bits(Cfg(), 0, 0.0, 0, 0.0, 0, 0.0, 0, 0.0), ff=0, top=0)
+    bm_d2({"stale": 0, "block": 0, "surplus_gt_on": 0, "surplus_gt_hold": 0, "bank": [bank, bank]},
+          [0] * NBANK, [0] * NBANK, [0] * NBANK, 0)
+    bm_dlead(0, 0, 0, 0, -1)
+    bm_d3(0, 0, 0, 0, 0)
+    bm_d4(z(["new_day", "enabled", "season", "fc_cap_ahead", "pcc_peak", "surplus_cap_on", "surplus_cap_hold",
+             "chg_prev"], 0), 0)
+    bm_d5(0, 0, 0, 0, 0)
+    bm_d7(0, 0, 0, 0, 0, 0)
+
+
+_check_tables()
