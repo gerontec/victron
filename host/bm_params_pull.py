@@ -6,14 +6,19 @@ pushed into Venus. This script, on the Pi host:
   0. schema: exports the parameter definitions and the source / mode matrix of the DEPLOYED bm_logic.py plus the
      running batmonitor version (state.json) and inserts a new wagodb.bm_param_schema row when they changed. The
      editor always draws its form from the newest schema row, so a new batmonitor shows up within one run
-  1. reads the newest row; done if its sha256 is the one in APPLIED (already applied or rejected)
+  1. reads the newest row. A rejected row (sha256 in APPLIED with a "rejected" note) is not tried again; an accepted
+     one is compared with what the Pi has on every run, so a batmonitor deploy that brought its own bm_tables.h is
+     corrected within 5 min (2026-11-05)
   2. checks it: sha256 of the stored text, a JSON object, every name a parameter of the DEPLOYED bm_logic.py
      (/data/batmonitor/bm_logic.py, the Python port of the running C version, same limits), every value a number
      within its min .. max. A failed check: the row gets applied_note "rejected: ...", the env stays. Names the
      deployed version no longer has (a parameter removed by a batmonitor update) are ignored and named in the note
-  3. rewrites /data/batmonitor/env: lines that are not BATMONITOR_<parameter> stay (BATMONITOR_LIVE, ...), the
-     parameter lines become exactly the version's overrides; backup env.bak-<time>; then svc -t batmonitor in Venus.
-     Same effective values as before (e.g. the seed): no restart, applied_note "unchanged"
+  3. target (2026-11-05, user: "jetzt laeuft alles ueber das .h file"): with a deployed bm_logic.py that reads PARAM
+     lines (SITE_PARAMS, batmonitor >= 0.76-py) the PARAM block of /data/batmonitor/bm_tables.h becomes exactly the
+     version's overrides (the new file is parsed with the deployed loader before it replaces the old one) and the
+     BATMONITOR_<parameter> lines leave the env, so the env keeps only switches (LIVE, PYTHON, ...). An older
+     bm_logic.py: the env as before. Backup <file>.bak-<time>, then svc -t batmonitor in Venus.
+     Same effective values as before: no restart, applied_note "unchanged"
   4. sets applied_at / applied_note of the row
 
 Config /etc/bm-params-pull.conf (root, 600): host=, user=, password=, database= (wagodb on .218).
@@ -32,6 +37,7 @@ import pymysql
 CONF = '/etc/bm-params-pull.conf'
 ENV = '/data/batmonitor/env'
 LOGIC = '/data/batmonitor/bm_logic.py'
+TABLES = '/data/batmonitor/bm_tables.h'      # PARAM lines (batmonitor >= 0.76-py)
 STATE = '/data/batmonitor/state.json'         # "version" = the running batmonitor (C port)
 APPLIED = '/data/batmonitor/params.applied'   # "<id> <sha256>" of the last handled version
 PREFIX = 'BATMONITOR_'
@@ -127,6 +133,99 @@ def fmt(v):
     return ('%.6f' % v).rstrip('0').rstrip('.') if isinstance(v, float) else str(v)
 
 
+def has_site_params(m):
+    """the deployed logic reads PARAM lines from bm_tables.h"""
+    return hasattr(m, 'SITE_PARAMS') and hasattr(m, 'load_tables') and os.path.exists(TABLES)
+
+
+def env_split(limits):
+    """env lines -> (lines to keep, {name: value text} of the parameter lines)"""
+    with open(ENV) as f:
+        lines = f.read().splitlines()
+    keep, old = [], {}
+    for line in lines:
+        k, sep, v = line.partition('=')
+        name = k[len(PREFIX):] if k.startswith(PREFIX) else None
+        if sep and name in limits:
+            old[name] = v.strip()
+        else:
+            keep.append(line)
+    return keep, old
+
+
+def tables_with_params(want):
+    """bm_tables.h text with its PARAM lines replaced by `want` ({name: text}), at the place of the first PARAM line
+    (or after the header comment); a trailing comment of a kept name stays"""
+    with open(TABLES) as f:
+        lines = f.read().splitlines()
+    notes, out, at = {}, [], None
+    for line in lines:
+        st = line.strip()
+        if st.startswith('PARAM('):
+            name = st[6:].split(',', 1)[0].strip()
+            i = line.find('/*')
+            notes[name] = line[i:] if i >= 0 else ''
+            if at is None:
+                at = len(out)
+            continue
+        out.append(line)
+    if at is None:                                   # no PARAM block yet: after the first comment block
+        at = next((i + 1 for i, l in enumerate(out) if l.strip().endswith('*/')), 0)
+        out[at:at] = ['', '/* ---- site parameters: written by host/bm_params_pull.py from the editor ---- */']
+        at += 2
+    block = []
+    for k, v in sorted(want.items()):
+        line = 'PARAM(%s, %s)' % (k, v)
+        if notes.get(k):
+            line = line.ljust(36) + notes[k]
+        block.append(line)
+    out[at:at] = block
+    return '\n'.join(out) + '\n'
+
+
+def apply_tables(m, want, keep_env, limits):
+    """writes the PARAM block and strips the parameter lines from the env; True = something changed"""
+    m.load_tables(TABLES)
+    old_h = {k: float(v) for k, v in m.SITE_PARAMS.items()}
+    _, old_env = env_split(limits)
+    if old_h == {k: float(v) for k, v in want.items()} and not old_env:
+        return False, old_h
+    stamp = time.strftime('%Y%m%d-%H%M%S')
+    text = tables_with_params(want)
+    with open(TABLES + '.tmp', 'w') as f:
+        f.write(text)
+    m.load_tables(TABLES + '.tmp')                   # raises on a bad line or value: nothing replaced
+    if {k: float(v) for k, v in m.SITE_PARAMS.items()} != {k: float(v) for k, v in want.items()}:
+        raise ValueError('bm_tables.h.tmp does not hold the wanted PARAM values')
+    subprocess.run(['cp', '-p', TABLES, '%s.bak-%s' % (TABLES, stamp)], check=True)
+    os.replace(TABLES + '.tmp', TABLES)
+    if old_env:
+        subprocess.run(['cp', '-p', ENV, '%s.bak-%s' % (ENV, stamp)], check=True)
+        with open(ENV + '.tmp', 'w') as f:
+            f.write('\n'.join(keep_env) + '\n')
+        os.replace(ENV + '.tmp', ENV)
+    return True, dict(old_h, **{'env:' + k: v for k, v in old_env.items()})
+
+
+def apply_env(want, keep, old):
+    """the env as before 0.76-py; True = something changed"""
+    if {k: float(v) for k, v in old.items()} == {k: float(v) for k, v in want.items()}:
+        return False
+    stamp = time.strftime('%Y%m%d-%H%M%S')
+    subprocess.run(['cp', '-p', ENV, '%s.bak-%s' % (ENV, stamp)], check=True)
+    text = '\n'.join(keep + ['%s%s=%s' % (PREFIX, k, v) for k, v in sorted(want.items())]) + '\n'
+    with open(ENV + '.tmp', 'w') as f:
+        f.write(text)
+    os.replace(ENV + '.tmp', ENV)
+    return True
+
+
+def restart_batmonitor():
+    leader = subprocess.run(['machinectl', 'show', 'venus', '-p', 'Leader', '--value'],
+                            capture_output=True, text=True, check=True).stdout.strip()
+    subprocess.run(['nsenter', '-t', leader, '-a', 'svc', '-t', '/service/batmonitor'], check=True)
+
+
 def mark(con, row_id, note):
     with con.cursor() as c:
         c.execute("UPDATE bm_param_version SET applied_at = IF(%s LIKE 'rejected%%', NULL, NOW()), applied_note = %s "
@@ -146,10 +245,12 @@ def main():
     tag = '%d %s' % (row['id'], row['sha256'])
     try:
         with open(APPLIED) as f:
-            if f.read().strip() == tag:
-                return
+            done = f.read().split()
     except FileNotFoundError:
-        pass
+        done = []
+    if done[:2] == tag.split() and 'rejected' in done[2:]:
+        return                                       # rejected once, not again
+    first_time = done[:2] != tag.split()
 
     limits = limits_of(m)
     try:
@@ -158,42 +259,32 @@ def main():
         log('version %d rejected: %s' % (row['id'], e))
         mark(con, row['id'], 'rejected: %s' % e)
         with open(APPLIED, 'w') as f:
-            f.write(tag + '\n')
+            f.write(tag + ' rejected\n')
         return
 
-    with open(ENV) as f:
-        lines = f.read().splitlines()
-    keep, old = [], {}
-    for line in lines:
-        k, sep, v = line.partition('=')
-        name = k[len(PREFIX):] if k.startswith(PREFIX) else None
-        if sep and name in limits:
-            old[name] = v.strip()
-        else:
-            keep.append(line)
     want = {k: fmt(v) for k, v in sorted(new.items())}
-    same = {k: float(v) for k, v in old.items()} == {k: float(v) for k, v in want.items()}
-    if same:
-        note = 'unchanged'
+    keep, old = env_split(limits)
+    if has_site_params(m):
+        changed, was = apply_tables(m, want, keep, limits)
+        where = 'bm_tables.h'
     else:
-        stamp = time.strftime('%Y%m%d-%H%M%S')
-        subprocess.run(['cp', '-p', ENV, '%s.bak-%s' % (ENV, stamp)], check=True)
-        text = '\n'.join(keep + ['%s%s=%s' % (PREFIX, k, v) for k, v in want.items()]) + '\n'
-        with open(ENV + '.tmp', 'w') as f:
-            f.write(text)
-        os.replace(ENV + '.tmp', ENV)
-        leader = subprocess.run(['machinectl', 'show', 'venus', '-p', 'Leader', '--value'],
-                                capture_output=True, text=True, check=True).stdout.strip()
-        subprocess.run(['nsenter', '-t', leader, '-a', 'svc', '-t', '/service/batmonitor'], check=True)
-        note = 'ok'
-        log('version %d applied: %s (was %s), batmonitor restarted' % (row['id'], want, old))
+        changed, was = (apply_env(want, keep, old) if first_time else False), old   # as before: only a new version
+        where = 'env'
+    if changed:
+        restart_batmonitor()
+        note = 'ok (%s)' % where
+        log('version %d %s: %s %s (was %s), batmonitor restarted'
+            % (row['id'], 'applied' if first_time else 're-applied', where, want, was))
+    else:
+        note = 'unchanged (%s)' % where
     if ignored:
         note += '; ignored (not in batmonitor %s): %s' % (running_version(), ' '.join(ignored))
-    mark(con, row['id'], note)
-    with open(APPLIED, 'w') as f:
-        f.write(tag + '\n')
-    if same:
-        log('version %d: same values as the env, no restart' % row['id'])
+    if first_time or changed:
+        mark(con, row['id'], note)
+        with open(APPLIED, 'w') as f:
+            f.write(tag + '\n')
+        if not changed:
+            log('version %d: same values as the %s, no restart' % (row['id'], where))
 
 
 if __name__ == '__main__':

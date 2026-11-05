@@ -3,7 +3,9 @@
 //   read: everyone, no password (parameters, active version, history, source / mode matrix read-only)
 //   write: only VPN clients (10.8.0.0/24, user: "nur vpn devices duerfen schreiben"); a save is a new row in
 //   wagodb.bm_param_version. The Pi pulls the newest row itself (host/bm_params_pull.py, cron), checks it against the
-//   limits of its own bm_logic.py and writes /data/batmonitor/env - nothing is pushed into Venus from here.
+//   limits of its own bm_logic.py and writes the PARAM lines of /data/batmonitor/bm_tables.h (batmonitor >= 0.76-py,
+//   the env then keeps only switches like LIVE / PYTHON; older versions: /data/batmonitor/env) - nothing is pushed
+//   into Venus from here. The newest accepted version is what the Pi runs: the Pi checks it every 5 min.
 // Definitions: always the newest wagodb.bm_param_schema row. The Pi writes it (host/bm_params_pull.py) from the
 // DEPLOYED bm_logic.py and the running version, so after a batmonitor update the form and the matrices follow by
 // themselves within one pull run (5 min); overrides of parameters the new version no longer has show as obsolete.
@@ -110,7 +112,7 @@ button { background:var(--acc); color:#111; border:0; border-radius:6px; padding
 code { color:var(--acc); }
 </style></head><body>
 <h1>batmonitor parameters</h1>
-<div class="muted">schema <?= (int)$schema['id'] ?> of batmonitor <?= h($schema['bm_version']) ?>, published by the Pi <?= h($schema['created_at']) ?> · the Pi pulls the newest version every 5 min and checks it against its own limits ·
+<div class="muted">schema <?= (int)$schema['id'] ?> of batmonitor <?= h($schema['bm_version']) ?>, published by the Pi <?= h($schema['created_at']) ?> · the Pi pulls the newest version every 5 min, checks it against its own limits and writes it into the PARAM lines of bm_tables.h ·
 <?= $can_write ? '<span class="ok">write access (VPN ' . h($_SERVER['REMOTE_ADDR']) . ')</span>' : 'read only - writing only from the VPN' ?> · <a href="bm_flow.php" style="color:var(--acc)">decision flow</a></div>
 <?php if ($live): ?><div class="muted">live rules <?= h($live['ts']) ?>: L1 <code><?= h($live['bm_l1_rule']) ?></code> · L2 <code><?= h($live['bm_l2_rule']) ?></code> · L3 <code><?= h($live['bm_l3_rule']) ?></code></div><?php endif ?>
 <?php if ($msg): ?><div class="box ok"><?= h($msg) ?></div><?php endif ?>
