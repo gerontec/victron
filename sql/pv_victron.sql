@@ -176,3 +176,10 @@ ALTER TABLE pv_victron
   ADD COLUMN ac_in_l2_i DECIMAL(6,2) NULL COMMENT 'AC-in L2 current (A), + = from the grid',
   ADD COLUMN ac_in_l3_i DECIMAL(6,2) NULL COMMENT 'AC-in L3 current (A), + = from the grid',
   ALGORITHM=INSTANT;
+
+-- 2026-11-05: logic id of batmonitor per minute (victron2db bm_logic_id: sha256[:12] of /data/batmonitor bm_logic.py,
+-- bm_tables.h, batmonitor.py, env). User: show only states that are possible now -> docs/gen_docs.py takes only the
+-- rows with the latest id. Rows from the 13:20:09 restart (0.75-py, 1 A top hold) on were set to that id.
+ALTER TABLE pv_victron
+  ADD COLUMN bm_logic CHAR(12) NULL COMMENT 'batmonitor logic id: sha256[:12] of bm_logic.py, bm_tables.h, batmonitor.py, env on /data/batmonitor (2026-11-05)' AFTER bm_d1_id,
+  ALGORITHM=INSTANT;

@@ -21,6 +21,7 @@ and only its active / acknowledged state follows (2026-10-20).
 """
 
 import json
+import hashlib
 import os
 import sys
 import time
@@ -33,6 +34,9 @@ MQTT_HOST = '127.0.0.1'
 COLLECT_SECONDS = 5
 DB_CNF = os.path.expanduser('~/.victron2db.cnf')
 BM_STATE = '/data/batmonitor/state.json'
+BM_DIR = '/data/batmonitor'
+# 2026-11-05 (user: observed states only within one logic): short hash of what decides the rule texts
+BM_LOGIC_FILES = ('bm_logic.py', 'bm_tables.h', 'batmonitor.py', 'env')
 BM_STATE_MAX_AGE = 120   # s
 BM_STACKS = (('s1', 'STACK1_MUST'), ('s2', 'STACK2_PYTES'))
 EBOX_STAT = '/home/pi/sofar/ebox_stat.json'
@@ -210,10 +214,27 @@ def build_row(portal_id, values):
 	return row
 
 
+def bm_logic_id():
+	"""sha256[:12] over BM_LOGIC_FILES in BM_DIR (a missing file counts as empty), None without bm_logic.py.
+	Every change of the code, the tables or the env gives a new id, so docs/gen_docs.py shows only states seen
+	with the logic that runs now."""
+	h = hashlib.sha256()
+	found = False
+	for name in BM_LOGIC_FILES:
+		try:
+			with open(os.path.join(BM_DIR, name), 'rb') as f:
+				data = f.read()
+			found = found or name == 'bm_logic.py'
+		except OSError:
+			data = b''
+		h.update(name.encode() + b'\0' + data + b'\0')
+	return h.hexdigest()[:12] if found else None
+
+
 def batmonitor_columns():
 	"""bm_* columns from the batmonitor state file, all None if it is missing or stale"""
 	cols = {f'bm_l{ph}_{k}': None for ph in (1, 2, 3) for k in ('sp_w', 'rule')}
-	cols.update({'bm_balance_lead': None, 'bm_surplus_w': None, 'bm_d1_id': None})
+	cols.update({'bm_balance_lead': None, 'bm_surplus_w': None, 'bm_d1_id': None, 'bm_logic': None})
 	cols.update({f'bm_{s}_{k}': None for s, _ in BM_STACKS for k in ('prot', 'force', 'chg_avg5_w', 'full_at')})
 	try:
 		with open(BM_STATE) as f:
@@ -228,6 +249,7 @@ def batmonitor_columns():
 	cols['bm_balance_lead'] = st.get('balance_lead')
 	cols['bm_surplus_w'] = st.get('surplus_w')
 	cols['bm_d1_id'] = st.get('d1_id')                          # batmonitor >= 0.60-c: D1 cell as a bit mask
+	cols['bm_logic'] = bm_logic_id()
 	for s, name in BM_STACKS:
 		cols[f'bm_{s}_prot'] = st.get('prot', {}).get(name)
 		cols[f'bm_{s}_force'] = st.get('force', {}).get(name)

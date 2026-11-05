@@ -13,7 +13,9 @@ gen_docs.py - the batmonitor diagrams in docs/.
 3. Renders every docs/*.dot (also the hand-written control_flow / charge_flow / discharge_flow / wp_matrix / opl_flow)
    to .pdf and .png.
 
-usage: python3 docs/gen_docs.py [--no-render] [--no-db] [--since 2026-10-08 (default) | --days N] [--db-host HOST]
+usage: python3 docs/gen_docs.py [--no-render] [--no-db] [--since 2026-10-08 (default) | --days N] [--all-logic] [--db-host HOST]
+   By default only the rows of the batmonitor logic that runs now (pv_victron.bm_logic of the latest row): the page
+   shows only states that are possible now and starts again after every change of code, tables or env.
    The observed states page starts at the first minute with logged rules (batmonitor live 08.10.2026 ~11:34) at the
    earliest; a minute after that without a row or without the rules L1..L3 counts as the state "logger off".
 """
@@ -303,7 +305,7 @@ LOGGER_OFF = ("logger off",)                          # the state of a minute wi
 D1_BITS = ["night", "wp_on", "b1_above_min", "b1_ge_release", "winter", "b1_dis"]  # bm_d1_id bits 0..5, bit 6 bat1_first
 
 
-def observed(days, host, start=None):
+def observed(days, host, start=None, all_logic=False):
     """the last `days` local days of wagodb.pv_victron -> dict for observed_states.dot, None without the DB"""
     try:
         import pymysql
@@ -317,21 +319,36 @@ def observed(days, host, start=None):
     if start:                                               # --since YYYY-MM-DD overrides --days
         since = datetime.datetime.strptime(start, "%Y-%m-%d")
     with con.cursor() as c:
-        c.execute("SELECT ts, bm_d1_id, bm_l1_rule, bm_l2_rule, bm_l3_rule FROM pv_victron WHERE ts >= %s ORDER BY ts",
+        c.execute("SELECT ts, bm_d1_id, bm_l1_rule, bm_l2_rule, bm_l3_rule, bm_logic FROM pv_victron WHERE ts >= %s "
+                  "ORDER BY ts",
                   (since,))
         rows = c.fetchall()
     con.close()
-    first = next((r[0] for r in rows if all(r[2:5])), None)  # the page starts at the first logged rule (batmonitor
-    if first is None:                                       # live 08.10.2026 ~11:34), not as logger off before it
-        return None
+    # user 2026-11-05: only states that are possible now - only the rows of the logic that runs now (pv_victron.bm_logic
+    # of the latest row, from victron2db), minutes of another logic count neither as a state nor as logger off.
+    # --all-logic: the whole history as before (from the first logged rule, batmonitor live 08.10.2026 ~11:34)
+    logic = None
+    if not all_logic:
+        logic = next((r[5] for r in reversed(rows) if r[5]), None)
+        if logic is None:
+            print("observed states: no pv_victron.bm_logic yet, page left out (--all-logic for the history)")
+            return None
+        skip = {r[0] for r in rows if r[5] and r[5] != logic}
+        rows = [r for r in rows if r[0] not in skip]
+        first = next(r[0] for r in rows if r[5] == logic)
+    else:
+        skip = set()
+        first = next((r[0] for r in rows if all(r[2:5])), None)
+        if first is None:
+            return None
     rows = [r for r in rows if r[0] >= first]
     since = first
     end = rows[-1][0]
-    expected = int((end - since).total_seconds() // 60) + 1
+    expected = int((end - since).total_seconds() // 60) + 1 - sum(1 for t in skip if since <= t <= end)
     have = {r[0] for r in rows}
     gaps, t, run = [], since, None
     while t <= end:                                         # runs of minutes without a row or without a state
-        r = t in have
+        r = t in have or t in skip
         if not r:
             run = [run[0], t] if run and run[1] == t - datetime.timedelta(minutes=1) else [t, t]
             if not gaps or gaps[-1][0] != run[0]:
@@ -347,7 +364,8 @@ def observed(days, host, start=None):
     days_t = collections.OrderedDict()
     t = since
     while t <= end:                                         # [minutes, logged, D1 cells, rule states] per day
-        days_t.setdefault(t.date(), [0, 0, set(), set()])[0] += 1
+        if t not in skip:
+            days_t.setdefault(t.date(), [0, 0, set(), set()])[0] += 1
         t += datetime.timedelta(minutes=1)
     for r in rr:
         d = days_t[r[0].date()]
@@ -367,7 +385,7 @@ def observed(days, host, start=None):
                           ", ".join(k for k in D1_BITS + ["bat1_first"] if (cell >> (D1_BITS + ["bat1_first"]).index(k)) & 1),
                           L.BM_SRC_NAME[o["src_reason"]], {L.BM_WP_NONE: "none", L.BM_WP_ZERO: "0 W",
                                                             L.BM_WP_MAX: "WP_WINTER_W"}[o["wp_cap"]]))
-    return {"since": since, "end": end, "expected": expected, "rows": len(rows), "logged": len(rr), "ok": len(ok),
+    return {"logic": logic, "since": since, "end": end, "expected": expected, "rows": len(rows), "logged": len(rr), "ok": len(ok),
             "gaps": [g for g in gaps], "days": days_t, "cells": cell_rows, "states": states.most_common()}
 
 
@@ -399,8 +417,9 @@ def gen_observed_dot(o, days):
                     esc(" | ".join(s_))) for s_, n in o["states"]) + "</table>")
     d = ["// generated by docs/gen_docs.py from wagodb.pv_victron - do not edit", "digraph observed {",
          '\tgraph [rankdir=TB, fontname="Helvetica", fontsize=12, labelloc=t, nodesep=0.4, label=<<b>batmonitor: '
-         'observed states %s .. %s</b> (wagodb.pv_victron, one row per minute = the state of the last 5 s cycle;'
-         ' generated %s)>];' % (o["since"].strftime("%d.%m.%Y"), o["end"].strftime("%d.%m.%Y"),
+         'observed states %s %s .. %s</b> (wagodb.pv_victron, one row per minute = the state of the last 5 s cycle;'
+         ' generated %s)>];' % ("of logic %s (only states possible now)," % o["logic"] if o["logic"] else "(all logic versions)",
+                                o["since"].strftime("%d.%m.%Y %H:%M"), o["end"].strftime("%d.%m.%Y %H:%M"),
                                 datetime.datetime.now().strftime("%Y-%m-%d %H:%M")),
          '\tnode [shape=plain, fontname="Helvetica", fontsize=10];',
          "\thead [label=<%s>];" % head, "\tcells [label=<%s>];" % cells, "\tstates [label=<%s>];" % st,
@@ -428,7 +447,8 @@ def arg(name, default):
 if __name__ == "__main__":
     days = int(arg("--days", 4))
     obs = None if "--no-db" in sys.argv else observed(days, arg("--db-host", "192.168.178.218"),
-                                                      arg("--since", None if "--days" in sys.argv else "2026-10-08"))
+                                                      arg("--since", None if "--days" in sys.argv else "2026-10-08"),
+                                                      "--all-logic" in sys.argv)
     if obs:
         gen_observed_dot(obs, days)
         print("observed_states.dot written: %d of %d minutes logged with the rules, %d rule states" % (
