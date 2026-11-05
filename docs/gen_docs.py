@@ -13,7 +13,9 @@ gen_docs.py - the batmonitor diagrams in docs/.
 3. Renders every docs/*.dot (also the hand-written control_flow / charge_flow / discharge_flow / wp_matrix / opl_flow)
    to .pdf and .png.
 
-usage: python3 docs/gen_docs.py [--no-render] [--no-db] [--days 4] [--db-host HOST]
+usage: python3 docs/gen_docs.py [--no-render] [--no-db] [--since 2026-10-08 (default) | --days N] [--db-host HOST]
+   The observed states page starts at the first minute with logged rules (batmonitor live 08.10.2026 ~11:34) at the
+   earliest; a minute after that without a row or without the rules L1..L3 counts as the state "logger off".
 """
 import collections
 import datetime
@@ -297,10 +299,11 @@ def gen_flow_pdf(render_it=True):
 
 
 MEASURED = re.compile(r"\b(FORCE|PROT|CHARGING|LADESPERRE|HOLD)\([^)]*\)")   # measured values, not part of a state
+LOGGER_OFF = ("logger off",)                          # the state of a minute without a row or without the rules
 D1_BITS = ["night", "wp_on", "b1_above_min", "b1_ge_release", "winter", "b1_dis"]  # bm_d1_id bits 0..5, bit 6 bat1_first
 
 
-def observed(days, host):
+def observed(days, host, start=None):
     """the last `days` local days of wagodb.pv_victron -> dict for observed_states.dot, None without the DB"""
     try:
         import pymysql
@@ -311,13 +314,18 @@ def observed(days, host):
         return None
     since = (datetime.datetime.now() - datetime.timedelta(days=days - 1)).replace(hour=0, minute=0, second=0,
                                                                                    microsecond=0)
+    if start:                                               # --since YYYY-MM-DD overrides --days
+        since = datetime.datetime.strptime(start, "%Y-%m-%d")
     with con.cursor() as c:
         c.execute("SELECT ts, bm_d1_id, bm_l1_rule, bm_l2_rule, bm_l3_rule FROM pv_victron WHERE ts >= %s ORDER BY ts",
                   (since,))
         rows = c.fetchall()
     con.close()
-    if not rows:
+    first = next((r[0] for r in rows if all(r[2:5])), None)  # the page starts at the first logged rule (batmonitor
+    if first is None:                                       # live 08.10.2026 ~11:34), not as logger off before it
         return None
+    rows = [r for r in rows if r[0] >= first]
+    since = first
     end = rows[-1][0]
     expected = int((end - since).total_seconds() // 60) + 1
     have = {r[0] for r in rows}
@@ -331,14 +339,25 @@ def observed(days, host):
             else:
                 gaps[-1] = run
         t += datetime.timedelta(minutes=1)
-    ok = [r for r in rows if r[1] is not None and all(r[2:5])]
+    # user 2026-11-05: every minute has a state - one without a row or without the rules L1..L3 is LOGGER_OFF.
+    # The rule states count from the first logged rule (08.10.), the D1 cells only where bm_d1_id exists (25.10.)
+    rr = [r for r in rows if all(r[2:5])]
+    ok = [r for r in rr if r[1] is not None]
     state = lambda r: tuple(MEASURED.sub(r"\1", x) for x in r[2:5])
     days_t = collections.OrderedDict()
-    for r in ok:
-        d = days_t.setdefault(r[0].date(), [0, set(), set()])
-        d[0] += 1
-        d[1].add(r[1])
-        d[2].add(state(r))
+    t = since
+    while t <= end:                                         # [minutes, logged, D1 cells, rule states] per day
+        days_t.setdefault(t.date(), [0, 0, set(), set()])[0] += 1
+        t += datetime.timedelta(minutes=1)
+    for r in rr:
+        d = days_t[r[0].date()]
+        d[1] += 1
+        if r[1] is not None:
+            d[2].add(r[1])
+        d[3].add(state(r))
+    states = collections.Counter(state(r) for r in rr)
+    if expected > len(rr):
+        states[LOGGER_OFF] = expected - len(rr)
     cells = collections.Counter(r[1] for r in ok)
     cell_rows = []
     for cell, n in cells.most_common():
@@ -348,23 +367,24 @@ def observed(days, host):
                           ", ".join(k for k in D1_BITS + ["bat1_first"] if (cell >> (D1_BITS + ["bat1_first"]).index(k)) & 1),
                           L.BM_SRC_NAME[o["src_reason"]], {L.BM_WP_NONE: "none", L.BM_WP_ZERO: "0 W",
                                                             L.BM_WP_MAX: "WP_WINTER_W"}[o["wp_cap"]]))
-    return {"since": since, "end": end, "expected": expected, "rows": len(rows), "ok": len(ok),
-            "gaps": [g for g in gaps], "days": days_t, "cells": cell_rows,
-            "states": collections.Counter(state(r) for r in ok).most_common()}
+    return {"since": since, "end": end, "expected": expected, "rows": len(rows), "logged": len(rr), "ok": len(ok),
+            "gaps": [g for g in gaps], "days": days_t, "cells": cell_rows, "states": states.most_common()}
 
 
 def gen_observed_dot(o, days):
     tab = '<table border="0" cellborder="1" cellspacing="0" cellpadding="3" bgcolor="#ffffff">'
-    cov = 100.0 * o["ok"] / o["expected"]
+    off = o["expected"] - o["logged"]
     g = "".join("<tr><td>%s .. %s</td><td>%d min</td></tr>" % (a.strftime("%d.%m. %H:%M"), b.strftime("%H:%M"),
                 int((b - a).total_seconds() // 60) + 1) for a, b in o["gaps"]) or '<tr><td colspan="2">none</td></tr>'
-    day = "".join("<tr><td>%s</td><td>%d</td><td>%d</td><td>%d</td></tr>" % (d.strftime("%a %d.%m."), v[0], len(v[1]),
-                  len(v[2])) for d, v in o["days"].items())
-    head = (tab + '<tr><td colspan="4" bgcolor="#dbe8fb"><b>coverage</b> %s .. %s: %d of %d minutes with a state '
-            '(%.2f %%)</td></tr><tr><td><b>day</b></td><td><b>minutes</b></td><td><b>D1 cells</b></td>'
-            '<td><b>rule states</b></td></tr>%s<tr><td colspan="4"><b>gaps</b> (minutes without a row)</td></tr>'
-            '<tr><td colspan="4">%s</td></tr></table>') % (
-        o["since"].strftime("%d.%m. %H:%M"), o["end"].strftime("%d.%m. %H:%M"), o["ok"], o["expected"], cov, day,
+    day = "".join("<tr><td>%s</td><td>%d</td><td>%d</td><td>%s</td><td>%d</td></tr>" % (
+                  d.strftime("%a %d.%m."), v[1], v[0] - v[1], len(v[2]) or "-", len(v[3])) for d, v in o["days"].items())
+    head = (tab + '<tr><td colspan="5" bgcolor="#dbe8fb"><b>coverage</b> %s .. %s: %d minutes, %d logged with the rules'
+            ' (%.2f %%), %d logger off, %d with a D1 cell (bm_d1_id since 25.10.)</td></tr><tr><td><b>day</b></td>'
+            '<td><b>logged</b></td><td><b>logger off</b></td><td><b>D1 cells</b></td>'
+            '<td><b>rule states</b></td></tr>%s<tr><td colspan="5"><b>gaps</b> (minutes without a row)</td></tr>'
+            '<tr><td colspan="5">%s</td></tr></table>') % (
+        o["since"].strftime("%d.%m. %H:%M"), o["end"].strftime("%d.%m. %H:%M"), o["expected"], o["logged"],
+        100.0 * o["logged"] / o["expected"], off, o["ok"], day,
         "<br/>".join(re.findall(r"<td>(.*?)</td><td>(.*?)</td>", g) and
                      ["%s  %s" % x for x in re.findall(r"<td>(.*?)</td><td>(.*?)</td>", g)] or ["none"]))
     cells = (tab + '<tr><td colspan="6" bgcolor="#dbe8fb"><b>D1 cells</b> (pv_victron.bm_d1_id) through the D1 tables'
@@ -373,14 +393,15 @@ def gen_observed_dot(o, days):
              + "".join("<tr><td>%d</td><td>%s</td><td>%d</td><td align=\"left\">%s</td><td>%s</td><td>%s</td></tr>"
                        % (c, b, n, esc(t), s_, w) for c, b, n, t, s_, w in o["cells"]) + "</table>")
     st = (tab + '<tr><td colspan="3" bgcolor="#dbe8fb"><b>rule states</b> L1 | L2 | L3 (measured values in brackets '
-          'removed), %d different</td></tr><tr><td><b>minutes</b></td><td><b>%%</b></td><td><b>L1 | L2 | L3</b></td></tr>'
-          % len(o["states"])
-          + "".join('<tr><td>%d</td><td>%.1f</td><td align="left">%s</td></tr>' % (n, 100.0 * n / o["ok"],
+          'removed), %d different incl. logger off (no row / no rules)</td></tr><tr><td><b>minutes</b></td><td><b>%%</b></td>'
+          '<td><b>L1 | L2 | L3</b></td></tr>' % len(o["states"])
+          + "".join('<tr><td>%d</td><td>%.1f</td><td align="left">%s</td></tr>' % (n, 100.0 * n / o["expected"],
                     esc(" | ".join(s_))) for s_, n in o["states"]) + "</table>")
     d = ["// generated by docs/gen_docs.py from wagodb.pv_victron - do not edit", "digraph observed {",
          '\tgraph [rankdir=TB, fontname="Helvetica", fontsize=12, labelloc=t, nodesep=0.4, label=<<b>batmonitor: '
-         'observed states, last %d days</b> (wagodb.pv_victron, one row per minute = the state of the last 5 s cycle;'
-         ' generated %s)>];' % (days, datetime.datetime.now().strftime("%Y-%m-%d %H:%M")),
+         'observed states %s .. %s</b> (wagodb.pv_victron, one row per minute = the state of the last 5 s cycle;'
+         ' generated %s)>];' % (o["since"].strftime("%d.%m.%Y"), o["end"].strftime("%d.%m.%Y"),
+                                datetime.datetime.now().strftime("%Y-%m-%d %H:%M")),
          '\tnode [shape=plain, fontname="Helvetica", fontsize=10];',
          "\thead [label=<%s>];" % head, "\tcells [label=<%s>];" % cells, "\tstates [label=<%s>];" % st,
          "\thead -> cells -> states [style=invis];", "}"]
@@ -406,11 +427,12 @@ def arg(name, default):
 
 if __name__ == "__main__":
     days = int(arg("--days", 4))
-    obs = None if "--no-db" in sys.argv else observed(days, arg("--db-host", "192.168.178.218"))
+    obs = None if "--no-db" in sys.argv else observed(days, arg("--db-host", "192.168.178.218"),
+                                                      arg("--since", None if "--days" in sys.argv else "2026-10-08"))
     if obs:
         gen_observed_dot(obs, days)
-        print("observed_states.dot written: %d of %d minutes with a state, %d rule states" % (
-            obs["ok"], obs["expected"], len(obs["states"])))
+        print("observed_states.dot written: %d of %d minutes logged with the rules, %d rule states" % (
+            obs["logged"], obs["expected"], len(obs["states"])))
     elif os.path.exists(os.path.join(DOCS, "observed_states.dot")):
         os.remove(os.path.join(DOCS, "observed_states.dot"))
     dead = gen_tables_dot()
