@@ -76,6 +76,8 @@ TH_KI = 0.5                    # W per mV and s
 TH_TRACK_W = 200.0             # above the target: the ceiling at most the measured AC-in + this (no windup)
 TH_FAST_MV = 20.0              # more than this above the target: the ceiling x TH_FAST_FACTOR per cycle
 TH_FAST_FACTOR = 0.7
+TH_IKI = 2.0                   # 0.75-py: W AC per A and s, battery current loop of TOP_HOLD_MAX_A
+TH_IDLE_W = 40.0               # 0.75-py: idle of one MultiPlus in mode 3 (measured at the MUST), start value of that loop
 TH_NEAR_V = 0.05               # the spread end counts only with the highest cell at most this below the target
 BM_FC_SLOTS = 24
 # D5 DO4 pulse (0.46-c)
@@ -210,6 +212,7 @@ BM_PARAMS = [
     Param("TOP_HOLD_STACK", "top_hold_stack", 0, 0, 2, "", "top hold (0.73-c): 1 = STACK1, 2 = STACK2, 0 = off. Its charge is capped so the highest cell stays at TOP_HOLD_CELL_V (no BMS CCL 0 / SoC 100 jump); once there it keeps charging from PV at 100 % SoC (cell balancing), once per day"),
     Param("TOP_HOLD_CELL_V", "top_hold_cell_v", 3.55, 3.40, 3.62, "V", "top hold: target of the highest cell (MUST BMS cuts off at ~3.65 V)"),
     Param("TOP_HOLD_MAX_MIN", "top_hold_max_min", 240, 0, 1440, "min", "top hold: the window (CHARGE at 100 % SoC) ends this long after the highest cell first reached the target (0 = no window, only the cap)"),
+    Param("TOP_HOLD_MAX_A", "top_hold_max_a", 0, 0, 15, "A", "top hold (0.75-py): battery current limit (BMS /Dc/0/Power / U) while the highest cell is within TH_NEAR_V of the target or the window runs, closed loop; a small steady current for cell balancing instead of the full CCL (0 = off)"),
     Param("TOP_HOLD_SPREAD_MV", "top_hold_spread_mv", 30, 0, 500, "mV", "top hold: the window ends earlier once the cell spread stayed at or below this for 60 s near the target (0 = off)"),
 ]
 
@@ -307,6 +310,7 @@ class State:
     th_cap: float = 0.0                         # top hold (0.73-c): charge ceiling of its stack, W AC
     th_t_prev: float = 0.0                      # monotonic s of the last top hold cycle, 0 = off
     th_since: float = 0.0                       # monotonic s since the highest cell reached TOP_HOLD_CELL_V, 0 = not
+    th_icap: float = -1.0                       # top hold (0.75-py): current loop ceiling W AC, -1 = not running
     th_spread_since: float = 0.0                # monotonic s since the cell spread is down at the top, 0 = not
     th_done: int = 0                            # window over for today
     th_yday: int = -1                           # its local day
@@ -874,6 +878,7 @@ def chain_top(cfg, inp, st, out, c):
         st.th_since = st.th_spread_since = 0.0
     if b < 0 or b >= NBANK:
         st.th_cap = st.th_t_prev = st.th_since = st.th_spread_since = 0.0
+        st.th_icap = -1.0
         return
     cap = ac = 0.0
     for p in BM_BANKS[b].phases:
@@ -893,6 +898,21 @@ def chain_top(cfg, inp, st, out, c):
             st.th_cap *= TH_FAST_FACTOR
         st.th_cap += TH_KI * e * dt
     st.th_cap = fmax(0.0, fmin(cap, st.th_cap))
+    # 0.75-py (user 2026-11-05: "16 A ist zuviel", 1 A): near the top the stack charge follows TOP_HOLD_MAX_A at the
+    # battery; integrates up only while this loop binds (no windup behind the cell loop), down always
+    near = cell and inp.cell_max[b] >= cfg.top_hold_cell_v - TH_NEAR_V
+    if cfg.top_hold_max_a > 0 and (near or (st.th_since > 0 and not st.th_done)):
+        volt = inp.volt[b] if inp.volt_ok[b] and inp.volt[b] > 0 else BM_NOMINAL_V
+        if st.th_icap < 0:
+            st.th_icap = cfg.top_hold_max_a * volt / cfg.charge_eff + TH_IDLE_W * len(BM_BANKS[b].phases)
+        elif inp.power_ok[b]:
+            e_a = cfg.top_hold_max_a - inp.power[b] / volt
+            if e_a < 0 or st.th_icap <= st.th_cap:
+                st.th_icap += TH_IKI * e_a * dt
+        st.th_icap = fmax(0.0, fmin(cap, st.th_icap))
+        st.th_cap = fmin(st.th_cap, st.th_icap)
+    else:
+        st.th_icap = -1.0
     out.th_cap = st.th_cap
     for p in BM_BANKS[b].phases:
         share = st.th_cap / len(BM_BANKS[b].phases)
@@ -900,8 +920,9 @@ def chain_top(cfg, inp, st, out, c):
         if out.th_bind[p]:
             out.chg_cap[p] = share
             out.ccl_bind[p] = 0
+    # 0.75-py: with TOP_HOLD_MAX_A the window starts already near the target (a full BMS at SoC 100 holds the cell below it)
     if cell and not st.th_done and st.th_since <= 0 and cfg.top_hold_max_min > 0 \
-            and inp.cell_max[b] >= cfg.top_hold_cell_v:
+            and (inp.cell_max[b] >= cfg.top_hold_cell_v or (near and cfg.top_hold_max_a > 0)):
         st.th_since = inp.now
     if st.th_since > 0 and not st.th_done:
         if (cfg.top_hold_spread_mv > 0 and cell and inp.cell_ok[b]
