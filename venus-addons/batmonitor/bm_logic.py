@@ -590,14 +590,15 @@ BM_MODE_RULE = {
 }
 
 
-# Decision tables: c/bm_tables.h (format see there), read once at import. A table is (columns, rows); each row holds
+# Decision tables: bm_tables.h (format see there), read once at import. A table is (columns, rows); each row holds
 # one condition per column (1, 0, or _ = any), then the outputs. Hit policy FIRST: the first matching row wins.
 _ = None
 KEEP = "KEEP"
 LEAD_NONE, LEAD_NEW, LEAD_END = "NONE", "NEW", "END"     # DLEAD outputs (LEAD_KEEP is KEEP)
-TABLES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "c", "bm_tables.h")
+TABLES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bm_tables.h")   # 0.76-py: out of c/
 
 _TABLE_RE = re.compile(r'^TABLE\((\w+),\s*"([\w ]+)",\s*"([\w ]+)"\)\s*(/\*.*\*/)?$')
+_PARAM_RE = re.compile(r'^PARAM\((\w+),\s*(-?[0-9.]+)\)\s*(/\*.*\*/)?$')
 _ROW_RE = re.compile(r'^ROW\((\w+),\s*"([01\- ]+)",\s*([\w, ]+)\)\s*(/\*.*\*/)?$')
 
 
@@ -613,10 +614,27 @@ def _output(word, where):
     raise ValueError("%s: unknown output %r" % (where, word))
 
 
+SITE_PARAMS = {}   # 0.76-py: PARAM lines of bm_tables.h, name -> value; batmonitor.py applies them (Cfg() keeps the defaults)
+
+
+def _site_param(name, text, where):
+    """one PARAM line: the name must be in BM_PARAMS, the value inside its range, each name once"""
+    p = next((q for q in BM_PARAMS if q.name == name), None)
+    if p is None:
+        raise ValueError("%s: PARAM %s is not in BM_PARAMS" % (where, name))
+    if name in SITE_PARAMS:
+        raise ValueError("%s: PARAM %s set twice" % (where, name))
+    v = float(text)
+    if not (p.min <= v <= p.max):
+        raise ValueError("%s: PARAM %s=%g outside %g..%g %s" % (where, name, v, p.min, p.max, p.unit))
+    SITE_PARAMS[name] = v
+
+
 def load_tables(path=TABLES_FILE):
     """bm_tables.h -> {name: (columns, rows)}. Refuses every line that is not TABLE, ROW, a comment or blank, and
     checks per table: conditions = columns, outputs = output names, last row all "-"."""
     tables, outs, comment = {}, {}, False
+    SITE_PARAMS.clear()
     with open(path) as f:
         for n, line in enumerate(f, 1):
             s, where = line.strip(), "%s:%d" % (os.path.basename(path), n)
@@ -628,6 +646,10 @@ def load_tables(path=TABLES_FILE):
             if s.startswith("/*"):
                 comment = "*/" not in s
                 continue
+            m = _PARAM_RE.match(s)
+            if m:
+                _site_param(m.group(1), m.group(2), where)
+                continue
             m = _TABLE_RE.match(s)
             if m:
                 if m.group(1) in tables:
@@ -637,7 +659,7 @@ def load_tables(path=TABLES_FILE):
                 continue
             m = _ROW_RE.match(s)
             if not m:
-                raise ValueError("%s: neither TABLE, ROW nor a comment: %s" % (where, s))
+                raise ValueError("%s: neither PARAM, TABLE, ROW nor a comment: %s" % (where, s))
             if m.group(1) not in tables:
                 raise ValueError("%s: ROW of %s before its TABLE" % (where, m.group(1)))
             cols, rows = tables[m.group(1)]

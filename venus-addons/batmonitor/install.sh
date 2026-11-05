@@ -8,8 +8,8 @@ DATA="${1:-/data}"
 HERE=$(dirname "$(readlink -f "$0")")
 D="$DATA/batmonitor"
 mkdir -p "$D/service/log" "$D/c"
-cp "$HERE/batmonitor.py" "$HERE/bm_logic.py" "$HERE/bm_parse.py" "$D/"
-cp -r "$HERE/c/batmonitor.c" "$HERE/c/bm_logic.c" "$HERE/c/bm_logic.h" "$HERE/c/bm_tables.h" "$HERE/c/bm_parse.c" "$HERE/c/bm_parse.h" \
+cp "$HERE/batmonitor.py" "$HERE/bm_logic.py" "$HERE/bm_tables.h" "$HERE/bm_parse.py" "$D/"
+cp -r "$HERE/c/batmonitor.c" "$HERE/c/bm_logic.c" "$HERE/c/bm_logic.h" "$HERE/c/bm_parse.c" "$HERE/c/bm_parse.h" \
 	"$HERE/c/Makefile" "$HERE/c/include" "$HERE/c/tests" "$D/c/"
 cp "$HERE/service/run" "$D/service/run"
 cp "$HERE/service/log/run" "$D/service/log/run"

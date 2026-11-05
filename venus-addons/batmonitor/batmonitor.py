@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bm_logic as L  # noqa: E402
 import bm_parse  # noqa: E402
 
-VERSION = "0.75-py"
+VERSION = "0.76-py"
 INVERTER_TOPIC = "inverter/power_grid_exchange/json"
 FAST_HOLD_S = 15.0   # s: while a sofar_fast sample is this fresh, pivot2db samples on the topic are ignored (0.71)
 R290_TOPIC = "r290/heatpump/all"
@@ -106,9 +106,14 @@ class Batmonitor:
 
     # ---- parameters ----------------------------------------------------------------------------------------
     def load_params(self):
-        """BATMONITOR_<NAME> overrides the default; out of range or not a number -> default stays"""
+        """PARAM in bm_tables.h (0.76-py, checked at import) overrides the default, BATMONITOR_<NAME> overrides both;
+        an env value out of range or not a number -> the bm_tables.h / default value stays"""
         parts = []
         for i, p in enumerate(L.BM_PARAMS):
+            src = ""
+            if p.name in L.SITE_PARAMS:
+                self.cfg.set_param(i, L.SITE_PARAMS[p.name])
+                src = "+"
             v = os.environ.get("BATMONITOR_" + p.name)
             was_set = False
             if v:
@@ -120,10 +125,10 @@ class Batmonitor:
                 if ok:
                     was_set = True
                 else:
-                    loge("BATMONITOR_%s=%s ignored (allowed %g..%g %s), default %g"
-                         % (p.name, v, p.min, p.max, p.unit, p.default))
-            parts.append("%s=%g%s" % (p.name, getattr(self.cfg, p.field), "*" if was_set else ""))
-        log("params (* = from env): " + " ".join(parts))
+                    loge("BATMONITOR_%s=%s ignored (allowed %g..%g %s), stays %g"
+                         % (p.name, v, p.min, p.max, p.unit, getattr(self.cfg, p.field)))
+            parts.append("%s=%g%s" % (p.name, getattr(self.cfg, p.field), "*" if was_set else src))
+        log("params (+ = bm_tables.h, * = env): " + " ".join(parts))
 
     # ---- D-Bus ---------------------------------------------------------------------------------------------
     def get(self, service, path):

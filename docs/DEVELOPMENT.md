@@ -4,7 +4,7 @@ How decision code in this repo (batmonitor first of all) is changed. The model i
 discharge matrix (`BM_SRC_RULE` in `venus-addons/batmonitor/c/bm_logic.c`); see
 [discharge_flow.pdf](discharge_flow.pdf) for the discharge path, [charge_flow.pdf](charge_flow.pdf) for the charge path and
 [control_flow.pdf](control_flow.pdf) for the overview; the decision tables themselves (generated from
-`venus-addons/batmonitor/c/bm_tables.h` by `python3 docs/gen_docs.py`, which also renders every `.dot` here):
+`venus-addons/batmonitor/bm_tables.h` by `python3 docs/gen_docs.py`, which also renders every `.dot` here):
 [decision_tables.pdf](decision_tables.pdf) and [decision_flow.pdf](decision_flow.pdf).
 
 The goal is robustness through simplicity: every decision has a name, every rule has a table row, every table has an

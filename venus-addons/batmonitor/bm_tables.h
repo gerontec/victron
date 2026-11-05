@@ -1,8 +1,14 @@
 /*
- * bm_tables.h - the batmonitor decisions as tables. bm_logic.py reads this file; keep the format:
+ * bm_tables.h - the batmonitor decisions as tables and the site parameters. bm_logic.py reads this file; keep the format:
  *
+ *   PARAM(NAME, value)
  *   TABLE(name, "column column ...", "output output ...")
  *   ROW(name,   " 1      0      -   ", OUTPUT[, OUTPUT])
+ *
+ * PARAM (0.76-py): the value this site runs with, for a name of BM_PARAMS in bm_logic.py (default, range, unit and
+ * meaning stay there). Order: default in bm_logic.py < PARAM here < env BATMONITOR_<NAME> on the Pi (switches like
+ * LIVE / PYTHON and short tests only). An unknown name or a value outside the range stops batmonitor at start.
+ * The log line "params" marks + = from here, * = from env.
  *
  * One condition per column, separated by spaces (aligned under the column names):
  *   1 = the condition is true, 0 = false, - = any.
@@ -10,8 +16,20 @@
  * The last row of every table is all "-": it always yields a result.
  * Outputs: numbers, KEEP (the state stays as it was) or the names BM_SRC_* / BM_WP_* / BM_M_* / LEAD_*.
  * Comments: C block comments on their own lines or at the end of a ROW. Nothing else (no #if, no macros,
- * no expressions): bm_logic.py refuses every other line. Check after a change: make -C c py-compare, and the table test.
+ * no expressions): bm_logic.py refuses every other line. Check after a change: python3 -c "import bm_logic".
  */
+
+/* ---- site parameters (until 2026-11-05 in the Pi env /data/batmonitor/env) ---- */
+PARAM(CHARGE_EFF, 0.90)             /* 2026-10-09: at 0.93 the ceiling bound (MUST BMS saw only 66 A); AC->BMS 0.87-0.91 */
+PARAM(SOC_MIN, 8)
+PARAM(SOC_MIN_RELEASE, 10)
+PARAM(SOC_FORCE, 0)
+PARAM(CELL_FORCE_V, 3.05)           /* 2026-10-24: at 49.16 V on L1 the weakest MUST cell was 2.997 V; stop before the BMS cut-off */
+PARAM(CELL_FORCE_RELEASE_V, 3.20)
+PARAM(CHARGE_RESERVE, 100)          /* 0.72-c: charge 100 W below the surplus; 0.74-c winter export cap */
+PARAM(TOP_HOLD_STACK, 1)            /* 0.73-c: top hold on STACK1 MUST (cell 8 high, cell 14 low) */
+PARAM(HOUSE_ACOUT, 0)
+PARAM(WP_WINTER_W, 100)
 
 /* D1: Sofar first latch. Off at or below BAT1_SOC_MIN, on again from BAT1_SOC_MIN + 2 %. */
 TABLE(D1_LATCH, "b1_above_min bat1_first b1_ge_release", "bat1_first")
