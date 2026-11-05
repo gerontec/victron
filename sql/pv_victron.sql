@@ -196,3 +196,7 @@ CREATE TABLE IF NOT EXISTS pv_victron_foreign_change (
   PRIMARY KEY (id),
   KEY (ts)
 ) ENGINE=InnoDB COMMENT='Venus settings changed from outside (Venus GUI, settings web, ...), written by victron2db.py';
+
+-- 2026-11-05: MultiPlus-II configuration backups as files (readers/rvms_archive.py creates the table, see DDL there):
+-- vebus_config_backup (file_sha256 unique, settings_sha256 = same configuration, content MEDIUMBLOB = the .rvms).
+-- Restore one: SELECT content FROM vebus_config_backup WHERE id = ..  -> write the bytes to a .rvms file.
