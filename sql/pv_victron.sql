@@ -183,3 +183,16 @@ ALTER TABLE pv_victron
 ALTER TABLE pv_victron
   ADD COLUMN bm_logic CHAR(12) NULL COMMENT 'batmonitor logic id: sha256[:12] of bm_logic.py, bm_tables.h, batmonitor.py, env on /data/batmonitor (2026-11-05)' AFTER bm_d1_id,
   ALGORITHM=INSTANT;
+
+-- 2026-11-05: changes of watched Venus settings from outside (victron2db.py WATCH, user: no mail, only log in the db)
+CREATE TABLE IF NOT EXISTS pv_victron_foreign_change (
+  id        INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  ts        DATETIME NOT NULL COMMENT 'minute victron2db saw it (local time)',
+  path      VARCHAR(80) NOT NULL COMMENT 'com.victronenergy.settings path',
+  expected  VARCHAR(20) NOT NULL COMMENT 'value our software keeps',
+  seen      VARCHAR(20) NULL COMMENT 'value seen now',
+  previous  VARCHAR(20) NULL COMMENT 'value seen before, NULL = first run',
+  kind      ENUM('foreign','restored') NOT NULL COMMENT 'foreign = differs from expected, restored = back to expected',
+  PRIMARY KEY (id),
+  KEY (ts)
+) ENGINE=InnoDB COMMENT='Venus settings changed from outside (Venus GUI, settings web, ...), written by victron2db.py';

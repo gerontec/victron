@@ -114,6 +114,16 @@ for col, key in COLUMNS.items():
 	WANTED[key] = col
 BATTERY_PATHS = {path for (service, path) in WANTED if service.startswith('battery')}
 
+# 2026-11-05 (user: "keine mail nur in db loggen, dass eine fremde aenderung entdeckt wurde"): Venus settings our
+# software keeps at one value. Another value = a change from outside (Venus GUI, settings web, ...): one row in
+# pv_victron_foreign_change when it leaves the value ("foreign") and when it is back ("restored"). Nothing is reset.
+# Not watched: /Settings/CGwacs/MaxChargePower, dbus-pcc-grid changes it itself (SOC1 gate).
+WATCH = {
+	('settings', '/Settings/CGwacs/Hub4Mode'): 3,                 # batmonitor sets 3 once at its start
+	('settings', '/Settings/SystemSetup/SharedVoltageSense'): 0,  # off since 2026-10-09 (with SVS L1 was throttled)
+}
+WATCH_STATE = os.path.expanduser('~/.victron2db_watch.json')   # path -> last seen value
+
 
 NOTIFICATION_FIELDS = {	# platform/0/Notifications/<n>/<field> -> pv_victron_notifications column
 	'DateTime': 'notified_at', 'Type': 'type', 'DeviceName': 'device_name', 'Description': 'description',
@@ -136,6 +146,8 @@ def collect():
 		client.subscribe('N/+/battery/#')
 		client.subscribe('N/+/system/0/#')
 		client.subscribe('N/+/settings/0/Settings/CGwacs/AcPowerSetPoint')
+		for _, path in WATCH:
+			client.subscribe('N/+/settings/0' + path)
 		client.subscribe('N/+/platform/0/Notifications/+/+')
 		# Venus only publishes after a keepalive; its portal id is the eth0 MAC (the container shares
 		# the host network), so the keepalive can go out right away
@@ -166,7 +178,7 @@ def collect():
 				first = instances.setdefault(service, instance)
 				if instance != first:
 					return
-			if (service, path) not in WANTED:
+			if (service, path) not in WANTED and (service, path) not in WATCH:
 				return
 		try:
 			v = json.loads(msg.payload).get('value')
@@ -325,6 +337,53 @@ def write_notifications(rows):
 		conn.close()
 
 
+def same(a, b):
+	try:
+		return float(a) == float(b)
+	except (TypeError, ValueError):
+		return a == b
+
+
+def watch_rows(values):
+	"""(event rows, new state): a row when a watched setting differs from its expected value for the first time,
+	changes again while off, or comes back; a setting not received this minute is skipped"""
+	try:
+		with open(WATCH_STATE) as f:
+			last = json.load(f)
+	except (OSError, ValueError):
+		last = {}
+	state, rows = dict(last), []
+	ts = datetime.now().replace(second=0, microsecond=0)
+	for key, want in WATCH.items():
+		if key not in values:
+			continue
+		path, v = key[1], values[key]
+		known = path in last
+		prev = last.get(path)
+		if (not known and not same(v, want)) or (known and not same(v, prev)):
+			rows.append({'ts': ts, 'path': path, 'expected': str(want), 'seen': None if v is None else str(v),
+						 'previous': None if prev is None else str(prev),
+						 'kind': 'restored' if same(v, want) else 'foreign'})
+		state[path] = v
+	return rows, state
+
+
+def write_watch(rows, state):
+	if rows:
+		cols = list(rows[0])
+		sql = (f"INSERT INTO pv_victron_foreign_change ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))})")
+		conn = pymysql.connect(read_default_file=DB_CNF, connect_timeout=10)
+		try:
+			with conn.cursor() as cur:
+				cur.executemany(sql, [[r[c] for c in cols] for r in rows])
+			conn.commit()
+		finally:
+			conn.close()
+	with open(WATCH_STATE + '.tmp', 'w') as f:      # only after the rows are stored: else again next minute
+		json.dump(state, f)
+	os.replace(WATCH_STATE + '.tmp', WATCH_STATE)
+
+
 def main():
 	portal_id, values, notes = collect()
 	notifications = notification_rows(portal_id, notes)
@@ -338,6 +397,9 @@ def main():
 		print(f'{filled} of {len(WANTED)} values')
 		for r in notifications:
 			print(f"notification {r['notified_at']} type {r['type']} {r['device_name']}: {r['description']}")
+		for key, want in WATCH.items():
+			print(f"watch {key[1]}: {values.get(key, 'not received')} (expected {want})")
+		print('watch rows:', watch_rows(values)[0])
 		return
 	if filled == 0:
 		print(f'{row["ts"]} {portal_id}: no Venus values received, nothing written')
@@ -347,6 +409,13 @@ def main():
 		write_notifications(notifications)
 	except pymysql.MySQLError as e:
 		print(f'notifications not written: {e}')
+	try:
+		rows, state = watch_rows(values)
+		write_watch(rows, state)
+		for r in rows:
+			print(f"foreign change {r['kind']}: {r['path']} = {r['seen']} (expected {r['expected']}, was {r['previous']})")
+	except (pymysql.MySQLError, OSError) as e:
+		print(f'watch not written: {e}')
 	print(f'{row["ts"]} {portal_id}: {filled} of {len(WANTED)} values written '
 		  f'(soc={row["soc"]} vebus_state={row["vebus_state"]} ac_in_l1_w={row["ac_in_l1_w"]}), '
 		  f'{len(notifications)} notifications')
