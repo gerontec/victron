@@ -20,15 +20,17 @@
  */
 
 /* ---- site parameters (until 2026-11-05 in the Pi env /data/batmonitor/env) ---- */
-PARAM(CHARGE_EFF, 0.90)             /* 2026-10-09: at 0.93 the ceiling bound (MUST BMS saw only 66 A); AC->BMS 0.87-0.91 */
+PARAM(CELL_FORCE_RELEASE_V, 3.2)
+PARAM(CELL_FORCE_V, 3.05)           /* 2026-10-24: at 49.16 V on L1 the weakest MUST cell was 2.997 V; stop before the BMS cut-off */
+PARAM(CHARGE_EFF, 0.9)              /* 2026-10-09: at 0.93 the ceiling bound (MUST BMS saw only 66 A); AC->BMS 0.87-0.91 */
+PARAM(CHARGE_RESERVE, 100)          /* 0.72-c: charge 100 W below the surplus; 0.74-c winter export cap */
+PARAM(HOUSE_ACOUT, 0)
+PARAM(SOC_FORCE, 0)
 PARAM(SOC_MIN, 8)
 PARAM(SOC_MIN_RELEASE, 10)
-PARAM(SOC_FORCE, 0)
-PARAM(CELL_FORCE_V, 3.05)           /* 2026-10-24: at 49.16 V on L1 the weakest MUST cell was 2.997 V; stop before the BMS cut-off */
-PARAM(CELL_FORCE_RELEASE_V, 3.20)
-PARAM(CHARGE_RESERVE, 100)          /* 0.72-c: charge 100 W below the surplus; 0.74-c winter export cap */
+PARAM(TOP_HOLD_CELL_V, 3.58)
+PARAM(TOP_HOLD_MAX_A, 1)
 PARAM(TOP_HOLD_STACK, 1)            /* 0.73-c: top hold on STACK1 MUST (cell 8 high, cell 14 low) */
-PARAM(HOUSE_ACOUT, 0)
 PARAM(WP_WINTER_W, 100)
 
 /* D1: Sofar first latch. Off at or below BAT1_SOC_MIN, on again from BAT1_SOC_MIN + 2 %. */
