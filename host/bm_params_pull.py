@@ -20,9 +20,17 @@ pushed into Venus. This script, on the Pi host:
      bm_logic.py: the env as before. Backup <file>.bak-<time>, then svc -t batmonitor in Venus.
      Same effective values as before: no restart, applied_note "unchanged"
   4. sets applied_at / applied_note of the row
+  D. decision tables (0.78-py, live DMN editor web/bm_dmn.php, wagodb.bm_dmn_version): the newest row from the
+     editor is checked with the DEPLOYED DMN reader (load_decisions) and bm_selftest.py (random cycles through
+     bm_step with the new tables), then /data/batmonitor/bm_decisions.dmn is replaced (backup .bak-<time>, the last
+     DMN_KEEP kept) and batmonitor restarted. A fresh state.json within RUN_CHECK_S proves it runs, else the old file
+     goes back (rolled back). Any refusal: applied_note "rejected: ...". When the file on the Pi differs from the
+     newest row (a repo deploy, or after a refusal), it is published as a new row with source 'pi', so the editor
+     always opens what runs.
 
 Config /etc/bm-params-pull.conf (root, 600): host=, user=, password=, database= (wagodb on .218).
-Cron: /etc/cron.d/bm-params-pull  */5 * * * * root /usr/local/sbin/bm_params_pull.py >>/var/log/bm_params_pull.log 2>&1
+Cron: /etc/cron.d/bm-params-pull  * * * * * root flock -n /run/bm_params_pull.lock /usr/local/sbin/bm_params_pull.py
+      >>/var/log/bm_params_pull.log 2>&1   (every minute since 2026-11-07, live DMN editor)
 """
 import hashlib
 import importlib.util
@@ -40,6 +48,11 @@ LOGIC = '/data/batmonitor/bm_logic.py'
 TABLES = '/data/batmonitor/bm_tables.h'      # PARAM lines (batmonitor >= 0.76-py)
 STATE = '/data/batmonitor/state.json'         # "version" = the running batmonitor (C port)
 APPLIED = '/data/batmonitor/params.applied'   # "<id> <sha256>" of the last handled version
+DMN = '/data/batmonitor/bm_decisions.dmn'     # decision tables (batmonitor >= 0.78-py)
+SELFTEST = '/data/batmonitor/bm_selftest.py'
+DMN_KEEP = 10                                 # backups of bm_decisions.dmn kept
+DMN_MAX = 2 * 1024 * 1024
+RUN_CHECK_S = 45                              # after a DMN change: state.json must be written again within this
 PREFIX = 'BATMONITOR_'
 
 
@@ -233,10 +246,117 @@ def mark(con, row_id, note):
     con.commit()
 
 
+def load_selftest():
+    spec = importlib.util.spec_from_file_location('bm_selftest_deployed', SELFTEST)
+    t = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(t)
+    return t
+
+
+def check_dmn(text):
+    """the candidate through the deployed reader and bm_selftest; raises with the reason. A fresh module copy, so
+    the tables of the running check never mix with the deployed ones"""
+    if len(text.encode()) > DMN_MAX:
+        raise ValueError('larger than %d bytes' % DMN_MAX)
+    tmp = DMN + '.check'
+    with open(tmp, 'w') as f:
+        f.write(text)
+    try:
+        m = load_logic()
+        m.TABLES = m.load_decisions(tmp)             # format, hit policy, entries, expressions, output words
+        m._check_tables()                            # every decision callable with the columns the code supplies
+        modes = load_selftest().run(m, 600)          # random cycles through bm_step with these tables
+    finally:
+        os.remove(tmp)
+    return modes
+
+
+def state_ts():
+    try:
+        with open(STATE) as f:
+            return float(json.load(f).get('ts') or 0)
+    except (OSError, ValueError):
+        return 0.0
+
+
+def mark_dmn(con, row_id, note):
+    with con.cursor() as c:
+        c.execute("UPDATE bm_dmn_version SET applied_at = IF(%s LIKE 'rejected%%', NULL, NOW()), applied_note = %s "
+                  "WHERE id = %s", (note, note[:1000], row_id))
+    con.commit()
+
+
+def prune_dmn_backups():
+    d = os.path.dirname(DMN)
+    baks = sorted(f for f in os.listdir(d) if f.startswith(os.path.basename(DMN) + '.bak-'))
+    for f in baks[:-DMN_KEEP]:
+        os.remove(os.path.join(d, f))
+
+
+def sync_dmn(con, m):
+    """D. the decision tables: apply the newest editor version, or publish the running file (see the header)"""
+    if not hasattr(m, 'load_decisions') or not os.path.exists(DMN):
+        return                                       # batmonitor < 0.78-py: tables in bm_tables.h, nothing to do
+    with open(DMN) as f:
+        running = f.read()
+    run_sha = hashlib.sha256(running.encode()).hexdigest()
+    with con.cursor() as c:
+        c.execute("SELECT id, source, dmn, sha256, applied_note FROM bm_dmn_version ORDER BY id DESC LIMIT 1")
+        row = c.fetchone()
+    if row and row['source'] == 'editor' and row['applied_note'] is None:
+        if hashlib.sha256(row['dmn'].encode()).hexdigest() != row['sha256']:
+            mark_dmn(con, row['id'], 'rejected: sha256 mismatch')
+        elif row['sha256'] == run_sha:
+            mark_dmn(con, row['id'], 'unchanged (same file as on the Pi)')
+            return
+        else:
+            try:
+                modes = check_dmn(row['dmn'])
+            except Exception as e:
+                log('DMN version %d rejected: %s: %s' % (row['id'], type(e).__name__, e))
+                mark_dmn(con, row['id'], 'rejected: %s: %s' % (type(e).__name__, e))
+            else:
+                stamp = time.strftime('%Y%m%d-%H%M%S')
+                bak = '%s.bak-%s' % (DMN, stamp)
+                subprocess.run(['cp', '-p', DMN, bak], check=True)
+                with open(DMN + '.tmp', 'w') as f:
+                    f.write(row['dmn'])
+                os.replace(DMN + '.tmp', DMN)
+                t0 = time.time()
+                restart_batmonitor()
+                while time.time() - t0 < RUN_CHECK_S and state_ts() <= t0 + 1:
+                    time.sleep(2)
+                if state_ts() > t0 + 1:
+                    prune_dmn_backups()
+                    note = 'ok: live since %s, self-test modes %s' % (time.strftime('%H:%M:%S'), ' '.join(sorted(modes)))
+                    log('DMN version %d applied, batmonitor restarted and running' % row['id'])
+                    mark_dmn(con, row['id'], note)
+                    return
+                os.replace(bak, DMN)                 # did not run: back to the old tables
+                restart_batmonitor()
+                log('DMN version %d: batmonitor wrote no state.json within %d s, rolled back' % (row['id'], RUN_CHECK_S))
+                mark_dmn(con, row['id'], 'rejected: batmonitor did not run with it within %d s, rolled back' % RUN_CHECK_S)
+        with open(DMN) as f:                         # after a refusal: the running file becomes the newest row
+            running = f.read()
+        run_sha = hashlib.sha256(running.encode()).hexdigest()
+        row = None
+    if row is None or row['sha256'] != run_sha:
+        with con.cursor() as c:
+            c.execute("INSERT INTO bm_dmn_version (source, author, note, bm_version, dmn, sha256, applied_at, applied_note) "
+                      "VALUES ('pi', 'bm_params_pull', %s, %s, %s, %s, NOW(), 'running on the Pi')",
+                      ('file on the Pi (deploy or after a refusal)', running_version(), running, run_sha))
+        con.commit()
+        log('DMN: running file published (sha %s)' % run_sha[:12])
+
+
 def main():
     con = pymysql.connect(**read_conf())
     m = load_logic()
     sync_schema(con, m)
+    try:
+        sync_dmn(con, m)
+    except Exception as e:                       # the parameter part below still runs
+        log('DMN error: %s: %s' % (type(e).__name__, e))
     with con.cursor() as c:
         c.execute("SELECT id, params, sha256 FROM bm_param_version ORDER BY id DESC LIMIT 1")
         row = c.fetchone()

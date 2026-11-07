@@ -1,0 +1,680 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns="https://www.omg.org/spec/DMN/20191111/MODEL/" id="batmonitor" name="batmonitor decisions"
+             namespace="https://github.com/gerontec/victron/batmonitor">
+  <description>batmonitor decision tables (0.78-py). Standard DMN 1.3: opens in the Camunda Modeler / dmn-js. bm_logic.py reads this file at import (stdlib xml.etree, no engine on the Pi); tests/check_dmn.py checks it against the SpiffWorkflow DMN engine. Rules: hit policy FIRST (the first matching rule wins), the last rule of every table is all "-". Input entries: true / false / -. inputExpression: the meaning of the column, in the common subset of FEEL and Python (and, or, not(...), &lt; &lt;= &gt; &gt;=, + -), names = the chain inputs (bm_logic.DMN_INPUTS), BM_PARAMS (site value), number constants of bm_logic.py; a bare name = a flag the chain code supplies. Output entries: numbers, "KEEP" (the state stays) or the names BM_SRC_* / BM_WP_* / BM_M_*.</description>
+  <decision id="D1_LATCH" name="D1_LATCH">
+    <description>D1: Sofar first latch. Off at or below BAT1_SOC_MIN, on again from BAT1_SOC_MIN + 2 %.</description>
+    <decisionTable id="D1_LATCH_table" hitPolicy="FIRST">
+      <input id="D1_LATCH_in0" label="b1_above_min"><inputExpression id="D1_LATCH_ex0" typeRef="boolean"><text>have_soc_bat1 and soc_bat1 &gt; BAT1_SOC_MIN</text></inputExpression></input>
+      <input id="D1_LATCH_in1" label="bat1_first"><inputExpression id="D1_LATCH_ex1" typeRef="boolean"><text>bat1_first</text></inputExpression></input>
+      <input id="D1_LATCH_in2" label="b1_ge_release"><inputExpression id="D1_LATCH_ex2" typeRef="boolean"><text>soc_bat1 &gt;= BAT1_SOC_MIN + BAT1_FIRST_HYST</text></inputExpression></input>
+      <output id="D1_LATCH_out0" name="bat1_first"/>
+      <rule id="D1_LATCH_r1">
+        <inputEntry id="D1_LATCH_r1_i0"><text>false</text></inputEntry>
+        <inputEntry id="D1_LATCH_r1_i1"><text>-</text></inputEntry>
+        <inputEntry id="D1_LATCH_r1_i2"><text>-</text></inputEntry>
+        <outputEntry id="D1_LATCH_r1_o0"><text>0</text></outputEntry>
+      </rule>
+      <rule id="D1_LATCH_r2">
+        <inputEntry id="D1_LATCH_r2_i0"><text>true</text></inputEntry>
+        <inputEntry id="D1_LATCH_r2_i1"><text>false</text></inputEntry>
+        <inputEntry id="D1_LATCH_r2_i2"><text>true</text></inputEntry>
+        <outputEntry id="D1_LATCH_r2_o0"><text>1</text></outputEntry>
+      </rule>
+      <rule id="D1_LATCH_r3">
+        <inputEntry id="D1_LATCH_r3_i0"><text>-</text></inputEntry>
+        <inputEntry id="D1_LATCH_r3_i1"><text>-</text></inputEntry>
+        <inputEntry id="D1_LATCH_r3_i2"><text>-</text></inputEntry>
+        <outputEntry id="D1_LATCH_r3_o0"><text>"KEEP"</text></outputEntry>
+      </rule>
+    </decisionTable>
+  </decision>
+  <decision id="D1_B1_FIRST" name="D1_B1_FIRST">
+    <description>D1: Sofar first acts only while the heat pump runs.</description>
+    <decisionTable id="D1_B1_FIRST_table" hitPolicy="FIRST">
+      <input id="D1_B1_FIRST_in0" label="bat1_first"><inputExpression id="D1_B1_FIRST_ex0" typeRef="boolean"><text>bat1_first</text></inputExpression></input>
+      <input id="D1_B1_FIRST_in1" label="wp_on"><inputExpression id="D1_B1_FIRST_ex1" typeRef="boolean"><text>wp_fresh and wp &gt;= WP_ON_TH</text></inputExpression></input>
+      <output id="D1_B1_FIRST_out0" name="b1_first"/>
+      <rule id="D1_B1_FIRST_r1">
+        <inputEntry id="D1_B1_FIRST_r1_i0"><text>true</text></inputEntry>
+        <inputEntry id="D1_B1_FIRST_r1_i1"><text>true</text></inputEntry>
+        <outputEntry id="D1_B1_FIRST_r1_o0"><text>1</text></outputEntry>
+      </rule>
+      <rule id="D1_B1_FIRST_r2">
+        <inputEntry id="D1_B1_FIRST_r2_i0"><text>-</text></inputEntry>
+        <inputEntry id="D1_B1_FIRST_r2_i1"><text>-</text></inputEntry>
+        <outputEntry id="D1_B1_FIRST_r2_o0"><text>0</text></outputEntry>
+      </rule>
+    </decisionTable>
+  </decision>
+  <decision id="D1_SRC" name="D1_SRC">
+    <description>D1: S3 source of the discharge. DAY by day, B1 = Sofar first at night, WPG = winter night with the heat pump running (no night floor), STK = night floor.</description>
+    <decisionTable id="D1_SRC_table" hitPolicy="FIRST">
+      <input id="D1_SRC_in0" label="night"><inputExpression id="D1_SRC_ex0" typeRef="boolean"><text>have_pv and pv &lt; NIGHT_PV_TH</text></inputExpression></input>
+      <input id="D1_SRC_in1" label="b1_first"><inputExpression id="D1_SRC_ex1" typeRef="boolean"><text>b1_first</text></inputExpression></input>
+      <input id="D1_SRC_in2" label="winter"><inputExpression id="D1_SRC_ex2" typeRef="boolean"><text>winter</text></inputExpression></input>
+      <input id="D1_SRC_in3" label="wp_on"><inputExpression id="D1_SRC_ex3" typeRef="boolean"><text>wp_fresh and wp &gt;= WP_ON_TH</text></inputExpression></input>
+      <output id="D1_SRC_out0" name="src"/>
+      <rule id="D1_SRC_r1">
+        <inputEntry id="D1_SRC_r1_i0"><text>false</text></inputEntry>
+        <inputEntry id="D1_SRC_r1_i1"><text>-</text></inputEntry>
+        <inputEntry id="D1_SRC_r1_i2"><text>-</text></inputEntry>
+        <inputEntry id="D1_SRC_r1_i3"><text>-</text></inputEntry>
+        <outputEntry id="D1_SRC_r1_o0"><text>BM_SRC_DAY</text></outputEntry>
+      </rule>
+      <rule id="D1_SRC_r2">
+        <inputEntry id="D1_SRC_r2_i0"><text>true</text></inputEntry>
+        <inputEntry id="D1_SRC_r2_i1"><text>true</text></inputEntry>
+        <inputEntry id="D1_SRC_r2_i2"><text>-</text></inputEntry>
+        <inputEntry id="D1_SRC_r2_i3"><text>-</text></inputEntry>
+        <outputEntry id="D1_SRC_r2_o0"><text>BM_SRC_B1</text></outputEntry>
+      </rule>
+      <rule id="D1_SRC_r3">
+        <inputEntry id="D1_SRC_r3_i0"><text>true</text></inputEntry>
+        <inputEntry id="D1_SRC_r3_i1"><text>-</text></inputEntry>
+        <inputEntry id="D1_SRC_r3_i2"><text>true</text></inputEntry>
+        <inputEntry id="D1_SRC_r3_i3"><text>true</text></inputEntry>
+        <outputEntry id="D1_SRC_r3_o0"><text>BM_SRC_WPG</text></outputEntry>
+      </rule>
+      <rule id="D1_SRC_r4">
+        <inputEntry id="D1_SRC_r4_i0"><text>-</text></inputEntry>
+        <inputEntry id="D1_SRC_r4_i1"><text>-</text></inputEntry>
+        <inputEntry id="D1_SRC_r4_i2"><text>-</text></inputEntry>
+        <inputEntry id="D1_SRC_r4_i3"><text>-</text></inputEntry>
+        <outputEntry id="D1_SRC_r4_o0"><text>BM_SRC_STK</text></outputEntry>
+      </rule>
+    </decisionTable>
+  </decision>
+  <decision id="D1_WP_CAP" name="D1_WP_CAP">
+    <description>D1: winter heat pump rule. Stacks give 0 W while the Sofar Bat1 discharges, else at most WP_WINTER_W.</description>
+    <decisionTable id="D1_WP_CAP_table" hitPolicy="FIRST">
+      <input id="D1_WP_CAP_in0" label="winter"><inputExpression id="D1_WP_CAP_ex0" typeRef="boolean"><text>winter</text></inputExpression></input>
+      <input id="D1_WP_CAP_in1" label="wp_on"><inputExpression id="D1_WP_CAP_ex1" typeRef="boolean"><text>wp_fresh and wp &gt;= WP_ON_TH</text></inputExpression></input>
+      <input id="D1_WP_CAP_in2" label="b1_dis"><inputExpression id="D1_WP_CAP_ex2" typeRef="boolean"><text>not(stale) and bat1 &lt; -B1_DIS_TH</text></inputExpression></input>
+      <output id="D1_WP_CAP_out0" name="wp_cap"/>
+      <rule id="D1_WP_CAP_r1">
+        <inputEntry id="D1_WP_CAP_r1_i0"><text>true</text></inputEntry>
+        <inputEntry id="D1_WP_CAP_r1_i1"><text>true</text></inputEntry>
+        <inputEntry id="D1_WP_CAP_r1_i2"><text>true</text></inputEntry>
+        <outputEntry id="D1_WP_CAP_r1_o0"><text>BM_WP_ZERO</text></outputEntry>
+      </rule>
+      <rule id="D1_WP_CAP_r2">
+        <inputEntry id="D1_WP_CAP_r2_i0"><text>true</text></inputEntry>
+        <inputEntry id="D1_WP_CAP_r2_i1"><text>true</text></inputEntry>
+        <inputEntry id="D1_WP_CAP_r2_i2"><text>false</text></inputEntry>
+        <outputEntry id="D1_WP_CAP_r2_o0"><text>BM_WP_MAX</text></outputEntry>
+      </rule>
+      <rule id="D1_WP_CAP_r3">
+        <inputEntry id="D1_WP_CAP_r3_i0"><text>-</text></inputEntry>
+        <inputEntry id="D1_WP_CAP_r3_i1"><text>-</text></inputEntry>
+        <inputEntry id="D1_WP_CAP_r3_i2"><text>-</text></inputEntry>
+        <outputEntry id="D1_WP_CAP_r3_o0"><text>BM_WP_NONE</text></outputEntry>
+      </rule>
+    </decisionTable>
+  </decision>
+  <decision id="D2_CHARGE_MODE" name="D2_CHARGE_MODE">
+    <description>D2: charge mode on the surplus (&gt; 200 W), held down to 20 W once charging.</description>
+    <decisionTable id="D2_CHARGE_MODE_table" hitPolicy="FIRST">
+      <input id="D2_CHARGE_MODE_in0" label="surplus_gt_on"><inputExpression id="D2_CHARGE_MODE_ex0" typeRef="boolean"><text>surplus &gt; PCC_SURPLUS_TH</text></inputExpression></input>
+      <input id="D2_CHARGE_MODE_in1" label="chg_prev"><inputExpression id="D2_CHARGE_MODE_ex1" typeRef="boolean"><text>chg_prev</text></inputExpression></input>
+      <input id="D2_CHARGE_MODE_in2" label="surplus_gt_hold"><inputExpression id="D2_CHARGE_MODE_ex2" typeRef="boolean"><text>surplus &gt; SOYO_HOLD_TH</text></inputExpression></input>
+      <output id="D2_CHARGE_MODE_out0" name="charge_mode"/>
+      <rule id="D2_CHARGE_MODE_r1">
+        <inputEntry id="D2_CHARGE_MODE_r1_i0"><text>true</text></inputEntry>
+        <inputEntry id="D2_CHARGE_MODE_r1_i1"><text>-</text></inputEntry>
+        <inputEntry id="D2_CHARGE_MODE_r1_i2"><text>-</text></inputEntry>
+        <outputEntry id="D2_CHARGE_MODE_r1_o0"><text>1</text></outputEntry>
+      </rule>
+      <rule id="D2_CHARGE_MODE_r2">
+        <inputEntry id="D2_CHARGE_MODE_r2_i0"><text>-</text></inputEntry>
+        <inputEntry id="D2_CHARGE_MODE_r2_i1"><text>true</text></inputEntry>
+        <inputEntry id="D2_CHARGE_MODE_r2_i2"><text>true</text></inputEntry>
+        <outputEntry id="D2_CHARGE_MODE_r2_o0"><text>1</text></outputEntry>
+      </rule>
+      <rule id="D2_CHARGE_MODE_r3">
+        <inputEntry id="D2_CHARGE_MODE_r3_i0"><text>-</text></inputEntry>
+        <inputEntry id="D2_CHARGE_MODE_r3_i1"><text>-</text></inputEntry>
+        <inputEntry id="D2_CHARGE_MODE_r3_i2"><text>-</text></inputEntry>
+        <outputEntry id="D2_CHARGE_MODE_r3_o0"><text>0</text></outputEntry>
+      </rule>
+    </decisionTable>
+  </decision>
+  <decision id="D2_PROT" name="D2_PROT">
+    <description>D2: SoC protection, SOC_MIN .. SOC_MIN_RELEASE (only while the BMS reports).</description>
+    <decisionTable id="D2_PROT_table" hitPolicy="FIRST">
+      <input id="D2_PROT_in0" label="bms_ok"><inputExpression id="D2_PROT_ex0" typeRef="boolean"><text>bms_ok</text></inputExpression></input>
+      <input id="D2_PROT_in1" label="soc_lt_min"><inputExpression id="D2_PROT_ex1" typeRef="boolean"><text>soc &lt; SOC_MIN</text></inputExpression></input>
+      <input id="D2_PROT_in2" label="soc_ge_release"><inputExpression id="D2_PROT_ex2" typeRef="boolean"><text>soc &gt;= SOC_MIN_RELEASE</text></inputExpression></input>
+      <output id="D2_PROT_out0" name="prot"/>
+      <rule id="D2_PROT_r1">
+        <inputEntry id="D2_PROT_r1_i0"><text>true</text></inputEntry>
+        <inputEntry id="D2_PROT_r1_i1"><text>true</text></inputEntry>
+        <inputEntry id="D2_PROT_r1_i2"><text>-</text></inputEntry>
+        <outputEntry id="D2_PROT_r1_o0"><text>1</text></outputEntry>
+      </rule>
+      <rule id="D2_PROT_r2">
+        <inputEntry id="D2_PROT_r2_i0"><text>true</text></inputEntry>
+        <inputEntry id="D2_PROT_r2_i1"><text>-</text></inputEntry>
+        <inputEntry id="D2_PROT_r2_i2"><text>true</text></inputEntry>
+        <outputEntry id="D2_PROT_r2_o0"><text>0</text></outputEntry>
+      </rule>
+      <rule id="D2_PROT_r3">
+        <inputEntry id="D2_PROT_r3_i0"><text>-</text></inputEntry>
+        <inputEntry id="D2_PROT_r3_i1"><text>-</text></inputEntry>
+        <inputEntry id="D2_PROT_r3_i2"><text>-</text></inputEntry>
+        <outputEntry id="D2_PROT_r3_o0"><text>"KEEP"</text></outputEntry>
+      </rule>
+    </decisionTable>
+  </decision>
+  <decision id="D2_FORCE" name="D2_FORCE">
+    <description>D2: grid force charge, SOC_FORCE .. SOC_FORCE_RELEASE.</description>
+    <decisionTable id="D2_FORCE_table" hitPolicy="FIRST">
+      <input id="D2_FORCE_in0" label="bms_ok"><inputExpression id="D2_FORCE_ex0" typeRef="boolean"><text>bms_ok</text></inputExpression></input>
+      <input id="D2_FORCE_in1" label="soc_lt_force"><inputExpression id="D2_FORCE_ex1" typeRef="boolean"><text>soc &lt; SOC_FORCE</text></inputExpression></input>
+      <input id="D2_FORCE_in2" label="soc_ge_force_release"><inputExpression id="D2_FORCE_ex2" typeRef="boolean"><text>soc &gt;= SOC_FORCE_RELEASE</text></inputExpression></input>
+      <output id="D2_FORCE_out0" name="force"/>
+      <rule id="D2_FORCE_r1">
+        <inputEntry id="D2_FORCE_r1_i0"><text>true</text></inputEntry>
+        <inputEntry id="D2_FORCE_r1_i1"><text>true</text></inputEntry>
+        <inputEntry id="D2_FORCE_r1_i2"><text>-</text></inputEntry>
+        <outputEntry id="D2_FORCE_r1_o0"><text>1</text></outputEntry>
+      </rule>
+      <rule id="D2_FORCE_r2">
+        <inputEntry id="D2_FORCE_r2_i0"><text>true</text></inputEntry>
+        <inputEntry id="D2_FORCE_r2_i1"><text>-</text></inputEntry>
+        <inputEntry id="D2_FORCE_r2_i2"><text>true</text></inputEntry>
+        <outputEntry id="D2_FORCE_r2_o0"><text>0</text></outputEntry>
+      </rule>
+      <rule id="D2_FORCE_r3">
+        <inputEntry id="D2_FORCE_r3_i0"><text>-</text></inputEntry>
+        <inputEntry id="D2_FORCE_r3_i1"><text>-</text></inputEntry>
+        <inputEntry id="D2_FORCE_r3_i2"><text>-</text></inputEntry>
+        <outputEntry id="D2_FORCE_r3_o0"><text>"KEEP"</text></outputEntry>
+      </rule>
+    </decisionTable>
+  </decision>
+  <decision id="D2_LOW" name="D2_LOW">
+    <description>D2: LOW force charge: DCL 0 or lowest cell &lt; CELL_FORCE_V; ends once DCL is back, the cell &gt;= CELL_FORCE_RELEASE_V and the SoC &gt;= SOC_MIN_RELEASE.</description>
+    <decisionTable id="D2_LOW_table" hitPolicy="FIRST">
+      <input id="D2_LOW_in0" label="bms_ok"><inputExpression id="D2_LOW_ex0" typeRef="boolean"><text>bms_ok</text></inputExpression></input>
+      <input id="D2_LOW_in1" label="low_on"><inputExpression id="D2_LOW_ex1" typeRef="boolean"><text>(lim_ok and dcl &lt; DCL_FORCE_A) or (cell_ok and cell_min &lt; CELL_FORCE_V)</text></inputExpression></input>
+      <input id="D2_LOW_in2" label="low_off"><inputExpression id="D2_LOW_ex2" typeRef="boolean"><text>not(lim_ok and dcl &lt; DCL_FORCE_A) and (not(cell_ok) or cell_min &gt;= CELL_FORCE_RELEASE_V)</text></inputExpression></input>
+      <input id="D2_LOW_in3" label="soc_ge_release"><inputExpression id="D2_LOW_ex3" typeRef="boolean"><text>soc &gt;= SOC_MIN_RELEASE</text></inputExpression></input>
+      <output id="D2_LOW_out0" name="low"/>
+      <rule id="D2_LOW_r1">
+        <inputEntry id="D2_LOW_r1_i0"><text>true</text></inputEntry>
+        <inputEntry id="D2_LOW_r1_i1"><text>true</text></inputEntry>
+        <inputEntry id="D2_LOW_r1_i2"><text>-</text></inputEntry>
+        <inputEntry id="D2_LOW_r1_i3"><text>-</text></inputEntry>
+        <outputEntry id="D2_LOW_r1_o0"><text>1</text></outputEntry>
+      </rule>
+      <rule id="D2_LOW_r2">
+        <inputEntry id="D2_LOW_r2_i0"><text>true</text></inputEntry>
+        <inputEntry id="D2_LOW_r2_i1"><text>-</text></inputEntry>
+        <inputEntry id="D2_LOW_r2_i2"><text>true</text></inputEntry>
+        <inputEntry id="D2_LOW_r2_i3"><text>true</text></inputEntry>
+        <outputEntry id="D2_LOW_r2_o0"><text>0</text></outputEntry>
+      </rule>
+      <rule id="D2_LOW_r3">
+        <inputEntry id="D2_LOW_r3_i0"><text>-</text></inputEntry>
+        <inputEntry id="D2_LOW_r3_i1"><text>-</text></inputEntry>
+        <inputEntry id="D2_LOW_r3_i2"><text>-</text></inputEntry>
+        <inputEntry id="D2_LOW_r3_i3"><text>-</text></inputEntry>
+        <outputEntry id="D2_LOW_r3_o0"><text>"KEEP"</text></outputEntry>
+      </rule>
+    </decisionTable>
+  </decision>
+  <decision id="D2_MODE" name="D2_MODE">
+    <description>D2: mode of the battery, priority from top to bottom (force / low / prot = the latches above, ff = force_full_from_pv is on). 0.77-py: one bank (both stacks parallel), charged only up to the Pytes limit: no top hold window any more, SoC 100 % of the Pytes BMS = FULL.</description>
+    <decisionTable id="D2_MODE_table" hitPolicy="FIRST">
+      <input id="D2_MODE_in0" label="bms_ok"><inputExpression id="D2_MODE_ex0" typeRef="boolean"><text>bms_ok</text></inputExpression></input>
+      <input id="D2_MODE_in1" label="force"><inputExpression id="D2_MODE_ex1" typeRef="boolean"><text>force</text></inputExpression></input>
+      <input id="D2_MODE_in2" label="low"><inputExpression id="D2_MODE_ex2" typeRef="boolean"><text>low</text></inputExpression></input>
+      <input id="D2_MODE_in3" label="stale"><inputExpression id="D2_MODE_ex3" typeRef="boolean"><text>stale</text></inputExpression></input>
+      <input id="D2_MODE_in4" label="charge_mode"><inputExpression id="D2_MODE_ex4" typeRef="boolean"><text>charge_mode</text></inputExpression></input>
+      <input id="D2_MODE_in5" label="block"><inputExpression id="D2_MODE_ex5" typeRef="boolean"><text>block</text></inputExpression></input>
+      <input id="D2_MODE_in6" label="soc_lt_100"><inputExpression id="D2_MODE_ex6" typeRef="boolean"><text>soc &lt; 100</text></inputExpression></input>
+      <input id="D2_MODE_in7" label="ff"><inputExpression id="D2_MODE_ex7" typeRef="boolean"><text>ff</text></inputExpression></input>
+      <input id="D2_MODE_in8" label="prot"><inputExpression id="D2_MODE_ex8" typeRef="boolean"><text>prot</text></inputExpression></input>
+      <input id="D2_MODE_in9" label="charging"><inputExpression id="D2_MODE_ex9" typeRef="boolean"><text>power_ok and power &gt; CHARGING_TH</text></inputExpression></input>
+      <output id="D2_MODE_out0" name="mode"/>
+      <rule id="D2_MODE_r1">
+        <inputEntry id="D2_MODE_r1_i0"><text>false</text></inputEntry>
+        <inputEntry id="D2_MODE_r1_i1"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r1_i2"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r1_i3"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r1_i4"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r1_i5"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r1_i6"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r1_i7"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r1_i8"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r1_i9"><text>-</text></inputEntry>
+        <outputEntry id="D2_MODE_r1_o0"><text>BM_M_BMS_MISSING</text></outputEntry>
+      </rule>
+      <rule id="D2_MODE_r2">
+        <inputEntry id="D2_MODE_r2_i0"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r2_i1"><text>true</text></inputEntry>
+        <inputEntry id="D2_MODE_r2_i2"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r2_i3"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r2_i4"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r2_i5"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r2_i6"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r2_i7"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r2_i8"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r2_i9"><text>-</text></inputEntry>
+        <outputEntry id="D2_MODE_r2_o0"><text>BM_M_FORCE</text></outputEntry>
+      </rule>
+      <rule id="D2_MODE_r3">
+        <inputEntry id="D2_MODE_r3_i0"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r3_i1"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r3_i2"><text>true</text></inputEntry>
+        <inputEntry id="D2_MODE_r3_i3"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r3_i4"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r3_i5"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r3_i6"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r3_i7"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r3_i8"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r3_i9"><text>-</text></inputEntry>
+        <outputEntry id="D2_MODE_r3_o0"><text>BM_M_FORCE</text></outputEntry>
+      </rule>
+      <rule id="D2_MODE_r4">
+        <inputEntry id="D2_MODE_r4_i0"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r4_i1"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r4_i2"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r4_i3"><text>true</text></inputEntry>
+        <inputEntry id="D2_MODE_r4_i4"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r4_i5"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r4_i6"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r4_i7"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r4_i8"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r4_i9"><text>-</text></inputEntry>
+        <outputEntry id="D2_MODE_r4_o0"><text>BM_M_STALE</text></outputEntry>
+      </rule>
+      <rule id="D2_MODE_r5">
+        <inputEntry id="D2_MODE_r5_i0"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r5_i1"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r5_i2"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r5_i3"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r5_i4"><text>true</text></inputEntry>
+        <inputEntry id="D2_MODE_r5_i5"><text>true</text></inputEntry>
+        <inputEntry id="D2_MODE_r5_i6"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r5_i7"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r5_i8"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r5_i9"><text>-</text></inputEntry>
+        <outputEntry id="D2_MODE_r5_o0"><text>BM_M_LADESPERRE</text></outputEntry>
+      </rule>
+      <rule id="D2_MODE_r6">
+        <inputEntry id="D2_MODE_r6_i0"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r6_i1"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r6_i2"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r6_i3"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r6_i4"><text>true</text></inputEntry>
+        <inputEntry id="D2_MODE_r6_i5"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r6_i6"><text>true</text></inputEntry>
+        <inputEntry id="D2_MODE_r6_i7"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r6_i8"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r6_i9"><text>-</text></inputEntry>
+        <outputEntry id="D2_MODE_r6_o0"><text>BM_M_CHARGE</text></outputEntry>
+      </rule>
+      <rule id="D2_MODE_r7">
+        <inputEntry id="D2_MODE_r7_i0"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r7_i1"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r7_i2"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r7_i3"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r7_i4"><text>true</text></inputEntry>
+        <inputEntry id="D2_MODE_r7_i5"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r7_i6"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r7_i7"><text>true</text></inputEntry>
+        <inputEntry id="D2_MODE_r7_i8"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r7_i9"><text>-</text></inputEntry>
+        <outputEntry id="D2_MODE_r7_o0"><text>BM_M_CHARGE</text></outputEntry>
+      </rule>
+      <rule id="D2_MODE_r8">
+        <inputEntry id="D2_MODE_r8_i0"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r8_i1"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r8_i2"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r8_i3"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r8_i4"><text>true</text></inputEntry>
+        <inputEntry id="D2_MODE_r8_i5"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r8_i6"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r8_i7"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r8_i8"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r8_i9"><text>-</text></inputEntry>
+        <outputEntry id="D2_MODE_r8_o0"><text>BM_M_FULL</text></outputEntry>
+      </rule>
+      <rule id="D2_MODE_r9">
+        <inputEntry id="D2_MODE_r9_i0"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r9_i1"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r9_i2"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r9_i3"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r9_i4"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r9_i5"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r9_i6"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r9_i7"><text>true</text></inputEntry>
+        <inputEntry id="D2_MODE_r9_i8"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r9_i9"><text>-</text></inputEntry>
+        <outputEntry id="D2_MODE_r9_o0"><text>BM_M_HOLD</text></outputEntry>
+      </rule>
+      <rule id="D2_MODE_r10">
+        <inputEntry id="D2_MODE_r10_i0"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r10_i1"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r10_i2"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r10_i3"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r10_i4"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r10_i5"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r10_i6"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r10_i7"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r10_i8"><text>true</text></inputEntry>
+        <inputEntry id="D2_MODE_r10_i9"><text>-</text></inputEntry>
+        <outputEntry id="D2_MODE_r10_o0"><text>BM_M_PROT</text></outputEntry>
+      </rule>
+      <rule id="D2_MODE_r11">
+        <inputEntry id="D2_MODE_r11_i0"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r11_i1"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r11_i2"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r11_i3"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r11_i4"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r11_i5"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r11_i6"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r11_i7"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r11_i8"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r11_i9"><text>true</text></inputEntry>
+        <outputEntry id="D2_MODE_r11_o0"><text>BM_M_CHARGING</text></outputEntry>
+      </rule>
+      <rule id="D2_MODE_r12">
+        <inputEntry id="D2_MODE_r12_i0"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r12_i1"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r12_i2"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r12_i3"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r12_i4"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r12_i5"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r12_i6"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r12_i7"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r12_i8"><text>-</text></inputEntry>
+        <inputEntry id="D2_MODE_r12_i9"><text>-</text></inputEntry>
+        <outputEntry id="D2_MODE_r12_o0"><text>BM_M_DIS</text></outputEntry>
+      </rule>
+    </decisionTable>
+  </decision>
+  <decision id="D3" name="D3">
+    <description>D3: PROPORTIONAL (1) while importing, or (already proportional / night floor) while the deficit &gt; 20 W.</description>
+    <decisionTable id="D3_table" hitPolicy="FIRST">
+      <input id="D3_in0" label="any_dis"><inputExpression id="D3_ex0" typeRef="boolean"><text>any_dis</text></inputExpression></input>
+      <input id="D3_in1" label="house_import"><inputExpression id="D3_ex1" typeRef="boolean"><text>house &lt; PCC_IMPORT_TH</text></inputExpression></input>
+      <input id="D3_in2" label="prop_prev"><inputExpression id="D3_ex2" typeRef="boolean"><text>prop_prev</text></inputExpression></input>
+      <input id="D3_in3" label="prop_hold"><inputExpression id="D3_ex3" typeRef="boolean"><text>prop_hold</text></inputExpression></input>
+      <input id="D3_in4" label="deficit_gt_hold"><inputExpression id="D3_ex4" typeRef="boolean"><text>deficit &gt; SOYO_HOLD_TH</text></inputExpression></input>
+      <output id="D3_out0" name="prop"/>
+      <rule id="D3_r1">
+        <inputEntry id="D3_r1_i0"><text>false</text></inputEntry>
+        <inputEntry id="D3_r1_i1"><text>-</text></inputEntry>
+        <inputEntry id="D3_r1_i2"><text>-</text></inputEntry>
+        <inputEntry id="D3_r1_i3"><text>-</text></inputEntry>
+        <inputEntry id="D3_r1_i4"><text>-</text></inputEntry>
+        <outputEntry id="D3_r1_o0"><text>0</text></outputEntry>
+      </rule>
+      <rule id="D3_r2">
+        <inputEntry id="D3_r2_i0"><text>-</text></inputEntry>
+        <inputEntry id="D3_r2_i1"><text>true</text></inputEntry>
+        <inputEntry id="D3_r2_i2"><text>-</text></inputEntry>
+        <inputEntry id="D3_r2_i3"><text>-</text></inputEntry>
+        <inputEntry id="D3_r2_i4"><text>-</text></inputEntry>
+        <outputEntry id="D3_r2_o0"><text>1</text></outputEntry>
+      </rule>
+      <rule id="D3_r3">
+        <inputEntry id="D3_r3_i0"><text>-</text></inputEntry>
+        <inputEntry id="D3_r3_i1"><text>-</text></inputEntry>
+        <inputEntry id="D3_r3_i2"><text>true</text></inputEntry>
+        <inputEntry id="D3_r3_i3"><text>-</text></inputEntry>
+        <inputEntry id="D3_r3_i4"><text>true</text></inputEntry>
+        <outputEntry id="D3_r3_o0"><text>1</text></outputEntry>
+      </rule>
+      <rule id="D3_r4">
+        <inputEntry id="D3_r4_i0"><text>-</text></inputEntry>
+        <inputEntry id="D3_r4_i1"><text>-</text></inputEntry>
+        <inputEntry id="D3_r4_i2"><text>-</text></inputEntry>
+        <inputEntry id="D3_r4_i3"><text>true</text></inputEntry>
+        <inputEntry id="D3_r4_i4"><text>true</text></inputEntry>
+        <outputEntry id="D3_r4_o0"><text>1</text></outputEntry>
+      </rule>
+      <rule id="D3_r5">
+        <inputEntry id="D3_r5_i0"><text>-</text></inputEntry>
+        <inputEntry id="D3_r5_i1"><text>-</text></inputEntry>
+        <inputEntry id="D3_r5_i2"><text>-</text></inputEntry>
+        <inputEntry id="D3_r5_i3"><text>-</text></inputEntry>
+        <inputEntry id="D3_r5_i4"><text>-</text></inputEntry>
+        <outputEntry id="D3_r5_o0"><text>0</text></outputEntry>
+      </rule>
+    </decisionTable>
+  </decision>
+  <decision id="D4_PEAK" name="D4_PEAK">
+    <description>D4: PCC above 20 kW seen today (display).</description>
+    <decisionTable id="D4_PEAK_table" hitPolicy="FIRST">
+      <input id="D4_PEAK_in0" label="pcc_peak"><inputExpression id="D4_PEAK_ex0" typeRef="boolean"><text>have_pcc and not(stale) and pcc &gt; PCC_PEAK_TH</text></inputExpression></input>
+      <input id="D4_PEAK_in1" label="new_day"><inputExpression id="D4_PEAK_ex1" typeRef="boolean"><text>new_day</text></inputExpression></input>
+      <output id="D4_PEAK_out0" name="peak_today"/>
+      <rule id="D4_PEAK_r1">
+        <inputEntry id="D4_PEAK_r1_i0"><text>true</text></inputEntry>
+        <inputEntry id="D4_PEAK_r1_i1"><text>-</text></inputEntry>
+        <outputEntry id="D4_PEAK_r1_o0"><text>1</text></outputEntry>
+      </rule>
+      <rule id="D4_PEAK_r2">
+        <inputEntry id="D4_PEAK_r2_i0"><text>-</text></inputEntry>
+        <inputEntry id="D4_PEAK_r2_i1"><text>true</text></inputEntry>
+        <outputEntry id="D4_PEAK_r2_o0"><text>0</text></outputEntry>
+      </rule>
+      <rule id="D4_PEAK_r3">
+        <inputEntry id="D4_PEAK_r3_i0"><text>-</text></inputEntry>
+        <inputEntry id="D4_PEAK_r3_i1"><text>-</text></inputEntry>
+        <outputEntry id="D4_PEAK_r3_o0"><text>"KEEP"</text></outputEntry>
+      </rule>
+    </decisionTable>
+  </decision>
+  <decision id="D4" name="D4">
+    <description>D4: summer peak window, outputs block (wait below EXPORT_CAP) and cap (charge only above it).</description>
+    <decisionTable id="D4_table" hitPolicy="FIRST">
+      <input id="D4_in0" label="enabled"><inputExpression id="D4_ex0" typeRef="boolean"><text>enabled</text></inputExpression></input>
+      <input id="D4_in1" label="season"><inputExpression id="D4_ex1" typeRef="boolean"><text>season</text></inputExpression></input>
+      <input id="D4_in2" label="fc_cap_ahead"><inputExpression id="D4_ex2" typeRef="boolean"><text>fc_cap_ahead</text></inputExpression></input>
+      <input id="D4_in3" label="surplus_cap_on"><inputExpression id="D4_ex3" typeRef="boolean"><text>surplus - EXPORT_CAP &gt; PCC_SURPLUS_TH</text></inputExpression></input>
+      <input id="D4_in4" label="chg_prev"><inputExpression id="D4_ex4" typeRef="boolean"><text>chg_prev</text></inputExpression></input>
+      <input id="D4_in5" label="surplus_cap_hold"><inputExpression id="D4_ex5" typeRef="boolean"><text>surplus - EXPORT_CAP &gt; SOYO_HOLD_TH</text></inputExpression></input>
+      <output id="D4_out0" name="block"/>
+      <output id="D4_out1" name="cap"/>
+      <rule id="D4_r1">
+        <inputEntry id="D4_r1_i0"><text>false</text></inputEntry>
+        <inputEntry id="D4_r1_i1"><text>-</text></inputEntry>
+        <inputEntry id="D4_r1_i2"><text>-</text></inputEntry>
+        <inputEntry id="D4_r1_i3"><text>-</text></inputEntry>
+        <inputEntry id="D4_r1_i4"><text>-</text></inputEntry>
+        <inputEntry id="D4_r1_i5"><text>-</text></inputEntry>
+        <outputEntry id="D4_r1_o0"><text>0</text></outputEntry>
+        <outputEntry id="D4_r1_o1"><text>0</text></outputEntry>
+      </rule>
+      <rule id="D4_r2">
+        <inputEntry id="D4_r2_i0"><text>-</text></inputEntry>
+        <inputEntry id="D4_r2_i1"><text>false</text></inputEntry>
+        <inputEntry id="D4_r2_i2"><text>-</text></inputEntry>
+        <inputEntry id="D4_r2_i3"><text>-</text></inputEntry>
+        <inputEntry id="D4_r2_i4"><text>-</text></inputEntry>
+        <inputEntry id="D4_r2_i5"><text>-</text></inputEntry>
+        <outputEntry id="D4_r2_o0"><text>0</text></outputEntry>
+        <outputEntry id="D4_r2_o1"><text>0</text></outputEntry>
+      </rule>
+      <rule id="D4_r3">
+        <inputEntry id="D4_r3_i0"><text>-</text></inputEntry>
+        <inputEntry id="D4_r3_i1"><text>-</text></inputEntry>
+        <inputEntry id="D4_r3_i2"><text>false</text></inputEntry>
+        <inputEntry id="D4_r3_i3"><text>-</text></inputEntry>
+        <inputEntry id="D4_r3_i4"><text>-</text></inputEntry>
+        <inputEntry id="D4_r3_i5"><text>-</text></inputEntry>
+        <outputEntry id="D4_r3_o0"><text>0</text></outputEntry>
+        <outputEntry id="D4_r3_o1"><text>0</text></outputEntry>
+      </rule>
+      <rule id="D4_r4">
+        <inputEntry id="D4_r4_i0"><text>-</text></inputEntry>
+        <inputEntry id="D4_r4_i1"><text>-</text></inputEntry>
+        <inputEntry id="D4_r4_i2"><text>-</text></inputEntry>
+        <inputEntry id="D4_r4_i3"><text>true</text></inputEntry>
+        <inputEntry id="D4_r4_i4"><text>-</text></inputEntry>
+        <inputEntry id="D4_r4_i5"><text>-</text></inputEntry>
+        <outputEntry id="D4_r4_o0"><text>0</text></outputEntry>
+        <outputEntry id="D4_r4_o1"><text>1</text></outputEntry>
+      </rule>
+      <rule id="D4_r5">
+        <inputEntry id="D4_r5_i0"><text>-</text></inputEntry>
+        <inputEntry id="D4_r5_i1"><text>-</text></inputEntry>
+        <inputEntry id="D4_r5_i2"><text>-</text></inputEntry>
+        <inputEntry id="D4_r5_i3"><text>-</text></inputEntry>
+        <inputEntry id="D4_r5_i4"><text>true</text></inputEntry>
+        <inputEntry id="D4_r5_i5"><text>true</text></inputEntry>
+        <outputEntry id="D4_r5_o0"><text>0</text></outputEntry>
+        <outputEntry id="D4_r5_o1"><text>1</text></outputEntry>
+      </rule>
+      <rule id="D4_r6">
+        <inputEntry id="D4_r6_i0"><text>-</text></inputEntry>
+        <inputEntry id="D4_r6_i1"><text>-</text></inputEntry>
+        <inputEntry id="D4_r6_i2"><text>-</text></inputEntry>
+        <inputEntry id="D4_r6_i3"><text>-</text></inputEntry>
+        <inputEntry id="D4_r6_i4"><text>-</text></inputEntry>
+        <inputEntry id="D4_r6_i5"><text>-</text></inputEntry>
+        <outputEntry id="D4_r6_o0"><text>1</text></outputEntry>
+        <outputEntry id="D4_r6_o1"><text>1</text></outputEntry>
+      </rule>
+    </decisionTable>
+  </decision>
+  <decision id="D5" name="D5">
+    <description>D5: DO4 pulse (FoxESS shedding): PCC &gt; 20 kW for the grace time or &gt; DO4_HARD_W, or grid offline and PV overfeeds one AC-out; never twice within the lockout.</description>
+    <decisionTable id="D5_table" hitPolicy="FIRST">
+      <input id="D5_in0" label="lockout_over"><inputExpression id="D5_ex0" typeRef="boolean"><text>lockout_over</text></inputExpression></input>
+      <input id="D5_in1" label="acout_over"><inputExpression id="D5_ex1" typeRef="boolean"><text>acout_over</text></inputExpression></input>
+      <input id="D5_in2" label="pcc_over"><inputExpression id="D5_ex2" typeRef="boolean"><text>pcc_over</text></inputExpression></input>
+      <input id="D5_in3" label="grace_over"><inputExpression id="D5_ex3" typeRef="boolean"><text>grace_over</text></inputExpression></input>
+      <input id="D5_in4" label="pcc_hard"><inputExpression id="D5_ex4" typeRef="boolean"><text>pcc_hard</text></inputExpression></input>
+      <output id="D5_out0" name="do4"/>
+      <rule id="D5_r1">
+        <inputEntry id="D5_r1_i0"><text>false</text></inputEntry>
+        <inputEntry id="D5_r1_i1"><text>-</text></inputEntry>
+        <inputEntry id="D5_r1_i2"><text>-</text></inputEntry>
+        <inputEntry id="D5_r1_i3"><text>-</text></inputEntry>
+        <inputEntry id="D5_r1_i4"><text>-</text></inputEntry>
+        <outputEntry id="D5_r1_o0"><text>0</text></outputEntry>
+      </rule>
+      <rule id="D5_r2">
+        <inputEntry id="D5_r2_i0"><text>-</text></inputEntry>
+        <inputEntry id="D5_r2_i1"><text>true</text></inputEntry>
+        <inputEntry id="D5_r2_i2"><text>-</text></inputEntry>
+        <inputEntry id="D5_r2_i3"><text>-</text></inputEntry>
+        <inputEntry id="D5_r2_i4"><text>-</text></inputEntry>
+        <outputEntry id="D5_r2_o0"><text>1</text></outputEntry>
+      </rule>
+      <rule id="D5_r3">
+        <inputEntry id="D5_r3_i0"><text>-</text></inputEntry>
+        <inputEntry id="D5_r3_i1"><text>-</text></inputEntry>
+        <inputEntry id="D5_r3_i2"><text>true</text></inputEntry>
+        <inputEntry id="D5_r3_i3"><text>true</text></inputEntry>
+        <inputEntry id="D5_r3_i4"><text>-</text></inputEntry>
+        <outputEntry id="D5_r3_o0"><text>1</text></outputEntry>
+      </rule>
+      <rule id="D5_r4">
+        <inputEntry id="D5_r4_i0"><text>-</text></inputEntry>
+        <inputEntry id="D5_r4_i1"><text>-</text></inputEntry>
+        <inputEntry id="D5_r4_i2"><text>true</text></inputEntry>
+        <inputEntry id="D5_r4_i3"><text>-</text></inputEntry>
+        <inputEntry id="D5_r4_i4"><text>true</text></inputEntry>
+        <outputEntry id="D5_r4_o0"><text>1</text></outputEntry>
+      </rule>
+      <rule id="D5_r5">
+        <inputEntry id="D5_r5_i0"><text>-</text></inputEntry>
+        <inputEntry id="D5_r5_i1"><text>-</text></inputEntry>
+        <inputEntry id="D5_r5_i2"><text>-</text></inputEntry>
+        <inputEntry id="D5_r5_i3"><text>-</text></inputEntry>
+        <inputEntry id="D5_r5_i4"><text>-</text></inputEntry>
+        <outputEntry id="D5_r5_o0"><text>0</text></outputEntry>
+      </rule>
+    </decisionTable>
+  </decision>
+  <decision id="D7" name="D7">
+    <description>D7: house on AC-out1. HOUSE_ACOUT 0 = off, 1 = on, auto: on above 99 W, off after 60 s below 30 W.</description>
+    <decisionTable id="D7_table" hitPolicy="FIRST">
+      <input id="D7_in0" label="mode_off"><inputExpression id="D7_ex0" typeRef="boolean"><text>mode_off</text></inputExpression></input>
+      <input id="D7_in1" label="mode_on"><inputExpression id="D7_ex1" typeRef="boolean"><text>mode_on</text></inputExpression></input>
+      <input id="D7_in2" label="over_on"><inputExpression id="D7_ex2" typeRef="boolean"><text>acout_total &gt; HOUSE_ON_W</text></inputExpression></input>
+      <input id="D7_in3" label="under_off"><inputExpression id="D7_ex3" typeRef="boolean"><text>acout_total &lt; HOUSE_OFF_W</text></inputExpression></input>
+      <input id="D7_in4" label="under_long"><inputExpression id="D7_ex4" typeRef="boolean"><text>under_long</text></inputExpression></input>
+      <input id="D7_in5" label="on"><inputExpression id="D7_ex5" typeRef="boolean"><text>on</text></inputExpression></input>
+      <output id="D7_out0" name="on"/>
+      <output id="D7_out1" name="under"/>
+      <rule id="D7_r1">
+        <inputEntry id="D7_r1_i0"><text>true</text></inputEntry>
+        <inputEntry id="D7_r1_i1"><text>-</text></inputEntry>
+        <inputEntry id="D7_r1_i2"><text>-</text></inputEntry>
+        <inputEntry id="D7_r1_i3"><text>-</text></inputEntry>
+        <inputEntry id="D7_r1_i4"><text>-</text></inputEntry>
+        <inputEntry id="D7_r1_i5"><text>-</text></inputEntry>
+        <outputEntry id="D7_r1_o0"><text>0</text></outputEntry>
+        <outputEntry id="D7_r1_o1"><text>0</text></outputEntry>
+      </rule>
+      <rule id="D7_r2">
+        <inputEntry id="D7_r2_i0"><text>-</text></inputEntry>
+        <inputEntry id="D7_r2_i1"><text>true</text></inputEntry>
+        <inputEntry id="D7_r2_i2"><text>-</text></inputEntry>
+        <inputEntry id="D7_r2_i3"><text>-</text></inputEntry>
+        <inputEntry id="D7_r2_i4"><text>-</text></inputEntry>
+        <inputEntry id="D7_r2_i5"><text>-</text></inputEntry>
+        <outputEntry id="D7_r2_o0"><text>1</text></outputEntry>
+        <outputEntry id="D7_r2_o1"><text>0</text></outputEntry>
+      </rule>
+      <rule id="D7_r3">
+        <inputEntry id="D7_r3_i0"><text>-</text></inputEntry>
+        <inputEntry id="D7_r3_i1"><text>-</text></inputEntry>
+        <inputEntry id="D7_r3_i2"><text>true</text></inputEntry>
+        <inputEntry id="D7_r3_i3"><text>-</text></inputEntry>
+        <inputEntry id="D7_r3_i4"><text>-</text></inputEntry>
+        <inputEntry id="D7_r3_i5"><text>-</text></inputEntry>
+        <outputEntry id="D7_r3_o0"><text>1</text></outputEntry>
+        <outputEntry id="D7_r3_o1"><text>0</text></outputEntry>
+      </rule>
+      <rule id="D7_r4">
+        <inputEntry id="D7_r4_i0"><text>-</text></inputEntry>
+        <inputEntry id="D7_r4_i1"><text>-</text></inputEntry>
+        <inputEntry id="D7_r4_i2"><text>-</text></inputEntry>
+        <inputEntry id="D7_r4_i3"><text>true</text></inputEntry>
+        <inputEntry id="D7_r4_i4"><text>true</text></inputEntry>
+        <inputEntry id="D7_r4_i5"><text>-</text></inputEntry>
+        <outputEntry id="D7_r4_o0"><text>0</text></outputEntry>
+        <outputEntry id="D7_r4_o1"><text>1</text></outputEntry>
+      </rule>
+      <rule id="D7_r5">
+        <inputEntry id="D7_r5_i0"><text>-</text></inputEntry>
+        <inputEntry id="D7_r5_i1"><text>-</text></inputEntry>
+        <inputEntry id="D7_r5_i2"><text>-</text></inputEntry>
+        <inputEntry id="D7_r5_i3"><text>true</text></inputEntry>
+        <inputEntry id="D7_r5_i4"><text>-</text></inputEntry>
+        <inputEntry id="D7_r5_i5"><text>true</text></inputEntry>
+        <outputEntry id="D7_r5_o0"><text>1</text></outputEntry>
+        <outputEntry id="D7_r5_o1"><text>1</text></outputEntry>
+      </rule>
+      <rule id="D7_r6">
+        <inputEntry id="D7_r6_i0"><text>-</text></inputEntry>
+        <inputEntry id="D7_r6_i1"><text>-</text></inputEntry>
+        <inputEntry id="D7_r6_i2"><text>-</text></inputEntry>
+        <inputEntry id="D7_r6_i3"><text>true</text></inputEntry>
+        <inputEntry id="D7_r6_i4"><text>-</text></inputEntry>
+        <inputEntry id="D7_r6_i5"><text>-</text></inputEntry>
+        <outputEntry id="D7_r6_o0"><text>0</text></outputEntry>
+        <outputEntry id="D7_r6_o1"><text>1</text></outputEntry>
+      </rule>
+      <rule id="D7_r7">
+        <inputEntry id="D7_r7_i0"><text>-</text></inputEntry>
+        <inputEntry id="D7_r7_i1"><text>-</text></inputEntry>
+        <inputEntry id="D7_r7_i2"><text>-</text></inputEntry>
+        <inputEntry id="D7_r7_i3"><text>-</text></inputEntry>
+        <inputEntry id="D7_r7_i4"><text>-</text></inputEntry>
+        <inputEntry id="D7_r7_i5"><text>-</text></inputEntry>
+        <outputEntry id="D7_r7_o0"><text>"KEEP"</text></outputEntry>
+        <outputEntry id="D7_r7_o1"><text>0</text></outputEntry>
+      </rule>
+    </decisionTable>
+  </decision>
+</definitions>

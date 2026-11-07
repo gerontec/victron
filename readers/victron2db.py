@@ -36,7 +36,7 @@ DB_CNF = os.path.expanduser('~/.victron2db.cnf')
 BM_STATE = '/data/batmonitor/state.json'
 BM_DIR = '/data/batmonitor'
 # 2026-11-05 (user: observed states only within one logic): short hash of what decides the rule texts
-BM_LOGIC_FILES = ('bm_logic.py', 'bm_tables.h', 'batmonitor.py', 'env')
+BM_LOGIC_FILES = ('bm_logic.py', 'bm_tables.h', 'bm_decisions.dmn', 'batmonitor.py', 'env')
 BM_STATE_MAX_AGE = 120   # s
 BM_STACKS = (('s1', 'BATTERY'), ('s2', 'STACK2_PYTES'))   # 0.77-py: one parallel bank -> s1, s2 stays NULL
 EBOX_STAT = '/home/pi/sofar/ebox_stat.json'

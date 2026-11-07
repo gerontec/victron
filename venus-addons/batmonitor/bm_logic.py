@@ -17,10 +17,12 @@ writes the outputs. The names, stages and tables are the ones of the C file, so 
 Since 2026-11-05 only this Python version is maintained; c/ is dead (the C helpers below - truncating divisions,
 lround, fmin/fmax with NaN, 0-based tm_yday - stay so the numbers are the ones of before).
 """
+import ast
 import math
 import os
 import re
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 
 NPH = 3
@@ -538,22 +540,61 @@ BM_MODE_RULE = {
 }
 
 
-# Decision tables: bm_tables.h (format see there), read once at import. A table is (columns, rows); each row holds
-# one condition per column (1, 0, or _ = any), then the outputs. Hit policy FIRST: the first matching row wins.
+# Decision tables (0.78-py): bm_decisions.dmn, standard DMN 1.3 (hit policy FIRST), read once at import with the
+# standard library (no DMN engine on Venus; tests/check_dmn.py compares this reader with the SpiffWorkflow engine).
+# A table is (columns, rows); each row holds one condition per column (1, 0, or _ = any), then the outputs.
+# COLUMNS[table] = [(column, expression or None)]: the inputExpression of the column (its meaning, e.g.
+# "soc < SOC_MIN"), None = a bare flag the chain code supplies under the column name.
+# The site parameters stay as PARAM lines in bm_tables.h (bm_params_pull.py writes them).
 _ = None
 KEEP = "KEEP"
 TABLES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bm_tables.h")   # 0.76-py: out of c/
+DMN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bm_decisions.dmn")
+DMN_NS = "{https://www.omg.org/spec/DMN/20191111/MODEL/}"
 
-_TABLE_RE = re.compile(r'^TABLE\((\w+),\s*"([\w ]+)",\s*"([\w ]+)"\)\s*(/\*.*\*/)?$')
 _PARAM_RE = re.compile(r'^PARAM\((\w+),\s*(-?[0-9.]+)\)\s*(/\*.*\*/)?$')
-_ROW_RE = re.compile(r'^ROW\((\w+),\s*"([01\- ]+)",\s*([\w, ]+)\)\s*(/\*.*\*/)?$')
+
+# the measured values and flags an inputExpression may use besides the parameters and constants
+DMN_INPUTS = {
+    "have_pv": "Sofar PV value present", "pv": "Sofar PV W", "wp_fresh": "SDM72D heat pump value younger than WP_MAX_AGE",
+    "wp": "heat pump W", "have_soc_bat1": "Sofar Bat1 SoC present", "soc_bat1": "Sofar Bat1 SoC %",
+    "stale": "Sofar sample older than STALE_SECONDS", "bat1": "Sofar Bat1 W, + = charge",
+    "surplus": "PCC surplus W (charge point)", "soc": "bank SoC % (master BMS)", "power_ok": "bank power present",
+    "power": "bank power W, + = charge", "lim_ok": "BMS sends CCL / DCL", "dcl": "BMS DCL A",
+    "cell_ok": "lowest cell present", "cell_min": "lowest cell V",
+    "house": "PCC + own charge W", "deficit": "discharge deficit W",
+    "have_pcc": "PCC present", "pcc": "PCC W, + = export",
+    "acout_total": "AC-out total W",
+}
+_EXPR_NODES = (ast.Expression, ast.BoolOp, ast.And, ast.Or, ast.UnaryOp, ast.Not, ast.USub, ast.Compare, ast.Lt,
+               ast.LtE, ast.Gt, ast.GtE, ast.BinOp, ast.Add, ast.Sub, ast.Name, ast.Load, ast.Constant)
+
+
+def _expr_compile(text, where):
+    """an inputExpression -> (ast, code): only and / or / not(...), one comparison per term, + -, names, numbers
+    (the common subset of FEEL and Python, so a DMN tool reads the same meaning)"""
+    try:
+        tree = ast.parse(text, mode="eval")
+    except SyntaxError as e:
+        raise ValueError("%s: %s" % (where, e))
+    for node in ast.walk(tree):
+        if not isinstance(node, _EXPR_NODES):
+            raise ValueError("%s: %s not allowed in %r" % (where, type(node).__name__, text))
+        if isinstance(node, ast.Compare) and len(node.ops) != 1:
+            raise ValueError("%s: one comparison per term in %r" % (where, text))
+        if isinstance(node, ast.Constant) and (isinstance(node.value, bool) or not isinstance(node.value, (int, float))):
+            raise ValueError("%s: only numbers as constants in %r" % (where, text))
+        if isinstance(node, ast.Name) and node.id not in DMN_INPUTS \
+                and not any(p.name == node.id for p in BM_PARAMS) and not re.fullmatch(r"[A-Z][A-Z0-9_]*", node.id):
+            raise ValueError("%s: unknown name %s in %r" % (where, node.id, text))
+    return tree, compile(tree, "<%s>" % where, "eval")
 
 
 def _output(word, where):
-    """an output word of bm_tables.h -> its value: a number, KEEP or a BM_SRC_ / BM_WP_ / BM_M_ name"""
+    """an outputEntry -> its value: a number, "KEEP" or a BM_SRC_ / BM_WP_ / BM_M_ name"""
     if re.fullmatch(r"-?\d+", word):
         return int(word)
-    if word == "KEEP":
+    if word == '"KEEP"':
         return KEEP
     if re.fullmatch(r"(BM_SRC_|BM_WP_|BM_M_)[A-Z0-9_]+", word) and isinstance(globals().get(word), int):
         return globals()[word]
@@ -561,6 +602,8 @@ def _output(word, where):
 
 
 SITE_PARAMS = {}   # 0.76-py: PARAM lines of bm_tables.h, name -> value; batmonitor.py applies them (Cfg() keeps the defaults)
+COLUMNS = {}       # 0.78-py: table -> [(column, (ast, code) or None)]
+NOTES = {}         # 0.78-py: table -> its DMN description, rule notes: table -> [description per rule]
 
 
 def _site_param(name, text, where):
@@ -577,9 +620,9 @@ def _site_param(name, text, where):
 
 
 def load_tables(path=TABLES_FILE):
-    """bm_tables.h -> {name: (columns, rows)}. Refuses every line that is not TABLE, ROW, a comment or blank, and
-    checks per table: conditions = columns, outputs = output names, last row all "-"."""
-    tables, outs, comment = {}, {}, False
+    """bm_tables.h -> SITE_PARAMS (0.78-py: only PARAM lines, comments, blank lines; the tables are in the DMN file).
+    Refuses every other line. Returns SITE_PARAMS (bm_params_pull.py checks a new PARAM block with it)."""
+    comment = False
     SITE_PARAMS.clear()
     with open(path) as f:
         for n, line in enumerate(f, 1):
@@ -593,38 +636,63 @@ def load_tables(path=TABLES_FILE):
                 comment = "*/" not in s
                 continue
             m = _PARAM_RE.match(s)
-            if m:
-                _site_param(m.group(1), m.group(2), where)
-                continue
-            m = _TABLE_RE.match(s)
-            if m:
-                if m.group(1) in tables:
-                    raise ValueError("%s: table %s defined twice" % (where, m.group(1)))
-                tables[m.group(1)] = (tuple(m.group(2).split()), [])
-                outs[m.group(1)] = m.group(3).split()
-                continue
-            m = _ROW_RE.match(s)
             if not m:
-                raise ValueError("%s: neither PARAM, TABLE, ROW nor a comment: %s" % (where, s))
-            if m.group(1) not in tables:
-                raise ValueError("%s: ROW of %s before its TABLE" % (where, m.group(1)))
-            cols, rows = tables[m.group(1)]
-            cond = m.group(2).split()
-            out = [_output(w.strip(), where) for w in m.group(3).split(",")]
-            if len(cond) != len(cols):
-                raise ValueError("%s: %d conditions for the %d columns of %s" % (where, len(cond), len(cols), m.group(1)))
-            if len(out) != len(outs[m.group(1)]):
-                raise ValueError("%s: %d outputs, %s has %d" % (where, len(out), m.group(1), len(outs[m.group(1)])))
-            rows.append(tuple(_ if c == "-" else int(c) for c in cond) + tuple(out))
-    for name, (cols, rows) in tables.items():
+                raise ValueError("%s: neither PARAM nor a comment: %s" % (where, s))
+            _site_param(m.group(1), m.group(2), where)
+    return SITE_PARAMS
+
+
+def load_decisions(path=DMN_FILE):
+    """bm_decisions.dmn -> {name: (columns, rows)}, COLUMNS, NOTES. Checks per table: hit policy FIRST, entries
+    true / false / -, conditions = inputs, outputs = output columns, last rule all "-", a column name means the same
+    expression in every table that has it."""
+    root = ET.parse(path).getroot()
+    if root.tag != DMN_NS + "definitions":
+        raise ValueError("%s: not a DMN 1.3 definitions file" % path)
+    tables, meaning = {}, {}
+    COLUMNS.clear()
+    NOTES.clear()
+    entry = {"true": 1, "false": 0, "-": _, "": _}
+    for dec in root.iter(DMN_NS + "decision"):
+        name = dec.get("name")
+        dt = dec.find(DMN_NS + "decisionTable")
+        where = "%s:%s" % (os.path.basename(path), name)
+        if dt is None or dt.get("hitPolicy", "UNIQUE") != "FIRST":
+            raise ValueError("%s: needs a decisionTable with hitPolicy FIRST" % where)
+        if name in tables:
+            raise ValueError("%s: decision defined twice" % where)
+        cols = []
+        for inp in dt.findall(DMN_NS + "input"):
+            label = inp.get("label")
+            text = (inp.findtext("%sinputExpression/%stext" % (DMN_NS, DMN_NS)) or "").strip()
+            if not label or not text:
+                raise ValueError("%s: input without label or inputExpression" % where)
+            if meaning.setdefault(label, text) != text:
+                raise ValueError("%s: column %s means %r here, %r elsewhere" % (where, label, text, meaning[label]))
+            cols.append((label, None if text == label else _expr_compile(text, "%s.%s" % (where, label))))
+        outs = [o.get("name") for o in dt.findall(DMN_NS + "output")]
+        rows, notes = [], []
+        for k, rule in enumerate(dt.findall(DMN_NS + "rule"), 1):
+            ins = [(e.findtext(DMN_NS + "text") or "").strip() for e in rule.findall(DMN_NS + "inputEntry")]
+            ous = [(e.findtext(DMN_NS + "text") or "").strip() for e in rule.findall(DMN_NS + "outputEntry")]
+            if len(ins) != len(cols) or len(ous) != len(outs):
+                raise ValueError("%s rule %d: %d / %d entries for %d inputs / %d outputs"
+                                 % (where, k, len(ins), len(ous), len(cols), len(outs)))
+            if any(t not in entry for t in ins):
+                raise ValueError("%s rule %d: input entries must be true / false / -: %s" % (where, k, ins))
+            rows.append(tuple(entry[t] for t in ins) + tuple(_output(t, "%s rule %d" % (where, k)) for t in ous))
+            notes.append((rule.findtext(DMN_NS + "description") or "").strip())
         if not rows or any(c is not _ for c in rows[-1][:len(cols)]):
-            raise ValueError("%s: table %s does not end with an all \"-\" row" % (os.path.basename(path), name))
+            raise ValueError("%s: does not end with an all \"-\" rule" % where)
+        tables[name] = (tuple(c for c, _e in cols), rows)
+        COLUMNS[name] = cols
+        NOTES[name] = ((dec.findtext(DMN_NS + "description") or "").strip(), notes)
     return tables
 
 
 def first_hit(table, bits):
     """the outputs of the first matching row (a tuple; one output -> the value itself). A column the caller does not
-    provide is an error (a misspelled column name in bm_tables.h)."""
+    provide is an error (a misspelled column name in the DMN file)."""
     cols, rows = table
     for row in rows:
         if all(c is _ or bool(bits[k]) == bool(c) for k, c in zip(cols, row)):
@@ -637,7 +705,36 @@ def keep(v, old):
     return old if v == KEEP else v
 
 
-TABLES = load_tables()
+_CONSTS = {}
+
+
+def _expr_env(cfg):
+    """names an inputExpression may use besides the inputs: the parameters (cfg values) and the number constants"""
+    if not _CONSTS:
+        _CONSTS.update({k: v for k, v in globals().items()
+                        if re.fullmatch(r"[A-Z][A-Z0-9_]*", k) and isinstance(v, (int, float)) and not isinstance(v, bool)})
+    env = dict(_CONSTS)
+    env.update({p.name: getattr(cfg, p.field) for p in BM_PARAMS})
+    return env
+
+
+def table_bits(cfg, names, **inputs):
+    """the column values of the expression columns of the tables `names`, computed from the inputs with their DMN
+    inputExpression -> {column: bool}. Bare flag columns are not included (the caller adds them). An input an
+    expression needs but the caller did not give raises NameError: no bit on a silent default."""
+    env = _expr_env(cfg)
+    env.update(inputs)
+    out = {}
+    for t in names:
+        for col, ex in COLUMNS[t]:
+            if ex is not None and col not in out:
+                out[col] = bool(eval(ex[1], {"__builtins__": {}}, env))
+    return out
+
+
+
+load_tables()
+TABLES = load_decisions()
 
 
 def bm_d1(b, bat1_first):
@@ -713,7 +810,7 @@ class Chain:
     """what one cycle derives and the later stages read (struct chain)"""
 
     def __init__(self):
-        self.stale = self.wp_on = self.night = self.winter = 0
+        self.stale = self.wp_on = self.wp_fresh = self.night = self.winter = 0
         self.own_charge = self.own_discharge = self.multis = 0.0
         self.b1_first = self.night_floor = 0
         self.src = 0
@@ -733,8 +830,7 @@ def chain_inputs(inp, out, c):
     """derived facts: data age, heat pump on, season (display), night, own AC-in"""
     month, _, _ = localtime(inp.t)
     c.stale = inp.inv_time == 0 or inp.now - inp.inv_time > STALE_SECONDS
-    c.wp_on = inp.wp_time > 0 and inp.now - inp.wp_time < WP_MAX_AGE and inp.wp >= WP_ON_TH
-    c.night = bool(inp.have_pv and inp.pv < NIGHT_PV_TH)
+    c.wp_fresh = inp.wp_time > 0 and inp.now - inp.wp_time < WP_MAX_AGE
     c.winter = month >= WINTER_FROM or month <= WINTER_TO
     c.ff = 0 if inp.force_full in (1, 2) else -1     # 0.77-py: S1 or S2 = the one bank
     # season from the measured energy (season.py), the months only when that is missing or older than 2 days
@@ -761,7 +857,8 @@ def chain_house(cfg, inp, st, out, c):
             load += inp.ac_out[p] if inp.ac_out[p] > 0 else 0
     mode = lround(cfg.house_acout)
     under = int(st.house_under_since > 0)
-    on, under_next = bm_d7(mode == 0, mode == 1, total > HOUSE_ON_W, total < HOUSE_OFF_W,
+    hb = table_bits(cfg, ("D7",), acout_total=total)
+    on, under_next = bm_d7(mode == 0, mode == 1, hb["over_on"], hb["under_off"],
                            (inp.now - st.house_under_since if under else 0) >= HOUSE_OFF_S, st.house_on)
     st.house_on = on
     if not under_next:
@@ -776,14 +873,12 @@ def chain_house(cfg, inp, st, out, c):
 
 def chain_d1(cfg, inp, st, out, c):
     """S3 source and the winter heat pump rule"""
-    b = {
-        "night": c.night,
-        "wp_on": c.wp_on,
-        "b1_above_min": bool(inp.have_soc_bat1 and inp.soc_bat1 > cfg.bat1_soc_min),
-        "b1_ge_release": inp.soc_bat1 >= cfg.bat1_soc_min + BAT1_FIRST_HYST,
-        "winter": c.winter,
-        "b1_dis": bool(not c.stale and inp.bat1 < -B1_DIS_TH),
-    }
+    # 0.78-py: the bits from the inputExpressions of bm_decisions.dmn
+    b = table_bits(cfg, ("D1_LATCH", "D1_B1_FIRST", "D1_SRC", "D1_WP_CAP"), have_pv=inp.have_pv, pv=inp.pv,
+                   wp_fresh=c.wp_fresh, wp=inp.wp, have_soc_bat1=inp.have_soc_bat1, soc_bat1=inp.soc_bat1,
+                   stale=c.stale, bat1=inp.bat1)
+    b["winter"] = c.winter
+    c.night, c.wp_on = b["night"], b["wp_on"]
     out.d1_id = bm_d1_id(b, st.bat1_first)
     o = bm_d1(b, st.bat1_first)
     st.bat1_first = o["bat1_first"]
@@ -824,18 +919,11 @@ def chain_gates(cfg, inp, st, out):
 
 
 def d2_bank_bits(cfg, soc_ok, soc, power_ok, power, lim_ok, dcl, cell_ok, cell_min):
-    dcl_zero = bool(lim_ok and dcl < cfg.dcl_force_a)
-    return {
-        "bms_ok": soc_ok,
-        "soc_lt_min": soc < cfg.soc_min,
-        "soc_ge_release": soc >= cfg.soc_min_release,
-        "soc_lt_force": soc < cfg.soc_force,
-        "soc_ge_force_release": soc >= cfg.soc_force_release,
-        "soc_lt_100": soc < 100.0,
-        "charging": bool(power_ok and power > CHARGING_TH),
-        "low_on": bool(dcl_zero or (cell_ok and cell_min < cfg.cell_force_v)),
-        "low_off": bool(not dcl_zero and (not cell_ok or cell_min >= cfg.cell_force_release_v)),
-    }
+    """the bank columns of D2 from the inputExpressions of bm_decisions.dmn (0.78-py)"""
+    b = table_bits(cfg, ("D2_PROT", "D2_FORCE", "D2_LOW", "D2_MODE"), soc=soc, power_ok=power_ok, power=power,
+                   lim_ok=lim_ok, dcl=dcl, cell_ok=cell_ok, cell_min=cell_min)
+    b["bms_ok"] = soc_ok
+    return b
 
 
 CAP_STEP = 900                 # s: forecast scan step of the peak window
@@ -884,9 +972,7 @@ def ladesperre(cfg, inp, st, out, stale, multis, surplus, c):
         "enabled": bool(cfg.ladesperre and cfg.export_cap > 0),
         "season": LADESPERRE_FROM <= month <= LADESPERRE_TO,
         "fc_cap_ahead": ahead,
-        "pcc_peak": bool(inp.have_pcc and not stale and inp.pcc > PCC_PEAK_TH),
-        "surplus_cap_on": surplus - cfg.export_cap > PCC_SURPLUS_TH,
-        "surplus_cap_hold": surplus - cfg.export_cap > SOYO_HOLD_TH,
+        **table_bits(cfg, ("D4", "D4_PEAK"), have_pcc=inp.have_pcc, stale=stale, pcc=inp.pcc, surplus=surplus),
         "chg_prev": st.soyo_chg_prev,
     }
     block, c.cap_active, st.peak_today = bm_d4(bits, st.peak_today)
@@ -907,8 +993,7 @@ def chain_mode(cfg, inp, st, out, c):
     d = {
         "stale": c.stale,
         "block": c.block,
-        "surplus_gt_on": c.surplus > PCC_SURPLUS_TH,
-        "surplus_gt_hold": c.surplus > SOYO_HOLD_TH,
+        **table_bits(cfg, ("D2_CHARGE_MODE",), surplus=c.surplus),
         "bank": [d2_bank_bits(cfg, st.soc_ok[b], st.soc[b], inp.power_ok[b], inp.power[b], inp.lim_ok[b], inp.dcl[b],
                               inp.cell_ok[b], inp.cell_min[b]) for b in range(NBANK)],
     }
@@ -1000,7 +1085,8 @@ def chain_discharge(cfg, inp, st, out, c):
         st.soyo_prop_prev = 0
         rule = "%s SRC:%s" % ("PROP" if prop else "EXPCAP" if exp else "HOUSE", out.src_why)
     else:
-        prop = bm_d3(1, house < PCC_IMPORT_TH, deficit > SOYO_HOLD_TH, r.prop_hold, st.soyo_prop_prev)
+        d3 = table_bits(cfg, ("D3",), house=house, deficit=deficit)
+        prop = bm_d3(1, d3["house_import"], d3["deficit_gt_hold"], r.prop_hold, st.soyo_prop_prev)
         st.soyo_prop_prev = prop
         w = dis_amount(prop, deficit, r.idle_w, c.dis_max)
         rule = "%s SRC:%s" % ("PROP" if prop else "IDLE", out.src_why)

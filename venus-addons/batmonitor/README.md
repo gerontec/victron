@@ -15,7 +15,8 @@ computes one AC setpoint per phase and writes it to the Multis. Only the Python 
 | Charge end | only up to the Pytes limit (CVL 56.6 V from dbus-ebox-battery, Pytes SoC 100 % = FULL); MUST top hold and balancing lead removed |
 | Split | total up to `SINGLE_MAX_W` 600 W: one MultiPlus (tag `1PH`, others `STBY`), the next phase every `ROTATE_S` 600 s (L1 → L2 → L3), charge and discharge alike; above 600 W all three alike (`EQ`), back to one below 500 W (`SINGLE_HYST_W` 100) |
 | Watch | Pytes vs MUST voltage differ only by the cable drop; > 0.5 V logs an ERROR (`state.json` `bms_volt_diff_v`) |
-| Test | `python3 tests/test_split.py` (closed loop on a simple plant), `python3 tests/test_parse.py` |
+| Decisions | 0.78-py: `bm_decisions.dmn` = the decision tables as standard DMN 1.3 (hit policy FIRST), the meaning of every column as its `inputExpression` (e.g. `soc < SOC_MIN`, common subset of FEEL and Python); opens in the Camunda Modeler / dmn-js. bm_logic.py reads it with the standard library (no engine on Venus). `bm_tables.h` keeps only the PARAM lines (written by `host/bm_params_pull.py`) |
+| Test | `python3 tests/test_split.py` (closed loop on a simple plant), `python3 tests/test_parse.py`, `python3 tests/check_reach.py` (reachability matrix of the decision states, thresholds from the DMN, numpy + networkx, ~12 s), `python3 tests/check_dmn.py` (the DMN through the SpiffWorkflow engine against bm_logic: all table combinations + sampled column meaning), `python3 tests/diff_logic.py <old dir>` (old vs new bm_logic on random cycles). Notebook / dell: `pip install --user --break-system-packages SpiffWorkflow numpy networkx` |
 
 The C files in `c/` and the sections below describe the two-bank versions up to 0.76 (history).
 

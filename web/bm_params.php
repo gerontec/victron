@@ -113,7 +113,7 @@ code { color:var(--acc); }
 </style></head><body>
 <h1>batmonitor parameters</h1>
 <div class="muted">schema <?= (int)$schema['id'] ?> of batmonitor <?= h($schema['bm_version']) ?>, published by the Pi <?= h($schema['created_at']) ?> · the Pi pulls the newest version every 5 min, checks it against its own limits and writes it into the PARAM lines of bm_tables.h ·
-<?= $can_write ? '<span class="ok">write access (VPN ' . h($_SERVER['REMOTE_ADDR']) . ')</span>' : 'read only - writing only from the VPN' ?> · <a href="bm_flow.php" style="color:var(--acc)">decision flow</a></div>
+<?= $can_write ? '<span class="ok">write access (VPN ' . h($_SERVER['REMOTE_ADDR']) . ')</span>' : 'read only - writing only from the VPN' ?> · <a href="bm_flow.php" style="color:var(--acc)">decision flow</a> · <a href="bm_dmn.php" style="color:var(--acc)">decision tables (DMN editor)</a></div>
 <?php if ($live): ?><div class="muted">live rules <?= h($live['ts']) ?>: L1 <code><?= h($live['bm_l1_rule']) ?></code> · L2 <code><?= h($live['bm_l2_rule']) ?></code> · L3 <code><?= h($live['bm_l3_rule']) ?></code></div><?php endif ?>
 <?php if ($msg): ?><div class="box ok"><?= h($msg) ?></div><?php endif ?>
 <?php if ($err): ?><div class="box bad"><?= h($err) ?></div><?php endif ?>
