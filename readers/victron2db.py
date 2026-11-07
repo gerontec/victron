@@ -38,7 +38,7 @@ BM_DIR = '/data/batmonitor'
 # 2026-11-05 (user: observed states only within one logic): short hash of what decides the rule texts
 BM_LOGIC_FILES = ('bm_logic.py', 'bm_tables.h', 'batmonitor.py', 'env')
 BM_STATE_MAX_AGE = 120   # s
-BM_STACKS = (('s1', 'STACK1_MUST'), ('s2', 'STACK2_PYTES'))
+BM_STACKS = (('s1', 'BATTERY'), ('s2', 'STACK2_PYTES'))   # 0.77-py: one parallel bank -> s1, s2 stays NULL
 EBOX_STAT = '/home/pi/sofar/ebox_stat.json'
 EBOX_STAT_MAX_AGE = 2 * 86400   # s
 EBOX_PACKS = 3

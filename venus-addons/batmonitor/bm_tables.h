@@ -28,9 +28,6 @@ PARAM(HOUSE_ACOUT, 0)
 PARAM(SOC_FORCE, 0)
 PARAM(SOC_MIN, 8)
 PARAM(SOC_MIN_RELEASE, 10)
-PARAM(TOP_HOLD_CELL_V, 3.58)
-PARAM(TOP_HOLD_MAX_A, 1)
-PARAM(TOP_HOLD_STACK, 1)            /* 0.73-c: top hold on STACK1 MUST (cell 8 high, cell 14 low) */
 PARAM(WP_WINTER_W, 100)
 
 /* D1: Sofar first latch. Off at or below BAT1_SOC_MIN, on again from BAT1_SOC_MIN + 2 %. */
@@ -64,48 +61,41 @@ ROW(D2_CHARGE_MODE,   "1             -        -              ", 1)
 ROW(D2_CHARGE_MODE,   "-             1        1              ", 1)
 ROW(D2_CHARGE_MODE,   "-             -        -              ", 0)
 
-/* D2: SoC protection per stack, SOC_MIN .. SOC_MIN_RELEASE (only while the BMS reports). */
+/* D2: SoC protection, SOC_MIN .. SOC_MIN_RELEASE (only while the BMS reports). */
 TABLE(D2_PROT, "bms_ok soc_lt_min soc_ge_release", "prot")
 ROW(D2_PROT,   "1      1          -             ", 1)
 ROW(D2_PROT,   "1      -          1             ", 0)
 ROW(D2_PROT,   "-      -          -             ", KEEP)
 
-/* D2: grid force charge per stack, SOC_FORCE .. SOC_FORCE_RELEASE. */
+/* D2: grid force charge, SOC_FORCE .. SOC_FORCE_RELEASE. */
 TABLE(D2_FORCE, "bms_ok soc_lt_force soc_ge_force_release", "force")
 ROW(D2_FORCE,   "1      1            -                   ", 1)
 ROW(D2_FORCE,   "1      -            1                   ", 0)
 ROW(D2_FORCE,   "-      -            -                   ", KEEP)
 
-/* D2: LOW force charge per stack: DCL 0 or lowest cell < CELL_FORCE_V;
+/* D2: LOW force charge: DCL 0 or lowest cell < CELL_FORCE_V;
  * ends once DCL is back, the cell >= CELL_FORCE_RELEASE_V and the SoC >= SOC_MIN_RELEASE. */
 TABLE(D2_LOW, "bms_ok low_on low_off soc_ge_release", "low")
 ROW(D2_LOW,   "1      1      -       -             ", 1)
 ROW(D2_LOW,   "1      -      1       1             ", 0)
 ROW(D2_LOW,   "-      -      -       -             ", KEEP)
 
-/* D2: mode per stack, priority from top to bottom (force / low / prot = the latches above,
- * ff = force_full_from_pv names this stack, top = top hold window of this stack). */
-TABLE(D2_MODE, "bms_ok force low stale charge_mode block soc_lt_100 ff top prot charging", "mode")
-ROW(D2_MODE,   "0      -     -   -     -           -     -          -  -   -    -       ", BM_M_BMS_MISSING)
-ROW(D2_MODE,   "-      1     -   -     -           -     -          -  -   -    -       ", BM_M_FORCE)
-ROW(D2_MODE,   "-      -     1   -     -           -     -          -  -   -    -       ", BM_M_FORCE)
-ROW(D2_MODE,   "-      -     -   1     -           -     -          -  -   -    -       ", BM_M_STALE)
-ROW(D2_MODE,   "-      -     -   -     1           1     -          -  -   -    -       ", BM_M_LADESPERRE)
-ROW(D2_MODE,   "-      -     -   -     1           -     1          -  -   -    -       ", BM_M_CHARGE)
-ROW(D2_MODE,   "-      -     -   -     1           -     -          1  -   -    -       ", BM_M_CHARGE)
-ROW(D2_MODE,   "-      -     -   -     1           -     -          -  1   -    -       ", BM_M_CHARGE)
-ROW(D2_MODE,   "-      -     -   -     1           -     -          -  -   -    -       ", BM_M_FULL)
-ROW(D2_MODE,   "-      -     -   -     -           -     -          1  -   -    -       ", BM_M_HOLD)
-ROW(D2_MODE,   "-      -     -   -     -           -     -          -  -   1    -       ", BM_M_PROT)
-ROW(D2_MODE,   "-      -     -   -     -           -     -          -  -   -    1       ", BM_M_CHARGING)
-ROW(D2_MODE,   "-      -     -   -     -           -     -          -  -   -    -       ", BM_M_DIS)
-
-/* SoC balancing: the stack more than SOC_BALANCE_ON ahead leads, cleared below SOC_BALANCE_OFF. */
-TABLE(DLEAD, "both_ok has_lead diff_gt_on diff_lt_off", "lead")
-ROW(DLEAD,   "0       -        -          -          ", LEAD_NONE)
-ROW(DLEAD,   "-       0        1          -          ", LEAD_NEW)
-ROW(DLEAD,   "-       1        -          1          ", LEAD_END)
-ROW(DLEAD,   "-       -        -          -          ", KEEP)
+/* D2: mode of the battery, priority from top to bottom (force / low / prot = the latches above,
+ * ff = force_full_from_pv is on). 0.77-py: one bank (both stacks parallel), charged only up to the Pytes limit:
+ * no top hold window any more, SoC 100 % of the Pytes BMS = FULL. */
+TABLE(D2_MODE, "bms_ok force low stale charge_mode block soc_lt_100 ff prot charging", "mode")
+ROW(D2_MODE,   "0      -     -   -     -           -     -          -  -    -       ", BM_M_BMS_MISSING)
+ROW(D2_MODE,   "-      1     -   -     -           -     -          -  -    -       ", BM_M_FORCE)
+ROW(D2_MODE,   "-      -     1   -     -           -     -          -  -    -       ", BM_M_FORCE)
+ROW(D2_MODE,   "-      -     -   1     -           -     -          -  -    -       ", BM_M_STALE)
+ROW(D2_MODE,   "-      -     -   -     1           1     -          -  -    -       ", BM_M_LADESPERRE)
+ROW(D2_MODE,   "-      -     -   -     1           -     1          -  -    -       ", BM_M_CHARGE)
+ROW(D2_MODE,   "-      -     -   -     1           -     -          1  -    -       ", BM_M_CHARGE)
+ROW(D2_MODE,   "-      -     -   -     1           -     -          -  -    -       ", BM_M_FULL)
+ROW(D2_MODE,   "-      -     -   -     -           -     -          1  -    -       ", BM_M_HOLD)
+ROW(D2_MODE,   "-      -     -   -     -           -     -          -  1    -       ", BM_M_PROT)
+ROW(D2_MODE,   "-      -     -   -     -           -     -          -  -    1       ", BM_M_CHARGING)
+ROW(D2_MODE,   "-      -     -   -     -           -     -          -  -    -       ", BM_M_DIS)
 
 /* D3: PROPORTIONAL (1) while importing, or (already proportional / night floor) while the deficit > 20 W. */
 TABLE(D3, "any_dis house_import prop_prev prop_hold deficit_gt_hold", "prop")

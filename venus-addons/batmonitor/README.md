@@ -1,13 +1,23 @@
 # batmonitor
 
-Charge / discharge control of the three MultiPlus-II phases on two separate battery stacks (ESS external control,
-Hub4Mode 3). Every 5 s one cycle reads the inputs (Sofar PCC and Bat1 over MQTT, BMS values and AC-in / AC-out from
-D-Bus), computes one AC setpoint per phase and writes it to the Multis.
+Charge / discharge control of the three MultiPlus-II phases on one battery bank (ESS external control, Hub4Mode 3).
+Every 5 s one cycle reads the inputs (Sofar PCC and Bat1 over MQTT, BMS values and AC-in / AC-out from D-Bus),
+computes one AC setpoint per phase and writes it to the Multis. Only the Python version runs (`BATMONITOR_PYTHON=1`).
 
-| Bank | BMS service | Phases |
-|---|---|---|
-| `STACK1_MUST` | `com.victronenergy.battery.socketcan_can0` | L1 |
-| `STACK2_PYTES` | `com.victronenergy.battery.ebox` | L2 + L3 |
+**0.77-py (2026-11-07): the two 300 Ah stacks are physically parallel = one 600 Ah bank behind L1 + L2 + L3.**
+
+| | |
+|---|---|
+| Bank | `BATTERY`, 600 Ah, phases L1 + L2 + L3 |
+| Master BMS | Pytes `com.victronenergy.battery.ebox`: SoC, voltage, CCL / DCL (`/Info/Pack/*`, the Pytes alone) |
+| Fallback BMS | MUST `com.victronenergy.battery.socketcan_can0`: takes over SoC, voltage, CCL / DCL while the Pytes BMS is missing (redundant BMS) |
+| Both BMS | bank power = sum of both; lowest / highest cell over both (LOW force charge sees the weakest cell of either stack) |
+| Charge end | only up to the Pytes limit (CVL 56.6 V from dbus-ebox-battery, Pytes SoC 100 % = FULL); MUST top hold and balancing lead removed |
+| Split | total up to `SINGLE_MAX_W` 600 W: one MultiPlus (tag `1PH`, others `STBY`), the next phase every `ROTATE_S` 600 s (L1 → L2 → L3), charge and discharge alike; above 600 W all three alike (`EQ`), back to one below 500 W (`SINGLE_HYST_W` 100) |
+| Watch | Pytes vs MUST voltage differ only by the cable drop; > 0.5 V logs an ERROR (`state.json` `bms_volt_diff_v`) |
+| Test | `python3 tests/test_split.py` (closed loop on a simple plant), `python3 tests/test_parse.py` |
+
+The C files in `c/` and the sections below describe the two-bank versions up to 0.76 (history).
 
 | File | Role |
 |---|---|

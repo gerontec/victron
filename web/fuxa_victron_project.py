@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Generate the FUXA project for venus.heissa.de: the Victron three-phase MultiPlus system in Lenggries.
 WebAPI device polling victron_api.php (one tag per value), one view with the grid / ESS, the ATS changeover switch,
-ATS changeover switch (AC-in), the Venus Pi 4, the three MultiPlus-II and the two battery stacks:
-dev1 (L2, middle) on Stack1 (MUST, CAN BMS), dev0 (L1) and dev2 (L3) on Stack2 (Pytes, EBox).
+ATS changeover switch (AC-in), the Venus Pi 4, the three MultiPlus-II and the two battery stacks. Since 2026-11-07 the
+stacks are parallel: all three units on one DC bus, Stack1 (MUST, CAN BMS, fallback) + Stack2 (Pytes, EBox, master BMS).
 Same widget formats as fuxa_ww_project.py (gerontec/FUXA branch heissa).
 usage: python3 fuxa_victron_project.py victron_api.json > /tmp/fuxa_project.json"""
 import json, sys
@@ -256,9 +256,10 @@ for a_, b_ in (('l2', 'l1'), ('l1', 'l3')):
     text((CX[a_] + CX[b_]) // 2, 316, 'VE.Bus', 12, anchor='middle', fill=BLUE)
 
 # ---- the three MultiPlus -----------------------------------------------------------------------
-MP = [('l2', 'Unit 1 (left)', 'L2', 'dev1 · HQ2606Y2Y4U', 'Stack2 · Pytes'),
-      ('l1', 'Unit 2 (middle)', 'L1', 'dev0 · HQ2606P4NCH · master', 'Stack1 · MUST'),
-      ('l3', 'Unit 3 (right)', 'L3', 'dev2 · HQ2605CWUWH', 'Stack2 · Pytes')]
+BUS = 'common bus'
+MP = [('l2', 'Unit 1 (left)', 'L2', 'dev1 · HQ2606Y2Y4U', BUS),
+      ('l1', 'Unit 2 (middle)', 'L1', 'dev0 · HQ2606P4NCH · master', BUS),
+      ('l3', 'Unit 3 (right)', 'L3', 'dev2 · HQ2605CWUWH', BUS)]
 for p, dev, ph, note, bat in MP:
     x = CX[p] - 160
     box(x, 275, 320, 165, '#16263a', 12, f'{p}_ac_in_w', flow_ranges('color', '#3a2a10', '#16263a', '#0f2a1c', 50))
@@ -270,7 +271,7 @@ for p, dev, ph, note, bat in MP:
     value(x + 165, 378, f'{p}_ac_in_v', 'V', 1, 14, anchor='end')
     text(x + 18, 400, 'AC-out1', 13, fill=MUTED)
     value(x + 165, 400, f'{p}_ac_out_w', 'W', 0, 14, anchor='end')
-    text(x + 18, 428, f'DC: {bat}', 12, 'bold', fill=ORANGE if 'Pytes' in bat else BLUE)
+    text(x + 18, 428, f'DC: {bat}', 12, 'bold', fill=STROKE)
 
 # ---- front panel LEDs in each unit, laid out like the MultiPlus-II front (2026-10-23) ----------------
 #      Venus has /Leds/* only for the VE.Bus master (unit 2, L1): 0 off, 1 on, 2 blinking, 3 blinking inverted (2 and 3
@@ -306,15 +307,26 @@ for p, *_ in MP:
     if not master:
         text(x + 242, 436, 'LEDs: no data (Venus: master only)', 8, anchor='middle', fill=GREY)
 
-# ---- DC lines: L2 -> Stack1, L1 + L3 -> Stack2 ---------------------------------------------------
-line(f'M{CX["l1"]},440 L{CX["l1"]},480', 's1_bat_kw', 0.05, 9)
-line(f'M{CX["l2"]},440 L{CX["l2"]},612', 's2_bat_kw', 0.05, 9)
-line(f'M{CX["l3"]},440 L{CX["l3"]},612', 's2_bat_kw', 0.05, 9)
+# ---- DC (2026-11-07): the stacks are parallel, every unit on one DC bus, both stacks hang on it -----------
+DCY = 458
+for p, x in CX.items():
+    line(f'M{x},440 L{x},{DCY}', f'{p}_ac_in_w', 50, 7)        # sign of the unit (battery side of its AC-in)
+line(f'M{LEFT},{DCY} L{RIGHT},{DCY}', 'bank_kw', 0.05, 11)      # the bus: Stack1 + Stack2
+line(f'M600,{DCY} L600,480', 's1_bat_kw', 0.05, 9)
+line(f'M1100,{DCY} L1100,612', 's2_bat_kw', 0.05, 9)
+text(40, 490, 'DC bus 48 V · Stack1 ∥ Stack2 = 600 Ah', 13, 'bold')
+text(40, 512, 'bank power', 12, fill=MUTED)
+value(300, 512, 'bank_kw', 'kW', 2, 13, anchor='end')
+text(40, 532, 'ΔU Pytes − MUST', 12, fill=MUTED)
+value(300, 532, 'bat_dv', 'V', 2, 13, anchor='end')
+text(40, 550, '(cable drop only, batmonitor warns > 0.5 V)', 10, fill=MUTED)
+text(40, 572, 'batmonitor 0.77: < 600 W one MultiPlus,', 11, fill=MUTED)
+text(40, 588, 'next unit every 600 s; above all three', 11, fill=MUTED)
 
 # ---- Stack1: MUST, CAN BMS ---------------------------------------------------------------------
 x0, y0 = 450, 480
 box(x0, y0, 560, 120, '#0f1d33')
-text(x0 + 18, y0 + 26, 'Stack1 · MUST · 300 Ah LFP · CAN BMS', 15, 'bold', fill=BLUE)
+text(x0 + 18, y0 + 26, 'Stack1 · MUST · 300 Ah · CAN BMS · fallback', 15, 'bold', fill=BLUE)
 value(x0 + 350, y0 + 26, 's1_eta', '', None, 14)
 value(x0 + 540, y0 + 26, 's1_chg_avg5_kw', 'kW (5 min)', 2, 11, 'normal', anchor='end', fill=MUTED)
 value(x0 + 18, y0 + 72, 's1_soc', '%', 0, 34)
@@ -338,7 +350,7 @@ value(x0 + 400, y0 + 104, 's1_dcl_a', 'A', 0, 11, 'normal', anchor='end')
 # ---- Stack2: Pytes (EBox), active BMS for DVCC --------------------------------------------------
 x0, y0 = 30, 612
 box(x0, y0, 1400, 125, '#2a1f0e')
-text(x0 + 18, y0 + 26, 'Stack2 · Pytes (EBox) · 300 Ah LFP 16S · /home/pi/python/ebox_mqtt.py → /home/pi/sofar/ebox', 15, 'bold', fill=ORANGE)
+text(x0 + 18, y0 + 26, 'Stack2 · Pytes (EBox) · 300 Ah LFP 16S · master BMS (DVCC) · ebox_mqtt.py → /home/pi/sofar/ebox', 15, 'bold', fill=ORANGE)
 value(x0 + 1090, y0 + 26, 's2_eta', '', None, 14)
 value(x0 + 1380, y0 + 26, 's2_chg_avg5_kw', 'kW (5 min)', 2, 11, 'normal', anchor='end', fill=MUTED)
 value(x0 + 18, y0 + 76, 's2_soc', '%', 0, 34)
@@ -355,7 +367,7 @@ for i, (lab, key, unit, dig) in enumerate([('power', 's2_bat_kw', 'kW', 2), ('vo
     x, y = x0 + 470 + (i % 4) * 230, y0 + 58 + (i // 4) * 28
     text(x, y, lab, 13, fill=MUTED)
     value(x + 200, y, key, unit, dig, 15, anchor='end')
-text(x0 + 470, y0 + 112, 'batmonitor (both stacks): discharge stop < 5 % (free at 7 %) · forced grid charge < 3 % until 5 %', 12, fill=MUTED)
+text(x0 + 470, y0 + 112, 'batmonitor (one bank, Pytes SoC): discharge stop < 8 % (free at 10 %) · charge only up to the Pytes limit (CVL 56.6 V)', 12, fill=MUTED)
 
 # ---- chart tile at the bottom: click opens the Grafana wagodb panel (1 h) in a new tab --------------
 GRAFANA_1H = ('https://heissa.de:2999/d/adfjrkc/wagodb?orgId=1&from=now-1h&to=now&timezone=browser'

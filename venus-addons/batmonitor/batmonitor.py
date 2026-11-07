@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-batmonitor.py - battery protection and charge / discharge control for a three-phase MultiPlus system whose phases sit
-on separate battery banks (Stack1 MUST on L1, Stack2 Pytes on L2 + L3). Python port of c/batmonitor.c 0.51-c.
+batmonitor.py - battery protection and charge / discharge control for a three-phase MultiPlus system on one battery
+bank: since 2026-11-07 Stack1 MUST and Stack2 Pytes are parallel (600 Ah). Master = the Pytes BMS (EBox driver), the
+MUST BMS (can0) takes over while the Pytes BMS is missing; power and cells come from both (read_bank).
 
 This file is the shell: it reads the inputs (D-Bus of Venus, MQTT on .218), calls bm_logic.bm_step once per cycle
 and writes the outputs (ESS setpoints per phase, state file, log, PI shadow CSV, DO4 pulse, peak model). The rules
-themselves are in bm_logic.py (a 1:1 port of c/bm_logic.c, proven byte-identical by `make py-compare`); the MQTT
-payload checks in bm_parse.py. The C version is the one that runs; this port is its readable reference and the
-fallback the service starts with BATMONITOR_PYTHON=1.
+themselves are in bm_logic.py and bm_tables.h; the MQTT payload checks in bm_parse.py. Only this Python version is
+maintained (service/run starts it with BATMONITOR_PYTHON=1); c/ is no longer used.
 
 Environment (service/run exports /data/batmonitor/env):
   BATMONITOR_LIVE=1            writes the setpoints; without: dry run (log + state file only)
@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bm_logic as L  # noqa: E402
 import bm_parse  # noqa: E402
 
-VERSION = "0.76-py"
+VERSION = "0.77-py"
 INVERTER_TOPIC = "inverter/power_grid_exchange/json"
 FAST_HOLD_S = 15.0   # s: while a sofar_fast sample is this fresh, pivot2db samples on the topic are ignored (0.71)
 R290_TOPIC = "r290/heatpump/all"
@@ -52,6 +52,7 @@ ETA_WINDOW = 300.0
 ETA_MIN_W = 50.0
 PI_SHADOW_MAX = 8000000                    # bytes, then renamed to .1
 BUSITEM = "com.victronenergy.BusItem"
+PARALLEL_DIFF_V = 0.5                      # V: Pytes vs MUST BMS voltage; parallel stacks differ only by the cable drop
 
 
 def mono():
@@ -101,6 +102,9 @@ class Batmonitor:
                        have_soc_bat1=0, soc_bat1=0.0, r290_hz=0, r290_time=0.0, aussen=0.0, aussen_time=0.0,
                        wp=0.0, wp_time=0.0, season=0, season_ts=0.0, fc_target=0.0, fc_ts=0.0, fc_corr=0.0,
                        fc_slots=[], force_full=0)
+        self.master = None                 # 0.77-py: D-Bus service of the master BMS of the last cycle
+        self.volt_diff = None              # 0.77-py: Pytes minus MUST BMS voltage, None = one is missing
+        self.volt_diff_bad = False
         self.bus = dbus.SystemBus()
         self.mqttc = None
 
@@ -212,7 +216,7 @@ class Batmonitor:
                 old = self.mq["force_full"]
                 self.mq["force_full"] = ff
             if ff != old:
-                log("force_full_from_pv: %s" % (L.BM_BANKS[ff - 1].name if ff else "off"))
+                log("force_full_from_pv: %s" % ("on" if ff else "off"))
             return
         if topic == R290_TOPIC:
             hz = bm_parse.parse_r290(text)
@@ -285,11 +289,68 @@ class Batmonitor:
     # ---- forecast and outputs ------------------------------------------------------------------------------
     def sample_power(self):
         now = mono()
-        for b, bank in enumerate(L.BM_BANKS):
-            pw = self.get(bank.service, "/Dc/0/Power")
+        for b in range(L.NBANK):
+            pw = self.bank_power()
             if pw is not None:
                 self.hist[b].append((now, pw))
             self.hist[b] = [(t, p) for t, p in self.hist[b] if now - t <= ETA_WINDOW][-128:]
+
+    def bank_power(self):
+        """battery power of the parallel bank = sum of both BMS (each measures its own stack), None = none reports"""
+        vals = [self.get(s, "/Dc/0/Power") for s in (L.BM_BANKS[0].service, L.AUX_SERVICE)
+                if self.get(s, "/Connected") == 1.0]
+        vals = [v for v in vals if v is not None]
+        return sum(vals) if vals else None
+
+    def read_bank(self, i):
+        """0.77-py, one bank: the master BMS gives SoC, voltage and CCL / DCL - the Pytes (EBox, its own /Info/Pack/*
+        limits: charged only up to the Pytes limit), else the MUST as fallback. Power = sum, lowest / highest cell over
+        both BMS, so the LOW force charge sees the weakest cell of either stack."""
+        b = 0
+        master = None
+        for s in (L.BM_BANKS[0].service, L.AUX_SERVICE):
+            if self.get(s, "/Connected") == 1.0 and self.get(s, "/Soc") is not None:
+                master = s
+                break
+        if master != self.master:
+            (log if master == L.BM_BANKS[0].service else loge)(
+                "master BMS: %s (was %s)" % (master or "none", self.master or "none"))
+            self.master = master
+        soc = self.get(master, "/Soc") if master else None
+        i.bms_ok[b], i.soc[b] = int(soc is not None), soc or 0.0
+        pw = self.bank_power()
+        i.power_ok[b], i.power[b] = int(pw is not None), pw or 0.0
+        u = self.get(master, "/Dc/0/Voltage")
+        i.volt_ok[b], i.volt[b] = int(u is not None), u or 0.0
+        # the EBox driver puts the Pytes alone on /Info/Pack/*, /Info/* = Pytes + MUST (DVCC); the MUST has /Info/* only
+        lim = "/Info/Pack/" if self.get(master, "/Info/Pack/MaxChargeCurrent") is not None else "/Info/"
+        ccl, dcl = self.get(master, lim + "MaxChargeCurrent"), None
+        if ccl is not None and ccl >= 0:
+            dcl = self.get(master, lim + "MaxDischargeCurrent")
+        i.lim_ok[b] = int(ccl is not None and ccl >= 0 and dcl is not None and dcl >= 0)
+        i.ccl[b], i.dcl[b] = ccl or 0.0, dcl or 0.0
+        lo, hi = [], []
+        for s in (L.BM_BANKS[0].service, L.AUX_SERVICE):
+            if self.get(s, "/Connected") != 1.0:
+                continue
+            c = self.get(s, "/System/MinCellVoltage")
+            if c is not None and 1.5 < c < 4.5:
+                lo.append(c)
+            c = self.get(s, "/System/MaxCellVoltage")
+            if c is not None and 1.5 < c < 4.5:
+                hi.append(c)
+        # user 2026-11-07: parallel, the two BMS voltages differ only by the cable drop; more = connection broken
+        up = self.get(L.BM_BANKS[0].service, "/Dc/0/Voltage") if self.get(L.BM_BANKS[0].service, "/Connected") == 1.0 else None
+        um = self.get(L.AUX_SERVICE, "/Dc/0/Voltage") if self.get(L.AUX_SERVICE, "/Connected") == 1.0 else None
+        self.volt_diff = up - um if up is not None and um is not None else None
+        bad = self.volt_diff is not None and abs(self.volt_diff) > PARALLEL_DIFF_V
+        if bad != self.volt_diff_bad:
+            (loge if bad else log)("BMS voltages Pytes %.2f V / MUST %.2f V, difference %+.2f V %s %.1f V%s" % (
+                up, um, self.volt_diff, ">" if bad else "<=", PARALLEL_DIFF_V,
+                ": stacks no longer parallel?" if bad else ", ok again"))
+            self.volt_diff_bad = bad
+        i.cell_ok[b], i.cell_min[b] = int(bool(lo)), min(lo) if lo else 0.0
+        i.cell_max_ok[b], i.cell_max[b] = int(bool(hi)), max(hi) if hi else 0.0
 
     def avg_power(self, b):
         h = self.hist[b]
@@ -313,7 +374,6 @@ class Batmonitor:
         fi.t = inp.t
         fi.have_pv = int(inp.have_pv and inp.now - inp.inv_time < 180.0)
         fi.pv_sofar = inp.pv
-        fi.lead = self.st.lead
         fi.force_full = inp.force_full
         for b in range(L.NBANK):
             fi.volt_ok[b], fi.volt[b] = inp.volt_ok[b], inp.volt[b]
@@ -342,8 +402,7 @@ class Batmonitor:
                 "full_at": full or None,
                 "soc_sunset": c_round(fc.soc_sunset[b] * 10) / 10 if fc.soc_sunset[b] >= 0 else None,
             }
-        forecast["method"] = ((("weather" if fc.weather else "months")
-                               if fc.soc_sunset[0] >= 0 or fc.soc_sunset[1] >= 0 else "linear"))
+        forecast["method"] = ("weather" if fc.weather else "months") if fc.soc_sunset[0] >= 0 else "linear"
         forecast["anchor"] = c_round(fc.anchor * 100) / 100
         forecast["kt_now"] = c_round(fc.kt_now * 1000) / 1000
         forecast["pv_model_w"] = c_round(fc.pv_now_w)
@@ -353,7 +412,10 @@ class Batmonitor:
             "version": VERSION,
             "sp": {L.BM_PH[p]: o.sp[p] for p in range(L.NPH)},
             "rule": {L.BM_PH[p]: o.why[p][:48] for p in range(L.NPH)},
-            "balance_lead": L.BM_BANKS[st.lead].name if st.lead >= 0 else None,
+            "bms_master": self.master,                                           # 0.77-py
+            "bms_volt_diff_v": round(self.volt_diff, 3) if self.volt_diff is not None else None,
+            "split": {"all": st.split_all, "single": L.BM_PH[st.rot],             # 0.77-py: one MultiPlus or all
+                      "next_s": max(0, c_round(self.cfg.rotate_s - (il.now - st.rot_since))) if st.rot_since > 0 else None},
             "surplus_w": c_round(o.surplus),
             "prot": {bank.name: st.prot[b] for b, bank in enumerate(L.BM_BANKS)},
             "force": {bank.name: st.force[b] for b, bank in enumerate(L.BM_BANKS)},
@@ -377,12 +439,12 @@ class Batmonitor:
             "d1_id": o.d1_id,
             "house": {"on": bool(o.house), "w": o.house_w},                      # 0.69-c: D7 house on AC-out1
             "force_full_from_pv": {                 # 0.62-c: stack None = off; held_min at 100 % SoC
-                "stack": L.BM_BANKS[il.force_full - 1].name if 1 <= il.force_full <= L.NBANK else None,
+                "stack": L.BM_BANKS[0].name if il.force_full else None,
                 "held_min": (c_round((il.now - st.ff_full_since) / 6.0) / 10
-                             if 1 <= il.force_full <= L.NBANK and st.ff_full_since > 0 else None),
+                             if il.force_full and st.ff_full_since > 0 else None),
                 "hold_min": self.cfg.force_full_hold_min,
                 "on_min": (c_round((il.now - st.ff_since) / 6.0) / 10      # 0.67-c
-                           if 1 <= il.force_full <= L.NBANK and st.ff_since > 0 else None),
+                           if il.force_full and st.ff_since > 0 else None),
                 "max_min": self.cfg.force_full_max_min,
                 "spread_mv": self.cfg.force_full_spread_mv},
             "pi": {"armed": self.cfg.pi_armed, "y_w": c_round(o.pi.y), "e_w": c_round(o.pi.e),
@@ -448,28 +510,7 @@ class Batmonitor:
         for p in range(L.NPH):
             if i.grid_ok and i.ac_ok[p] and i.ac_out_ok[p]:
                 i.ac_in[p] -= i.ac_out[p]
-        for b, bank in enumerate(L.BM_BANKS):
-            s = bank.service
-            soc = self.get(s, "/Soc") if self.get(s, "/Connected") == 1.0 else None
-            i.bms_ok[b], i.soc[b] = int(soc is not None), soc or 0.0
-            pw = self.get(s, "/Dc/0/Power")
-            i.power_ok[b], i.power[b] = int(pw is not None), pw or 0.0
-            u = self.get(s, "/Dc/0/Voltage")
-            i.volt_ok[b], i.volt[b] = int(u is not None), u or 0.0
-            # 0.68-c: dbus-ebox-battery >= 1.5 publishes the DVCC limits of both banks on /Info/* and the Pytes alone
-            # on /Info/Pack/*; the per-bank caps need the bank's own limits
-            lim = "/Info/Pack/" if self.get(s, "/Info/Pack/MaxChargeCurrent") is not None else "/Info/"
-            ccl, dcl = self.get(s, lim + "MaxChargeCurrent"), None
-            if ccl is not None and ccl >= 0:
-                dcl = self.get(s, lim + "MaxDischargeCurrent")
-            i.lim_ok[b] = int(ccl is not None and ccl >= 0 and dcl is not None and dcl >= 0)
-            i.ccl[b], i.dcl[b] = ccl or 0.0, dcl or 0.0
-            cell = self.get(s, "/System/MinCellVoltage")         # 0.52-c: LOW force charge
-            i.cell_ok[b] = int(cell is not None and 1.5 < cell < 4.5)
-            i.cell_min[b] = cell if i.cell_ok[b] else 0.0
-            cell = self.get(s, "/System/MaxCellVoltage")         # 0.67-c: force_full ends at a small cell spread
-            i.cell_max_ok[b] = int(cell is not None and 1.5 < cell < 4.5)
-            i.cell_max[b] = cell if i.cell_max_ok[b] else 0.0
+        self.read_bank(i)
 
         o = self.out = L.bm_step(self.cfg, i, self.st)
         self.in_last = i
@@ -488,7 +529,7 @@ class Batmonitor:
                 self.do4_off_at = mono() + L.DO4_PULSE_S
                 self.publish(DO4_LAST_TOPIC, '{"ts":%d,"pcc_w":%.0f}' % (int(time.time()), i.pcc), 1, True)
         if o.ff_done:
-            b = i.force_full - 1
+            b = 0
             dry = "" if self.live else " (dry run, command kept)"
             if o.ff_done == L.BM_FF_SPREAD:
                 log("force_full_from_pv: %s cell spread %.0f mV <= %.0f mV (cells %.3f..%.3f V), done%s" % (
@@ -506,10 +547,6 @@ class Batmonitor:
                 self.st.ff_full_since = self.st.ff_since = self.st.ff_spread_since = 0.0
                 if not self.publish(FORCE_FULL_TOPIC, "off", 1, True):
                     loge("force_full_from_pv: publish off failed")
-        if o.lead_event > 0:
-            log("SoC balance: %s ahead by %.1f %%" % (L.BM_BANKS[self.st.lead].name, o.lead_diff))
-        elif o.lead_event < 0:
-            log("SoC balance: back within 1.0 %")
         self.pi_shadow_log(i.pcc if i.have_pcc else 0, i.bat1, i.pv if i.have_pv else 0)
         rules = ";".join(o.why)
         if rules != self.last_rules or i.now - self.last_log >= LOG_SECONDS:
@@ -518,9 +555,10 @@ class Batmonitor:
                 _, _, full = self.full_forecast(b)
                 eta.append("%s full %s" % (bank.name, time.strftime("%H:%M", time.localtime(full)) if full else "-"))
             line = "  ".join("%s %+d W (%s)" % (L.BM_PH[p], o.sp[p], o.why[p]) for p in range(L.NPH))
-            log("%spcc %s W wp %.0f W bat1 %.0f W pv %s W -> %s | %s | PI%s u %+.0f W" % (
+            log("%spcc %s W wp %.0f W bat1 %.0f W pv %s W soc %s -> %s | %s | %s | PI%s u %+.0f W" % (
                 "" if self.live else "DRY ", "%.0f" % i.pcc if i.have_pcc else "None", i.wp, i.bat1,
-                "%.0f" % i.pv if i.have_pv else "None", line, "  ".join(eta),
+                "%.0f" % i.pv if i.have_pv else "None", "%.1f" % i.soc[0] if i.bms_ok[0] else "None", line,
+                "ALL" if o.split_all else "1PH " + L.BM_PH[o.rot], "  ".join(eta),
                 "" if self.cfg.pi_armed else " shadow", o.pi.u))
             self.last_rules = rules
             self.last_log = i.now
@@ -561,7 +599,8 @@ class Batmonitor:
         log("stopped, setpoints = AC-out load (stacks idle), Hub4Mode stays 3")
 
     def run(self):
-        log("batmonitor %s %s, cycle %d s, banks STACK1_MUST=L1, STACK2_PYTES=L2+L3, charge block %s, PI %s" % (
+        log("batmonitor %s %s, cycle %d s, one bank (MUST + Pytes parallel, master Pytes, fallback MUST) on L1+L2+L3, "
+            "charge block %s, PI %s" % (
             VERSION, "LIVE" if self.live else "DRY RUN", L.CYCLE_SECONDS, "on" if self.cfg.ladesperre else "off",
             "ARMED" if self.cfg.pi_armed else "shadow"))
         self.load_params()

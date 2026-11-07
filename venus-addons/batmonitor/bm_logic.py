@@ -1,18 +1,21 @@
 """
-bm_logic.py - the batmonitor control logic in Python, a 1:1 port of c/bm_logic.c (0.74-c); the decisions D1-D7 as decision tables (first_hit).
+bm_logic.py - the batmonitor control logic; the decisions D1-D7 as decision tables (first_hit, bm_tables.h).
+
+0.77-py (user 2026-11-07): both 300 Ah stacks are physically parallel now, one DC bus of 600 Ah behind all three
+MultiPlus. One bank, the Pytes BMS (EBox) is the master: its SoC and its CCL / DCL, charged only up to the Pytes limit
+(no MUST top hold, no balancing lead, no charge priority). Split of one amount over the phases: up to SINGLE_MAX_W
+only one MultiPlus works (charge and discharge), the next one every ROTATE_S; above it all three alike.
 
 One cycle = bm_step(cfg, inp, st) -> Out. Pure: no D-Bus, MQTT, clock or files; batmonitor.py collects the inputs and
 writes the outputs. The names, stages and tables are the ones of the C file, so both can be read side by side:
 
-    inputs -> D1 (Sofar first, S3 source, winter heat pump rule) -> S0 caps -> D2 mode per stack
-           -> D-lead -> mode matrix BM_MODE_RULE -> charge path (D4 charge block, FORCE, charge amount, split)
-                                                -> discharge branch (BM_SRC_RULE, D3, discharge amount, split)
+    inputs -> D1 (Sofar first, S3 source, winter heat pump rule) -> S0 caps -> D2 mode
+           -> mode matrix BM_MODE_RULE -> charge path (D4 charge block, FORCE, charge amount, split 1PH / EQ)
+                                                -> discharge branch (BM_SRC_RULE, D3, discharge amount, split 1PH / EQ)
            -> D5 DO4 pulse -> PI shadow
 
-The C version runs on Venus; this port is its readable reference and the fallback (BATMONITOR_PYTHON=1).
-`make py-compare` (c/Makefile) proves both give byte-identical setpoints and rule texts on 240000 random cycles,
-so every change must go into both files. The few C details that matter for that are in the helpers below
-(truncating int casts and divisions, lround, fmin/fmax with NaN, 0-based tm_yday).
+Since 2026-11-05 only this Python version is maintained; c/ is dead (the C helpers below - truncating divisions,
+lround, fmin/fmax with NaN, 0-based tm_yday - stay so the numbers are the ones of before).
 """
 import math
 import os
@@ -21,7 +24,7 @@ import time
 from dataclasses import dataclass, field
 
 NPH = 3
-NBANK = 2
+NBANK = 1
 CYCLE_SECONDS = 5
 WHY_LEN = 96
 BM_SUMMER, BM_WINTER, BM_TRANSITION = 1, 2, 3
@@ -30,8 +33,6 @@ BM_FF_HOLD = 1                 # Out.ff_done: held 100 % SoC for FORCE_FULL_HOLD
 BM_FF_SPREAD = 2               # cell spread down to FORCE_FULL_SPREAD_MV for FF_SPREAD_STABLE_S (0.67-c)
 BM_FF_MAX = 3                  # FORCE_FULL_MAX_MIN after the command (0.67-c)
 FF_SPREAD_STABLE_S = 60
-BM_TH_SPREAD = 1               # Out.th_end: top hold window ended at the cell spread (0.73-c)
-BM_TH_MAX = 2                  # ... after TOP_HOLD_MAX_MIN
 
 # soyo, 1:1 from sofar_waveshare.yaml, power values doubled (POWER_SCALE)
 POWER_SCALE = 2
@@ -71,14 +72,6 @@ FC_ANCHOR_TAU = 5400.0
 FC_ANCHOR_MIN_W = 500.0
 FC_SLOT_REACH = 5400
 FC_CHARGE_EFF = 0.90
-# top hold (0.73-c): integral ceiling on the highest cell (plant at the top ~0.1 mV per W AC, MUST 2026-10-29)
-TH_KI = 0.5                    # W per mV and s
-TH_TRACK_W = 200.0             # above the target: the ceiling at most the measured AC-in + this (no windup)
-TH_FAST_MV = 20.0              # more than this above the target: the ceiling x TH_FAST_FACTOR per cycle
-TH_FAST_FACTOR = 0.7
-TH_IKI = 2.0                   # 0.75-py: W AC per A and s, battery current loop of TOP_HOLD_MAX_A
-TH_IDLE_W = 40.0               # 0.75-py: idle of one MultiPlus in mode 3 (measured at the MUST), start value of that loop
-TH_NEAR_V = 0.05               # the spread end counts only with the highest cell at most this below the target
 BM_FC_SLOTS = 24
 # D5 DO4 pulse (0.46-c)
 DO4_LOCKOUT = 300.0
@@ -96,12 +89,13 @@ class Bank:
     capacity_wh: float
 
 
-# Stack1 MUST feeds the middle unit = Devices/0 = L1 (user photo 2026-10-08)
+# 0.77-py: Stack1 MUST + Stack2 Pytes parallel = one 600 Ah bank on L1 + L2 + L3; the Pytes BMS (EBox) is the master.
+# The MUST BMS (can0) still reports: its power and cells count too, and it is the master while the Pytes BMS is
+# missing (batmonitor.py read_bank, user 2026-11-07: "wenn eines der beiden BMS ausfaellt, ist immer ein Fallback da")
 BM_BANKS = [
-    Bank("STACK1_MUST", "com.victronenergy.battery.socketcan_can0", (0,), 300 * 51.2),
-    Bank("STACK2_PYTES", "com.victronenergy.battery.ebox", (1, 2), 300 * 51.2),
+    Bank("BATTERY", "com.victronenergy.battery.ebox", (0, 1, 2), 600 * 51.2),
 ]
-CHARGE_PRIORITY = [0, 1]       # Stack1 first (one 70 A charger), then Stack2
+AUX_SERVICE = "com.victronenergy.battery.socketcan_can0"   # also the fallback master while the Pytes BMS is missing
 
 # fitted per string (gen_pv_strings.py, 14 clear days): Sofar PV1 west / PV2 south, FoxESS pv2 east / pv1 west
 ARRAYS = [(60, 33, 19430), (68, -12, 7690)]           # (tilt, azimuth from south, W)
@@ -188,8 +182,6 @@ BM_PARAMS = [
     Param("DCL_FORCE_A", "dcl_force_a", 1, 0, 50, "A", "force charge (LOW) while the BMS discharge limit is below this, no discharge (0 = off)"),
     Param("CELL_FORCE_V", "cell_force_v", 3.0, 0, 3.4, "V", "force charge (LOW) while the lowest cell is below this, no discharge (0 = off)"),
     Param("CELL_FORCE_RELEASE_V", "cell_force_release_v", 3.25, 0, 3.5, "V", "LOW ends once the lowest cell is at least this and DCL is back"),
-    Param("SOC_BALANCE_ON", "soc_balance_on", 3, 0.5, 50, "%", "SoC difference that starts balancing"),
-    Param("SOC_BALANCE_OFF", "soc_balance_off", 1, 0, 50, "%", "balancing ends below"),
     Param("SOYO_TARGET", "soyo_target", 0, -500, 500, "W", "PCC target (+ = export)"),
     Param("CHARGE_RESERVE", "charge_reserve", 0, 0, 1000, "W", "charge: this much less into the stacks than the PCC surplus (0.72-c, user 2026-10-29: 100 W)"),
     Param("SOFAR_TRICKLE", "sofar_trickle", 30, 0, 500, "W", "night: stacks give this much more than the house needs"),
@@ -209,11 +201,10 @@ BM_PARAMS = [
     Param("FORCE_FULL_SPREAD_MV", "force_full_spread_mv", 30, 0, 500, "mV", "force_full_from_pv: the command ends once the cell spread of its stack stayed at or below this for 60 s with the highest cell at FORCE_FULL_TOP_V (0 = off)"),
     Param("FORCE_FULL_TOP_V", "force_full_top_v", 3.45, 3.0, 3.7, "V", "... the highest cell at least this: the spread counts only at the top of the charge, not at rest"),
     Param("HOUSE_ACOUT", "house_acout", 2, 0, 2, "", "house on AC-out1 (0.69-c): winter Z2 near 0 (discharge = AC-out1 load), summer Z1 near 0 (PCC, at least the AC-out1 load); 0 = never (0.68-c matrix, house on the grid), 1 = always, 2 = auto (AC-out total > 99 W, off after 60 s < 30 W)"),
-    Param("TOP_HOLD_STACK", "top_hold_stack", 0, 0, 2, "", "top hold (0.73-c): 1 = STACK1, 2 = STACK2, 0 = off. Its charge is capped so the highest cell stays at TOP_HOLD_CELL_V (no BMS CCL 0 / SoC 100 jump); once there it keeps charging from PV at 100 % SoC (cell balancing), once per day"),
-    Param("TOP_HOLD_CELL_V", "top_hold_cell_v", 3.55, 3.40, 3.62, "V", "top hold: target of the highest cell (MUST BMS cuts off at ~3.65 V)"),
-    Param("TOP_HOLD_MAX_MIN", "top_hold_max_min", 240, 0, 1440, "min", "top hold: the window (CHARGE at 100 % SoC) ends this long after the highest cell first reached the target (0 = no window, only the cap)"),
-    Param("TOP_HOLD_MAX_A", "top_hold_max_a", 0, 0, 15, "A", "top hold (0.75-py): battery current limit (BMS /Dc/0/Power / U) while the highest cell is within TH_NEAR_V of the target or the window runs, closed loop; a small steady current for cell balancing instead of the full CCL (0 = off)"),
-    Param("TOP_HOLD_SPREAD_MV", "top_hold_spread_mv", 30, 0, 500, "mV", "top hold: the window ends earlier once the cell spread stayed at or below this for 60 s near the target (0 = off)"),
+
+    Param("SINGLE_MAX_W", "single_max_w", 600, 0, 5000, "W", "0.77-py: up to this total (charge or discharge) only one MultiPlus works, above it all three alike (0 = always all three)"),
+    Param("SINGLE_HYST_W", "single_hyst_w", 100, 0, 1000, "W", "0.77-py: back to one MultiPlus only below SINGLE_MAX_W minus this"),
+    Param("ROTATE_S", "rotate_s", 600, 10, 86400, "s", "0.77-py: the single MultiPlus changes to the next phase this often (L1 -> L2 -> L3)"),
 ]
 
 
@@ -278,7 +269,7 @@ class In:
     dcl: list = field(default_factory=lambda: [0.0] * NBANK)
     cell_ok: list = field(default_factory=lambda: [0] * NBANK)
     cell_min: list = field(default_factory=lambda: [0.0] * NBANK)  # BMS /System/MinCellVoltage V (0.52-c)
-    force_full: int = 0                         # batmonitor/force_full_from_pv (0.62-c): 0 off, 1 = S1, 2 = S2
+    force_full: int = 0                         # batmonitor/force_full_from_pv (0.62-c): 0 off, 1 / 2 = on (S1 / S2, one bank since 0.77)
     cell_max_ok: list = field(default_factory=lambda: [0] * NBANK)
     cell_max: list = field(default_factory=lambda: [0.0] * NBANK)  # BMS /System/MaxCellVoltage V (0.67-c)
 
@@ -291,7 +282,6 @@ class State:
     low: list = field(default_factory=lambda: [0] * NBANK)       # LOW force charge latched (0.52-c)
     soc_ok: list = field(default_factory=lambda: [0] * NBANK)
     soc: list = field(default_factory=lambda: [0.0] * NBANK)
-    lead: int = -1                              # bank more than SOC_BALANCE_ON ahead, -1 = none
     soyo_chg_prev: int = 0
     soyo_prop_prev: int = 0
     ls_yday: int = -1
@@ -307,13 +297,9 @@ class State:
     ff_spread_since: float = 0.0                # monotonic s since its cell spread is down at the top, 0 = not
     house_on: int = 0                           # D7: the house hangs on AC-out1 (0.69-c)
     house_under_since: float = 0.0              # monotonic s since the AC-out total is below HOUSE_OFF_W, 0 = not
-    th_cap: float = 0.0                         # top hold (0.73-c): charge ceiling of its stack, W AC
-    th_t_prev: float = 0.0                      # monotonic s of the last top hold cycle, 0 = off
-    th_since: float = 0.0                       # monotonic s since the highest cell reached TOP_HOLD_CELL_V, 0 = not
-    th_icap: float = -1.0                       # top hold (0.75-py): current loop ceiling W AC, -1 = not running
-    th_spread_since: float = 0.0                # monotonic s since the cell spread is down at the top, 0 = not
-    th_done: int = 0                            # window over for today
-    th_yday: int = -1                           # its local day
+    rot: int = 0                                # 0.77-py: phase of the single MultiPlus
+    rot_since: float = 0.0                      # monotonic s since it is this phase, 0 = not started
+    split_all: int = 0                          # 1 = above SINGLE_MAX_W: all three MultiPlus
     setpoints: list = field(default_factory=lambda: [0] * NPH)
 
 
@@ -354,11 +340,9 @@ class Out:
     src_why: str = ""
     ls: Ls = field(default_factory=Ls)
     pi: Pi = field(default_factory=Pi)
-    lead_event: int = 0
     do4_pulse: int = 0
     do4_acout: int = 0                          # ... because of the AC-out feed (0.51-c), else the PCC
     acout_feed_w: float = 0.0                   # largest PV feed into one AC-out this cycle (W, >= 0)
-    lead_diff: float = 0.0
     chg_cap: list = field(default_factory=lambda: [0.0] * NPH)
     dis_cap: list = field(default_factory=lambda: [0.0] * NPH)
     ccl_bind: list = field(default_factory=lambda: [0] * NPH)
@@ -366,10 +350,8 @@ class Out:
     ff_done: int = 0                            # end the force_full command (0.62-c): BM_FF_HOLD, _SPREAD, _MAX, 0 = no
     house: int = 0                              # D7 this cycle: 1 = house on AC-out1, the Z1 / Z2 rule (0.69-c)
     house_w: int = 0                            # AC-out1 load W (sum of the positive phases)
-    th_cap: float = 0.0                         # top hold (0.73-c): charge ceiling of its stack W AC, -1 = off
-    th_active: int = 0                          # 1 = the window is on: CHARGE also at 100 % SoC
-    th_end: int = 0                             # the window ended this cycle: BM_TH_SPREAD, BM_TH_MAX, 0 = no
-    th_bind: list = field(default_factory=lambda: [0] * NPH)     # 1 = the top hold cap is below the other ceilings
+    rot: int = 0                                # 0.77-py: phase of the single MultiPlus
+    split_all: int = 0                          # 1 = all three MultiPlus this cycle
 
 
 # ---- clear-sky DC model (fox2db_logic.h) ---------------------------------------------------------------------
@@ -453,87 +435,53 @@ def bm_bms_cap_phase(cfg, bank, volt_ok, volt, amps, charge):
     return (w / cfg.charge_eff if charge else w * cfg.charge_eff) / len(BM_BANKS[bank].phases)
 
 
-def alloc_levels(w, lvl, n_lvl, cap):
-    """S5 split core (both directions, whole watts): w over the phases with lvl[p] >= 0, level by level. Within a level
-    every bank the same share, split over its phases; what a phase cannot take above cap[p] goes to the level's other
-    phases alike (water filling, at most NPH rounds). Only what the caps cut goes on to the next level, not the
-    division remainder. Returns (give per phase, what the caps cut in the last level)."""
-    rest = w
+def water_fill(w, on, cap):
+    """w (whole watts) alike over the phases with on[p], what a phase cannot take above cap[p] goes to the others
+    alike (at most NPH rounds). Returns give per phase."""
     give = [0] * NPH
-    for lv in range(n_lvl):
-        nb = [0] * NBANK
-        n_banks = 0
+    n = sum(1 for p in range(NPH) if on[p])
+    if not n or w <= 0:
+        return give
+    want = [c_div(w, n) if on[p] else 0 for p in range(NPH)]
+    for _ in range(NPH):
+        over = n_free = 0
         for p in range(NPH):
-            if lvl[p] == lv:
-                if not nb[bank_of(p)]:
-                    n_banks += 1
-                nb[bank_of(p)] += 1
-        if not n_banks:
-            continue
-        want = [0] * NPH
-        cut = 0
+            if on[p]:
+                if want[p] > cap[p]:
+                    over += want[p] - cap[p]
+                    want[p] = cap[p]
+                elif want[p] < cap[p]:
+                    n_free += 1
+        if not over or not n_free:
+            break
         for p in range(NPH):
-            if lvl[p] == lv:
-                want[p] = c_div(c_div(rest, n_banks), nb[bank_of(p)])
-                cut += want[p]
-        for _ in range(NPH):                                    # water filling
-            over = n_free = 0
-            for p in range(NPH):
-                if lvl[p] == lv:
-                    if want[p] > cap[p]:
-                        over += want[p] - cap[p]
-                        want[p] = cap[p]
-                    elif want[p] < cap[p]:
-                        n_free += 1
-            if not over or not n_free:
-                break
-            for p in range(NPH):
-                if lvl[p] == lv and want[p] < cap[p]:
-                    want[p] += c_div(over, n_free)
-        for p in range(NPH):
-            if lvl[p] == lv:
-                give[p] = min(want[p], cap[p])
-                cut -= give[p]
-        rest = cut                                              # what the caps cut goes on
-    return give, rest
-
-
-def alloc_discharge(lead, w, dis, dcap, rule, sp, why):
-    """with a lead the lead bank gives first (BAL), the other only what the lead cannot (SPILL, else WAIT); without a
-    lead every discharging bank the same share (EQ), so both 300 Ah stacks drain alike"""
-    n_lead = sum(1 for p in range(NPH) if dis[p] and bank_of(p) == lead)
-    lvl = [(1 if n_lead and bank_of(p) != lead else 0) if dis[p] else -1 for p in range(NPH)]
-    give, _ = alloc_levels(w, lvl, 2, dcap)
+            if on[p] and want[p] < cap[p]:
+                want[p] += c_div(over, n_free)
     for p in range(NPH):
-        if dis[p]:
-            sp[p] = -give[p]
-            tag = " EQ" if not n_lead else " BAL" if not lvl[p] else " SPILL" if sp[p] else " WAIT"
-            why[p] = (rule + tag)[:WHY_LEN - 1]
+        if on[p]:
+            give[p] = max(0, min(want[p], cap[p]))
+    return give
 
 
-def charge_order(lead, ff=-1):
-    """banks in charge order: CHARGE_PRIORITY, the lead bank (SoC ahead) last; force_full_from_pv (0.62-c, ff = its
-    bank, -1 none): that bank first, the lead does not count"""
-    if ff >= 0:
-        return [ff] + [b for b in CHARGE_PRIORITY if b != ff]
-    order = [b for b in CHARGE_PRIORITY if b != lead]
-    if lead >= 0:
-        order.append(lead)
-    return order
-
-
-def alloc_charge(cfg, lead, ff, rest, chg, n_chg, cap, sp):
-    """one level per bank in charge order, each up to min(cap, CHARGER_CAP_PHASE); what the caps cut goes up to
-    CHARGE_MAX_PHASE on all charging phases alike. ff: charge_order"""
-    order = charge_order(lead, ff)
-    lvl = [order.index(bank_of(p)) if chg[p] and bank_of(p) in order else -1 for p in range(NPH)]
-    cap1 = [min(cap[p], int(cfg.charger_cap_phase)) for p in range(NPH)]
-    give, rest = alloc_levels(rest, lvl, len(order), cap1)
+def alloc(w, on, cap, rot, split_all):
+    """S5 split (0.77-py, both directions, whole watts >= 0): split_all -> all phases with on[p] alike (EQ);
+    else the rotating phase rot takes w alone up to its cap (1PH), only what it cannot take goes to the others alike
+    (SPILL, else STBY). Returns (give per phase, tag per phase)."""
+    give, tag = [0] * NPH, [""] * NPH
+    if split_all or not on[rot]:
+        give = water_fill(w, on, cap)
+        for p in range(NPH):
+            if on[p]:
+                tag[p] = " EQ"
+        return give, tag
+    give[rot] = max(0, min(w, cap[rot]))
+    rest = water_fill(w - give[rot], [on[p] and p != rot for p in range(NPH)], cap)
     for p in range(NPH):
-        if chg[p]:
-            head = min(cap[p], int(cfg.charge_max_phase)) - give[p]
-            more = c_div(rest, n_chg) if rest > 0 else 0
-            sp[p] = give[p] + (more if more < head else head if head > 0 else 0)
+        if p != rot and on[p]:
+            give[p] = rest[p]
+            tag[p] = " SPILL" if give[p] else " STBY"
+    tag[rot] = " 1PH"
+    return give, tag
 
 
 def int_caps(caps):
@@ -594,7 +542,6 @@ BM_MODE_RULE = {
 # one condition per column (1, 0, or _ = any), then the outputs. Hit policy FIRST: the first matching row wins.
 _ = None
 KEEP = "KEEP"
-LEAD_NONE, LEAD_NEW, LEAD_END = "NONE", "NEW", "END"     # DLEAD outputs (LEAD_KEEP is KEEP)
 TABLES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bm_tables.h")   # 0.76-py: out of c/
 
 _TABLE_RE = re.compile(r'^TABLE\((\w+),\s*"([\w ]+)",\s*"([\w ]+)"\)\s*(/\*.*\*/)?$')
@@ -603,13 +550,12 @@ _ROW_RE = re.compile(r'^ROW\((\w+),\s*"([01\- ]+)",\s*([\w, ]+)\)\s*(/\*.*\*/)?$
 
 
 def _output(word, where):
-    """an output word of bm_tables.h -> its value: a number, KEEP or a BM_SRC_ / BM_WP_ / BM_M_ / LEAD_ name"""
+    """an output word of bm_tables.h -> its value: a number, KEEP or a BM_SRC_ / BM_WP_ / BM_M_ name"""
     if re.fullmatch(r"-?\d+", word):
         return int(word)
     if word == "KEEP":
         return KEEP
-    if re.fullmatch(r"(BM_SRC_|BM_WP_|BM_M_)[A-Z0-9_]+", word) and isinstance(globals().get(word), int) \
-            or re.fullmatch(r"LEAD_[A-Z]+", word) and word in globals():
+    if re.fullmatch(r"(BM_SRC_|BM_WP_|BM_M_)[A-Z0-9_]+", word) and isinstance(globals().get(word), int):
         return globals()[word]
     raise ValueError("%s: unknown output %r" % (where, word))
 
@@ -722,20 +668,12 @@ def bm_d2(b, prot, force, low, chg_prev):
     for k in range(NBANK):
         x = dict(b["bank"][k])
         x.setdefault("ff", 0)
-        x.setdefault("top", 0)
         prot[k] = keep(first_hit(TABLES["D2_PROT"], x), prot[k])
         force[k] = keep(first_hit(TABLES["D2_FORCE"], x), force[k])
         low[k] = keep(first_hit(TABLES["D2_LOW"], x), low[k])
         mode[k] = first_hit(TABLES["D2_MODE"], dict(x, force=force[k], low=low[k], prot=prot[k], stale=b["stale"],
                                                     block=b["block"], charge_mode=charge_mode))
     return prot, force, low, int(BM_M_CHARGE in mode), charge_mode, mode
-
-
-def bm_dlead(both_ok, diff_gt_on, diff_lt_off, first_ahead, lead):
-    """SoC balancing (table DLEAD). Returns (lead, event: 1 new lead, -1 cleared, 0)"""
-    a = first_hit(TABLES["DLEAD"], {"both_ok": both_ok, "has_lead": lead >= 0, "diff_gt_on": diff_gt_on,
-                                    "diff_lt_off": diff_lt_off})
-    return {LEAD_NONE: (-1, 0), LEAD_NEW: (0 if first_ahead else 1, 1), LEAD_END: (-1, -1), KEEP: (lead, 0)}[a]
 
 
 def bm_d3(any_dis, house_import, deficit_gt_hold, prop_hold, prop_prev):
@@ -789,7 +727,6 @@ class Chain:
         self.charge = [0] * NPH
         self.n_dis = self.n_chg = 0
         self.house = self.house_w = 0           # D7: house on AC-out1, its load W (0.69-c)
-        self.top = -1                           # top hold window bank, -1 = off (0.73-c)
 
 
 def chain_inputs(inp, out, c):
@@ -799,7 +736,7 @@ def chain_inputs(inp, out, c):
     c.wp_on = inp.wp_time > 0 and inp.now - inp.wp_time < WP_MAX_AGE and inp.wp >= WP_ON_TH
     c.night = bool(inp.have_pv and inp.pv < NIGHT_PV_TH)
     c.winter = month >= WINTER_FROM or month <= WINTER_TO
-    c.ff = inp.force_full - 1 if 1 <= inp.force_full <= NBANK else -1
+    c.ff = 0 if inp.force_full in (1, 2) else -1     # 0.77-py: S1 or S2 = the one bank
     # season from the measured energy (season.py), the months only when that is missing or older than 2 days
     season_ok = bool(inp.season and inp.t - inp.season_ts < SEASON_MAX_AGE)
     out.season = inp.season if season_ok else (BM_SUMMER if SUMMER_FROM <= month <= SUMMER_TO else BM_WINTER)
@@ -884,85 +821,6 @@ def chain_gates(cfg, inp, st, out):
                 d = fmin(d, bd)
             out.chg_cap[p] = ch
             out.dis_cap[p] = d
-
-
-def chain_top(cfg, inp, st, out, c):
-    """top hold (0.73-c, see bm_logic.c): the charge of TOP_HOLD_STACK capped so its highest cell stays at
-    TOP_HOLD_CELL_V; once there the window (CHARGE also at 100 % SoC) until TOP_HOLD_MAX_MIN or the cell spread end,
-    once per local day"""
-    b = lround(cfg.top_hold_stack) - 1
-    _, yday, _ = localtime(inp.t)
-    c.top = -1
-    out.th_cap = -1.0
-    if yday != st.th_yday:
-        st.th_yday = yday
-        st.th_done = 0
-        st.th_since = st.th_spread_since = 0.0
-    if b < 0 or b >= NBANK:
-        st.th_cap = st.th_t_prev = st.th_since = st.th_spread_since = 0.0
-        st.th_icap = -1.0
-        return
-    cap = ac = 0.0
-    for p in BM_BANKS[b].phases:
-        cap += out.chg_cap[p]
-        if inp.ac_ok[p]:
-            ac += inp.ac_in[p]
-    if st.th_t_prev <= 0:
-        st.th_cap = cap
-    dt = fmin(fmax(inp.now - st.th_t_prev, 1.0), 30.0) if st.th_t_prev > 0 else CYCLE_SECONDS
-    st.th_t_prev = inp.now
-    cell = inp.cell_max_ok[b]
-    if cell:
-        e = (cfg.top_hold_cell_v - inp.cell_max[b]) * 1000.0     # mV, + = below the target
-        if e < 0:
-            st.th_cap = fmin(st.th_cap, fmax(ac, 0.0) + TH_TRACK_W)
-        if e < -TH_FAST_MV:
-            st.th_cap *= TH_FAST_FACTOR
-        st.th_cap += TH_KI * e * dt
-    st.th_cap = fmax(0.0, fmin(cap, st.th_cap))
-    # 0.75-py (user 2026-11-05: "16 A ist zuviel", 1 A): near the top the stack charge follows TOP_HOLD_MAX_A at the
-    # battery; integrates up only while this loop binds (no windup behind the cell loop), down always
-    near = cell and inp.cell_max[b] >= cfg.top_hold_cell_v - TH_NEAR_V
-    if cfg.top_hold_max_a > 0 and (near or (st.th_since > 0 and not st.th_done)):
-        volt = inp.volt[b] if inp.volt_ok[b] and inp.volt[b] > 0 else BM_NOMINAL_V
-        if st.th_icap < 0:
-            st.th_icap = cfg.top_hold_max_a * volt / cfg.charge_eff + TH_IDLE_W * len(BM_BANKS[b].phases)
-        elif inp.power_ok[b]:
-            e_a = cfg.top_hold_max_a - inp.power[b] / volt
-            if e_a < 0 or st.th_icap <= st.th_cap:
-                st.th_icap += TH_IKI * e_a * dt
-        st.th_icap = fmax(0.0, fmin(cap, st.th_icap))
-        st.th_cap = fmin(st.th_cap, st.th_icap)
-    else:
-        st.th_icap = -1.0
-    out.th_cap = st.th_cap
-    for p in BM_BANKS[b].phases:
-        share = st.th_cap / len(BM_BANKS[b].phases)
-        out.th_bind[p] = int(share < out.chg_cap[p] - 1)
-        if out.th_bind[p]:
-            out.chg_cap[p] = share
-            out.ccl_bind[p] = 0
-    # 0.75-py: with TOP_HOLD_MAX_A the window starts already near the target (a full BMS at SoC 100 holds the cell below it)
-    if cell and not st.th_done and st.th_since <= 0 and cfg.top_hold_max_min > 0 \
-            and (inp.cell_max[b] >= cfg.top_hold_cell_v or (near and cfg.top_hold_max_a > 0)):
-        st.th_since = inp.now
-    if st.th_since > 0 and not st.th_done:
-        if (cfg.top_hold_spread_mv > 0 and cell and inp.cell_ok[b]
-                and inp.cell_max[b] >= cfg.top_hold_cell_v - TH_NEAR_V
-                and (inp.cell_max[b] - inp.cell_min[b]) * 1000.0 <= cfg.top_hold_spread_mv):
-            if st.th_spread_since <= 0:
-                st.th_spread_since = inp.now
-        else:
-            st.th_spread_since = 0.0
-        if st.th_spread_since > 0 and inp.now - st.th_spread_since >= FF_SPREAD_STABLE_S:
-            out.th_end = BM_TH_SPREAD
-        elif inp.now - st.th_since >= cfg.top_hold_max_min * 60.0:
-            out.th_end = BM_TH_MAX
-        if out.th_end:
-            st.th_done = 1
-        else:
-            c.top = b
-    out.th_active = int(c.top >= 0)
 
 
 def d2_bank_bits(cfg, soc_ok, soc, power_ok, power, lim_ok, dcl, cell_ok, cell_min):
@@ -1056,7 +914,6 @@ def chain_mode(cfg, inp, st, out, c):
     }
     for b in range(NBANK):
         d["bank"][b]["ff"] = b == c.ff
-        d["bank"][b]["top"] = b == c.top
     st.prot, st.force, st.low, _, c.charge_mode, mode = bm_d2(d, st.prot, st.force, st.low, st.soyo_chg_prev)
     for b, bank in enumerate(BM_BANKS):
         r = BM_MODE_RULE[mode[b]]
@@ -1086,18 +943,29 @@ def chain_mode(cfg, inp, st, out, c):
                 out.why[p] += " LOW"
 
 
-def chain_lead(cfg, st, out):
-    diff = st.soc[0] - st.soc[1]
-    st.lead, out.lead_event = bm_dlead(st.soc_ok[0] and st.soc_ok[1], abs(diff) > cfg.soc_balance_on,
-                                       abs(diff) < cfg.soc_balance_off, diff > 0, st.lead)
-    if out.lead_event:
-        out.lead_diff = abs(diff)
-
-
 def dis_amount(prop, deficit, idle_w, w_max):
     """S4 amount, the one formula: w = min(PROP ? max(deficit, 0) : idle_w, W_MAX)"""
     w = (deficit if deficit > 0 else 0) if prop else idle_w
     return w_max if w > w_max else w
+
+
+def chain_rotate(cfg, inp, st, out):
+    """0.77-py: the single MultiPlus moves on to the next phase every ROTATE_S (charge and discharge alike)"""
+    if st.rot_since <= 0:
+        st.rot_since = inp.now
+    elif inp.now - st.rot_since >= cfg.rotate_s:
+        st.rot = (st.rot + 1) % NPH
+        st.rot_since = inp.now
+    out.rot = st.rot
+
+
+def chain_split(cfg, st, out, w):
+    """0.77-py: all three MultiPlus above SINGLE_MAX_W, one again below SINGLE_MAX_W - SINGLE_HYST_W"""
+    if cfg.single_max_w <= 0 or w > cfg.single_max_w:
+        st.split_all = 1
+    elif w < cfg.single_max_w - cfg.single_hyst_w:
+        st.split_all = 0
+    out.split_all = st.split_all
 
 
 def chain_discharge(cfg, inp, st, out, c):
@@ -1137,8 +1005,13 @@ def chain_discharge(cfg, inp, st, out, c):
         w = dis_amount(prop, deficit, r.idle_w, c.dis_max)
         rule = "%s SRC:%s" % ("PROP" if prop else "IDLE", out.src_why)
     dcap = int_caps(out.dis_cap)
-    # 0.70-c: always all discharging phases; the single-unit discharge (D6 / S5 1PH, 0.63-0.69-c) is gone, see bm_logic.c
-    alloc_discharge(st.lead, w, c.discharge, dcap, rule, out.sp, out.why)
+    w = min(w, sum(dcap[p] for p in range(NPH) if c.discharge[p]))
+    chain_split(cfg, st, out, w)
+    give, tag = alloc(w, c.discharge, dcap, st.rot, st.split_all)
+    for p in range(NPH):
+        if c.discharge[p]:
+            out.sp[p] = -give[p]
+            out.why[p] = (rule + tag[p])[:WHY_LEN - 1]
     if c.wp_max >= 0:
         for p in range(NPH):
             if c.discharge[p]:
@@ -1156,15 +1029,15 @@ def chain_charge(cfg, st, out, c):
     want = watt(c.own_charge) + c_div(KP_PM * (watt(c.chg_ref + c.bat1_eff) - target), 1000)
     if want < 0:
         want = 0
-    alloc_charge(cfg, st.lead, c.ff, min(want, cap_sum), c.charge, c.n_chg, cap, out.sp)
+    w = min(want, cap_sum)
+    chain_split(cfg, st, out, w)
+    give, tag = alloc(w, c.charge, [min(cap[p], int(cfg.charge_max_phase)) for p in range(NPH)], st.rot, st.split_all)
     for p in range(NPH):
         if c.charge[p]:
-            tag = " FF" if c.ff >= 0 else " BAL" if st.lead >= 0 else " EQ"
-            out.why[p] = (out.why[p] + tag)[:WHY_LEN - 1]
+            out.sp[p] = give[p]
+            out.why[p] = (out.why[p] + tag[p] + (" FF" if c.ff >= 0 else ""))[:WHY_LEN - 1]
             if c.cap_active:
                 out.why[p] = (out.why[p] + " CAP")[:WHY_LEN - 1]
-            if bank_of(p) == c.top:            # top hold window (0.73-c)
-                out.why[p] = (out.why[p] + " TOP")[:WHY_LEN - 1]
 
 
 def chain_pi(cfg, inp, st, out, c):
@@ -1176,7 +1049,7 @@ def chain_pi(cfg, inp, st, out, c):
             if not st.soc_ok[b] or st.force[b] or st.low[b] or c.stale:
                 continue
             pi_ok[p] = 1
-            if not c.block and (st.soc[b] < 100.0 or b == c.ff or b == c.top):
+            if not c.block and (st.soc[b] < 100.0 or b == c.ff):
                 pi_chg[p] = 1
                 n_pichg += 1
             if not st.prot[b] and b != c.ff:          # force_full_from_pv: that stack never discharges
@@ -1210,9 +1083,11 @@ def chain_pi(cfg, inp, st, out, c):
         if pi_ok[p]:
             pwhy[p] = "PI(%+.0f)" % u
     if u > 0:
-        alloc_charge(cfg, st.lead, c.ff, int(u), pi_chg, n_pichg, int_caps(out.chg_cap), psp)
+        give, _ = alloc(int(u), pi_chg, int_caps(out.chg_cap), st.rot, 1)
+        psp = list(give)
     elif u < 0:
-        alloc_discharge(st.lead, int(-u), pi_dis, int_caps(out.dis_cap), "PI(%+.0f)" % u, psp, pwhy)
+        give, _ = alloc(int(-u), pi_dis, int_caps(out.dis_cap), st.rot, 1)
+        psp = [-g for g in give]
     for p in range(NPH):
         if not pi_ok[p]:
             psp[p] = out.sp[p]               # force charge, BMS missing, stale: as soyo
@@ -1230,9 +1105,8 @@ def bm_step(cfg, inp, st):
     chain_house(cfg, inp, st, out, c)
     chain_d1(cfg, inp, st, out, c)
     chain_gates(cfg, inp, st, out)
-    chain_top(cfg, inp, st, out, c)
+    chain_rotate(cfg, inp, st, out)
     chain_mode(cfg, inp, st, out, c)
-    chain_lead(cfg, st, out)
     if c.n_dis:
         chain_discharge(cfg, inp, st, out, c)
     if c.n_chg:
@@ -1241,8 +1115,6 @@ def bm_step(cfg, inp, st):
         if ((out.sp[p] > 0 and out.ccl_bind[p] and out.sp[p] >= int(out.chg_cap[p]) - 1)
                 or (out.sp[p] < 0 and out.dcl_bind[p] and -out.sp[p] >= int(out.dis_cap[p]) - 1)):
             out.why[p] = (out.why[p] + (" CCL" if out.sp[p] > 0 else " DCL"))[:WHY_LEN - 1]
-        elif out.sp[p] > 0 and out.th_bind[p] and out.sp[p] >= int(out.chg_cap[p]) - 1:
-            out.why[p] = (out.why[p] + " CELL")[:WHY_LEN - 1]     # the top hold cap (0.73-c)
     st.soyo_chg_prev = int(c.n_chg > 0)
     # force_full_from_pv (0.62-c): done once its stack held 100 % for FORCE_FULL_HOLD_MIN; a missing BMS keeps the clock
     if c.ff >= 0 and st.soc_ok[c.ff] and st.soc[c.ff] >= 100.0:
@@ -1274,6 +1146,9 @@ def bm_step(cfg, inp, st):
             out.ff_done = BM_FF_MAX
     if not c.n_dis:
         st.soyo_prop_prev = 0                # D3 with no discharging phase: reset
+    if not c.n_dis and not c.n_chg:
+        st.split_all = 0                     # 0.77-py: idle -> the next amount starts on one MultiPlus
+    out.split_all = st.split_all
     pcc_over = bool(inp.have_pcc and inp.now - inp.inv_time < DO4_PCC_MAX_AGE and inp.pcc > PCC_PEAK_TH)
     if not pcc_over:
         st.do4_over_since = 0.0
@@ -1318,8 +1193,7 @@ class FcIn:
     pv_sofar: float = 0.0
     slots: list = field(default_factory=list)                     # [(unix t, kt)] of forecast.py kt_slots
     corr: float = 0.0
-    lead: int = -1
-    force_full: int = 0                                           # bm_in.force_full: that stack charged first (0.62-c)
+    force_full: int = 0                                           # bm_in.force_full (0.62-c)
 
 
 @dataclass
@@ -1354,9 +1228,8 @@ def fc_pv(fi, t, anchor):
 
 
 def bm_full_forecast(cfg, fi):
-    """steps from now to sunset in FC_STEP: the stacks get their measured charge power plus the change of the expected
-    PV against now, split like alloc_charge (priority order, lead last, each up to its charger ceiling); the lead follows
-    the simulated SoC; a full stack's power moves to the other one"""
+    """steps from now to sunset in FC_STEP: the bank gets its measured charge power plus the change of the expected
+    PV against now, up to its charger ceiling (0.77-py: one bank)"""
     out = FcOut()
     out.kt_now, out.weather = fc_kt(fi, fi.t)
     clear_sofar = calc_arrays_kt(ARRAYS, fi.t, 1.0) * out.kt_now
@@ -1382,20 +1255,12 @@ def bm_full_forecast(cfg, fi):
     if not any_:
         return out
     p0 = sum(pb[b] for b in range(NBANK) if active[b] and soc[b] < 100)
-    lead = fi.lead
     t = fi.t + FC_STEP
     while t < fi.t + 86400:
         pv, _ = fc_pv(fi, t - FC_STEP // 2, out.anchor)
         out.rest_kwh += pv * FC_STEP / 3600000.0
-        if active[0] and active[1]:                             # update_lead on the simulated SoC
-            d = soc[0] - soc[1]
-            if lead < 0 and abs(d) > cfg.soc_balance_on:
-                lead = 0 if d > 0 else 1
-            elif lead >= 0 and (d if lead == 0 else -d) < cfg.soc_balance_off:
-                lead = -1
         rest = fmax(0.0, p0 + FC_CHARGE_EFF * (pv - pv0))
-        ff = fi.force_full - 1 if 1 <= fi.force_full <= NBANK else -1
-        for b in charge_order(lead, ff):                            # alloc_charge: priority order up to the charger
+        for b in range(NBANK):
             pb[b] = 0
             if not active[b] or soc[b] >= 100:
                 continue
@@ -1423,10 +1288,9 @@ def _check_tables():
     before the first setpoint (first_hit raises KeyError on a column no caller provides)"""
     z = dict.fromkeys
     bm_d1(z(["night", "wp_on", "b1_above_min", "b1_ge_release", "winter", "b1_dis"], 0), 0)
-    bank = dict(d2_bank_bits(Cfg(), 0, 0.0, 0, 0.0, 0, 0.0, 0, 0.0), ff=0, top=0)
-    bm_d2({"stale": 0, "block": 0, "surplus_gt_on": 0, "surplus_gt_hold": 0, "bank": [bank, bank]},
+    bank = dict(d2_bank_bits(Cfg(), 0, 0.0, 0, 0.0, 0, 0.0, 0, 0.0), ff=0)
+    bm_d2({"stale": 0, "block": 0, "surplus_gt_on": 0, "surplus_gt_hold": 0, "bank": [bank] * NBANK},
           [0] * NBANK, [0] * NBANK, [0] * NBANK, 0)
-    bm_dlead(0, 0, 0, 0, -1)
     bm_d3(0, 0, 0, 0, 0)
     bm_d4(z(["new_day", "enabled", "season", "fc_cap_ahead", "pcc_peak", "surplus_cap_on", "surplus_cap_hold",
              "chg_prev"], 0), 0)

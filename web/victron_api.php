@@ -192,6 +192,11 @@ if ($r) {
         's2_p2_cycles' => v(num($r['ebox_p2_cycles'] ?? null), 'cycles', 'Stack2 Pytes pack 2 cycle count (BMS "CYCLE Times" via ebox stat 2, refreshed every 6 h)', 'pv_victron.ebox_p2_cycles'),
         's2_p3_cycles' => v(num($r['ebox_p3_cycles'] ?? null), 'cycles', 'Stack2 Pytes pack 3 cycle count (BMS "CYCLE Times" via ebox stat 3, refreshed every 6 h)', 'pv_victron.ebox_p3_cycles'),
         's2_charge_request' => v($r['charge_request'] === null ? null : (bool)$r['charge_request'], 'bool', 'Stack2 ChargeRequest of dbus-ebox-battery (SoC < 5 %, 11-13 h; not used by batmonitor in Hub4Mode 3)', 'pv_victron.charge_request'),
+        // 0.77-py (2026-11-07): Stack1 MUST and Stack2 Pytes parallel on one DC bus, master BMS = Pytes, fallback MUST
+        'bank_kw' => v(($r['a_bat_w'] === null && $r['bat_w'] === null) ? null : round((($r['a_bat_w'] ?? 0) + ($r['bat_w'] ?? 0)) / 1000, 2),
+            'kW', 'Battery bank power = Stack1 + Stack2 (parallel), + = charging', 'pv_victron.a_bat_w + bat_w'),
+        'bat_dv' => v(($r['a_bat_v'] === null || $r['bat_v'] === null) ? null : round($r['bat_v'] - $r['a_bat_v'], 2),
+            'V', 'Pytes minus MUST BMS voltage; parallel stacks differ only by the cable drop', 'pv_victron.bat_v - a_bat_v'),
         // Stack1 = MUST (CAN BMS on can0)
         's1_soc' => v(num($r['a_soc']), '%', 'Stack1 (MUST, CAN BMS, 300 Ah) state of charge', 'pv_victron.a_soc'),
         's1_soc_min_24h' => v(num($ext['s1_min'] ?? null), '%', 'Stack1 lowest SoC in the last 24 h', 'pv_victron.a_soc'),
