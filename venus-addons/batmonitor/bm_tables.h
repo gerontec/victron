@@ -17,7 +17,8 @@ PARAM(CELL_FORCE_V, 3.05)           /* 2026-10-24: at 49.16 V on L1 the weakest 
 PARAM(CHARGE_EFF, 0.9)              /* 2026-10-09: at 0.93 the ceiling bound (MUST BMS saw only 66 A); AC->BMS 0.87-0.91 */
 PARAM(CHARGE_RESERVE, 100)          /* 0.72-c: charge 100 W below the surplus; 0.74-c winter export cap */
 PARAM(HOUSE_ACOUT, 0)
-PARAM(SOC_FORCE, 0)
+PARAM(SOC_FORCE, 5)                 /* 2026-11-07: grid force charge below 5 % ... */
+PARAM(SOC_FORCE_RELEASE, 7)         /* ... until 7 % (hysteresis 2 %) */
 PARAM(SOC_MIN, 8)
 PARAM(SOC_MIN_RELEASE, 10)
 PARAM(WP_WINTER_W, 100)
