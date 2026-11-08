@@ -200,3 +200,14 @@ CREATE TABLE IF NOT EXISTS pv_victron_foreign_change (
 -- 2026-11-05: MultiPlus-II configuration backups as files (readers/rvms_archive.py creates the table, see DDL there):
 -- vebus_config_backup (file_sha256 unique, settings_sha256 = same configuration, content MEDIUMBLOB = the .rvms).
 -- Restore one: SELECT content FROM vebus_config_backup WHERE id = ..  -> write the bytes to a .rvms file.
+
+-- 2026-11-08: MUST (CAN-bus BMS, can0) lowest / highest cell and cell temperatures (victron2db.py), to find the swap
+-- candidate: the same cell lowest at the bottom and highest at the top = low capacity. Venus id '1 ::10' -> 10.
+ALTER TABLE pv_victron
+  ADD COLUMN a_cell_min_id TINYINT UNSIGNED NULL COMMENT 'MUST cell number of the lowest cell voltage (module 1)' AFTER a_cell_min_v,
+  ADD COLUMN a_cell_max_id TINYINT UNSIGNED NULL COMMENT 'MUST cell number of the highest cell voltage (module 1)' AFTER a_cell_min_id,
+  ADD COLUMN a_cell_min_temp_c DECIMAL(4,1) NULL COMMENT 'MUST lowest cell temperature' AFTER a_cell_max_id,
+  ADD COLUMN a_cell_max_temp_c DECIMAL(4,1) NULL COMMENT 'MUST highest cell temperature' AFTER a_cell_min_temp_c,
+  ADD COLUMN a_temp_min_id TINYINT UNSIGNED NULL COMMENT 'MUST cell number of the lowest temperature' AFTER a_cell_max_temp_c,
+  ADD COLUMN a_temp_max_id TINYINT UNSIGNED NULL COMMENT 'MUST cell number of the highest temperature' AFTER a_temp_min_id,
+  ALGORITHM=INSTANT;

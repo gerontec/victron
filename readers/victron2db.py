@@ -81,6 +81,14 @@ COLUMNS = {
 	'a_temp_c': ('battery_a', '/Dc/0/Temperature'),
 	'a_cell_max_v': ('battery_a', '/System/MaxCellVoltage'),
 	'a_cell_min_v': ('battery_a', '/System/MinCellVoltage'),
+	# 2026-11-08: which MUST cell is lowest / highest (swap candidate: the same cell low at the bottom and high at
+	# the top = low capacity; different cells = imbalance). Venus gives '1 ::10' = module 1, cell 10 -> 10
+	'a_cell_min_id': ('battery_a', '/System/MinVoltageCellId'),
+	'a_cell_max_id': ('battery_a', '/System/MaxVoltageCellId'),
+	'a_cell_min_temp_c': ('battery_a', '/System/MinCellTemperature'),
+	'a_cell_max_temp_c': ('battery_a', '/System/MaxCellTemperature'),
+	'a_temp_min_id': ('battery_a', '/System/MinTemperatureCellId'),
+	'a_temp_max_id': ('battery_a', '/System/MaxTemperatureCellId'),
 	'a_cvl_v': ('battery_a', '/Info/MaxChargeVoltage'),
 	'a_ccl_a': ('battery_a', '/Info/MaxChargeCurrent'),
 	'a_dcl_a': ('battery_a', '/Info/MaxDischargeCurrent'),
@@ -108,6 +116,15 @@ for led, path in (('mains', 'Mains'), ('bulk', 'Bulk'), ('absorption', 'Absorpti
 				  ('inverter', 'Inverter'), ('overload', 'Overload'), ('low_battery', 'LowBattery'), ('temperature', 'Temperature')):
 	COLUMNS[f'led_{led}'] = ('vebus', f'/Leds/{path}')
 EPOCH_COLUMNS = {f'na_l{ph}_at' for ph in (1, 2, 3)}   # unix time -> DATETIME
+CELL_ID_COLUMNS = {'a_cell_min_id', 'a_cell_max_id', 'a_temp_min_id', 'a_temp_max_id'}  # '1 ::10' -> 10
+
+
+def cell_id(v):
+	"""the cell number of a Venus cell id like '1 ::10' (module 1, cell 10), None if it is not one"""
+	try:
+		return int(str(v).rsplit(':', 1)[-1].strip())
+	except ValueError:
+		return None
 
 WANTED = {}  # (service, path) -> column
 for col, key in COLUMNS.items():
@@ -220,6 +237,8 @@ def build_row(portal_id, values):
 		v = values.get(key)
 		if isinstance(v, (list, dict)) or v == '':
 			v = None
+		if col in CELL_ID_COLUMNS and v is not None:
+			v = cell_id(v)
 		if col in EPOCH_COLUMNS and v is not None:
 			v = datetime.fromtimestamp(v)
 		row[col] = v
