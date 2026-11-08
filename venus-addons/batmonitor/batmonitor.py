@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bm_logic as L  # noqa: E402
 import bm_parse  # noqa: E402
 
-VERSION = "0.78-py"
+VERSION = "0.79-py"
 INVERTER_TOPIC = "inverter/power_grid_exchange/json"
 FAST_HOLD_S = 15.0   # s: while a sofar_fast sample is this fresh, pivot2db samples on the topic are ignored (0.71)
 R290_TOPIC = "r290/heatpump/all"
@@ -105,6 +105,7 @@ class Batmonitor:
         self.master = None                 # 0.77-py: D-Bus service of the master BMS of the last cycle
         self.volt_diff = None              # 0.77-py: Pytes minus MUST BMS voltage, None = one is missing
         self.volt_diff_bad = False
+        self.cell_est = False                       # 0.79-py: weakest cell substituted (MUST BMS offline)
         self.bus = dbus.SystemBus()
         self.mqttc = None
 
@@ -330,15 +331,28 @@ class Batmonitor:
         i.lim_ok[b] = int(ccl is not None and ccl >= 0 and dcl is not None and dcl >= 0)
         i.ccl[b], i.dcl[b] = ccl or 0.0, dcl or 0.0
         lo, hi = [], []
+        lo_by = {}
         for s in (L.BM_BANKS[0].service, L.AUX_SERVICE):
             if self.get(s, "/Connected") != 1.0:
                 continue
             c = self.get(s, "/System/MinCellVoltage")
             if c is not None and 1.5 < c < 4.5:
                 lo.append(c)
+                lo_by[s] = c
             c = self.get(s, "/System/MaxCellVoltage")
             if c is not None and 1.5 < c < 4.5:
                 hi.append(c)
+        # 0.79-py (user 2026-11-08): the weakest cell sits in the MUST stack. MUST (CAN) offline but Pytes present:
+        # substitute = lowest Pytes cell - CELL_AUX_MISSING_OFFSET_V, so PROT / LOW / their release stay on the safe side
+        est = L.AUX_SERVICE not in lo_by and L.BM_BANKS[0].service in lo_by
+        if est:
+            lo = [lo_by[L.BM_BANKS[0].service] - self.cfg.cell_aux_missing_offset_v]
+        if est != self.cell_est:
+            (loge if est else log)(
+                "MUST BMS (can0) cell values missing: weakest cell = Pytes %.3f V - %.3f V (substitute)"
+                % (lo_by[L.BM_BANKS[0].service], self.cfg.cell_aux_missing_offset_v) if est
+                else "MUST BMS (can0) cell values back: weakest cell measured again")
+            self.cell_est = est
         # user 2026-11-07: parallel, the two BMS voltages differ only by the cable drop; more = connection broken
         up = self.get(L.BM_BANKS[0].service, "/Dc/0/Voltage") if self.get(L.BM_BANKS[0].service, "/Connected") == 1.0 else None
         um = self.get(L.AUX_SERVICE, "/Dc/0/Voltage") if self.get(L.AUX_SERVICE, "/Connected") == 1.0 else None
@@ -414,6 +428,7 @@ class Batmonitor:
             "rule": {L.BM_PH[p]: o.why[p][:48] for p in range(L.NPH)},
             "bms_master": self.master,                                           # 0.77-py
             "bms_volt_diff_v": round(self.volt_diff, 3) if self.volt_diff is not None else None,
+            "cell_est": int(self.cell_est),
             "split": {"all": st.split_all, "single": L.BM_PH[st.rot],             # 0.77-py: one MultiPlus or all
                       "next_s": max(0, c_round(self.cfg.rotate_s - (il.now - st.rot_since))) if st.rot_since > 0 else None},
             "surplus_w": c_round(o.surplus),
