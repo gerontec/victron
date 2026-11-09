@@ -76,8 +76,10 @@ function v($value, string $unit, string $desc, string $src): array {
 function num($x) { return $x === null ? null : $x + 0; }
 function kw($x) { return $x === null ? null : round($x / 1000, 2); }
 // role of one MultiPlus in the load split: the split tag in its batmonitor rule (alloc() in bm_logic.py)
-function role(?string $rule): ?string {
+// charge (user 2026-11-09): in a charging mode and really taking power at AC-in, so a unit waiting in that mode stays standby
+function role(?string $rule, $in = null, $out = null): ?string {
     if ($rule === null) return null;
+    if (preg_match('/^(CHARG|FORCE)/', $rule) && $in !== null && $out !== null && $in - $out >= 50) return 'charge';
     if (!preg_match('/(?:^| )(1PH|SPILL|STBY|EQ)(?: |$)/', $rule, $m)) return 'idle';
     return ['1PH' => '▶ carries load', 'SPILL' => 'assisting', 'STBY' => 'standby', 'EQ' => 'shared'][$m[1]];
 }
@@ -97,6 +99,34 @@ $VEBUS_STATE = [0 => 'Off', 1 => 'Low power', 2 => 'Fault', 3 => 'Bulk', 4 => 'A
     7 => 'Equalize', 8 => 'Passthru', 9 => 'Inverting', 10 => 'Power assist', 11 => 'Power supply', 244 => 'Sustain', 252 => 'External control'];
 $VEBUS_MODE = [1 => 'Charger only', 2 => 'Inverter only', 3 => 'On', 4 => 'Off'];
 
+// Battery share of the house load on AC-out1. Z1 balances the phases, and a MultiPlus carrying the load alone feeds its
+// surplus out through AC-in, where the other phases only pass it through; so what AC-in does not bring in overall comes
+// from the battery (inverter losses ignored). Per phase: the part of AC-out not drawn at AC-in, plus a proportional part
+// of the surplus for the phases drawing at AC-in; scaled down if another phase charges from AC-in.
+function house_split(array $r): array {
+    $pct = ['l1' => null, 'l2' => null, 'l3' => null];
+    $local = $draw = $outs = [];
+    $in_sum = 0.0;
+    foreach (array_keys($pct) as $p) {
+        $in = $r["ac_in_{$p}_w"]; $out = $r["ac_out_{$p}_w"];
+        if ($in === null || $out === null) return ['bat' => 0, 'out' => 0, 'pct' => $pct];
+        $out = max(0.0, (float)$out); $in = (float)$in;
+        $in_sum += $in;
+        $outs[$p] = $out;
+        $local[$p] = max(0.0, min($out, $out - $in));
+        $draw[$p] = $out - $local[$p];
+    }
+    $total = array_sum($outs);
+    $bat = max(0.0, min($total, $total - $in_sum));
+    $sl = array_sum($local); $sd = array_sum($draw);
+    foreach ($outs as $p => $out) {
+        if ($bat >= $sl) $b = $local[$p] + ($sd > 0 ? $draw[$p] * ($bat - $sl) / $sd : 0);
+        else $b = $sl > 0 ? $local[$p] * $bat / $sl : 0;
+        if ($out >= 20) $pct[$p] = (int)round(100 * $b / $out);
+    }
+    return ['bat' => $bat, 'out' => $total, 'pct' => $pct];
+}
+
 $now = date('Y-m-d H:i:s');
 $values = [];
 if ($r) {
@@ -104,16 +134,9 @@ if ($r) {
     $grid = ($r['grid_l1_w'] === null) ? null : $r['grid_l1_w'] + $r['grid_l2_w'] + $r['grid_l3_w'];
     $acin = ($r['ac_in_l1_w'] === null) ? null : $r['ac_in_l1_w'] + $r['ac_in_l2_w'] + $r['ac_in_l3_w'];
     $acout = ($r['ac_out_l1_w'] === null) ? null : $r['ac_out_l1_w'] + $r['ac_out_l2_w'] + $r['ac_out_l3_w'];
-    // house on AC-out1: per phase the part of AC-out not drawn at AC-in comes from the battery (inverter losses ignored)
-    $hbat = $hout = 0;
-    $hpct = [];
-    foreach (['l1', 'l2', 'l3'] as $p) {
-        $in = $r["ac_in_{$p}_w"]; $out = $r["ac_out_{$p}_w"];
-        if ($in === null || $out === null || $out < 20) { $hpct[$p] = null; continue; }
-        $b = max(0, min($out, $out - $in));
-        $hbat += $b; $hout += $out;
-        $hpct[$p] = (int)round(100 * $b / $out);
-    }
+    // house on AC-out1 (user 2026-11-09): the battery share is the net one over all phases, see house_split()
+    $hs = house_split($r);
+    $hbat = $hs['bat']; $hout = $hs['out']; $hpct = $hs['pct'];
     // feed-in at AC-in (user 2026-10-27): units pushing power back through the MCB, per phase below -50 W
     $exp_w = 0;
     $exp_ph = [];
@@ -149,8 +172,8 @@ if ($r) {
                           'Rotary switch on the UPS leg: 1 = AC-out1 of the MultiPlus feeds the house (AC-out total > 99 W or grid failure)', 'derived'),
         'ac_in_export_w' => v($r['ac_in_l1_w'] === null ? null : (int)round($exp_w), 'W', 'Feed-in back through the MCB: sum over phases with AC-in below -50 W of -AC-in (0 = no unit feeds in)', 'derived: pv_victron.ac_in_l1..l3_w'),
         'ac_in_export_phases' => v($r['ac_in_l1_w'] === null ? null : ($exp_ph ? implode(' ', $exp_ph) : '-'), 'text', 'Phases whose MultiPlus feeds in at AC-in (below -50 W), "-" if none', 'derived: pv_victron.ac_in_l1..l3_w'),
-        'house_bat_w' => v($hout > 0 ? (int)round($hbat) : null, 'W', 'House load on AC-out1 covered by the batteries: sum over phases of max(0, AC-out - AC-in)', 'derived'),
-        'house_grid_w' => v($hout > 0 ? (int)round($hout - $hbat) : null, 'W', 'House load on AC-out1 passed through from AC-in (grid)', 'derived'),
+        'house_bat_w' => v($hout > 0 ? (int)round($hbat) : null, 'W', 'House load on AC-out1 covered by the batteries, net over all phases: max(0, AC-out - AC-in)', 'derived'),
+        'house_grid_w' => v($hout > 0 ? (int)round($hout - $hbat) : null, 'W', 'House load on AC-out1 from the grid, net over all phases', 'derived'),
         'house_bat_pct' => v($hout > 0 ? (int)round(100 * $hbat / $hout) : null, '%', 'Battery share of the house load on AC-out1', 'derived'),
         'l1_house_bat_pct' => v($hpct['l1'], '%', 'L1: battery share of AC-out1 (null below 20 W)', 'derived'),
         'l2_house_bat_pct' => v($hpct['l2'], '%', 'L2: battery share of AC-out1 (null below 20 W)', 'derived'),
@@ -230,9 +253,9 @@ if ($r) {
         'bm_l1_rule' => v($r['bm_l1_rule'] ?? null, 'text', 'batmonitor rule L1', 'pv_victron.bm_l1_rule'),
         'bm_l2_rule' => v($r['bm_l2_rule'] ?? null, 'text', 'batmonitor rule L2', 'pv_victron.bm_l2_rule'),
         'bm_l3_rule' => v($r['bm_l3_rule'] ?? null, 'text', 'batmonitor rule L3', 'pv_victron.bm_l3_rule'),
-        'l1_role' => v(role($r['bm_l1_rule'] ?? null), 'text', 'Role of the MultiPlus on L1 in the load split: carries load (its turn alone), assisting, standby, shared (all three), idle', 'derived: pv_victron.bm_l1_rule'),
-        'l2_role' => v(role($r['bm_l2_rule'] ?? null), 'text', 'Role of the MultiPlus on L2 in the load split: carries load (its turn alone), assisting, standby, shared (all three), idle', 'derived: pv_victron.bm_l2_rule'),
-        'l3_role' => v(role($r['bm_l3_rule'] ?? null), 'text', 'Role of the MultiPlus on L3 in the load split: carries load (its turn alone), assisting, standby, shared (all three), idle', 'derived: pv_victron.bm_l3_rule'),
+        'l1_role' => v(role($r['bm_l1_rule'] ?? null, $r['ac_in_l1_w'], $r['ac_out_l1_w']), 'text', 'Role of the MultiPlus on L1 in the load split: charge (taking power in a charging mode), carries load (its turn alone), assisting, standby, shared (all three), idle', 'derived: pv_victron.bm_l1_rule'),
+        'l2_role' => v(role($r['bm_l2_rule'] ?? null, $r['ac_in_l2_w'], $r['ac_out_l2_w']), 'text', 'Role of the MultiPlus on L2 in the load split: charge (taking power in a charging mode), carries load (its turn alone), assisting, standby, shared (all three), idle', 'derived: pv_victron.bm_l2_rule'),
+        'l3_role' => v(role($r['bm_l3_rule'] ?? null, $r['ac_in_l3_w'], $r['ac_out_l3_w']), 'text', 'Role of the MultiPlus on L3 in the load split: charge (taking power in a charging mode), carries load (its turn alone), assisting, standby, shared (all three), idle', 'derived: pv_victron.bm_l3_rule'),
         'bm_balance_lead' => v($r['bm_balance_lead'] ?? null, 'text', 'Stack more than 3 % SoC ahead (it alone feeds the house, the other is charged first); null = balanced', 'pv_victron.bm_balance_lead'),
         'bm_surplus_kw' => v(kw($r['bm_surplus_w'] ?? null), 'kW', 'Surplus used for charging: Sofar PCC + Bat1 + own AC-in charging', 'pv_victron.bm_surplus_w'),
         's1_chg_avg5_kw' => v(kw($r['bm_s1_chg_avg5_w'] ?? null), 'kW', 'Stack1 DC power, 5 min average (+ = charging)', 'pv_victron.bm_s1_chg_avg5_w'),

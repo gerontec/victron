@@ -223,7 +223,7 @@ for i, (ph, key) in enumerate((('L1', 'l1_ac_out_w'), ('L2', 'l2_ac_out_w'), ('L
     text(1126, 126 + i * 20, f'AC-out1 {ph}', 13, fill=MUTED)
     value(1300, 126 + i * 20, key, 'W', 0, 14, anchor='end')
     value(1420, 126 + i * 20, f'{ph.lower()}_house_bat_pct', '%', 0, 14, anchor='end', fill=ORANGE)
-# battery share of the house load (user 2026-10-27): per phase max(0, AC-out - AC-in), rest = grid via AC-in
+# battery share of the house load (user 2026-11-09): net over all phases, see house_split() in victron_api.php
 text(1420, 104, 'from battery', 11, 'normal', 'end', ORANGE)
 text(1126, 184, 'total', 11, fill=MUTED)
 value(1300, 184, 'ac_out_kw', 'kW', 2, 12, 'normal', anchor='end')
