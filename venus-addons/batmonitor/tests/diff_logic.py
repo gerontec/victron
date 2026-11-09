@@ -47,10 +47,13 @@ def main():
             ia = make_in(A, random.Random(seed), now, t0 + int(now), sp)
             ib = make_in(B, random.Random(seed), now, t0 + int(now), sp)
             oa, ob = A.bm_step(ca, ia, sa), B.bm_step(cb, ib, sb)
+            # the state fields both versions have (0.80-py: a new latch is no difference by itself)
+            da, db = dataclasses.asdict(sa), dataclasses.asdict(sb)
+            common = sorted(set(da) & set(db))
             got_a = (oa.sp, oa.why, oa.do4_pulse, oa.ff_done, oa.split_all, oa.rot, oa.d1_id, oa.surplus,
-                     dataclasses.asdict(sa))
+                     [da[f] for f in common])
             got_b = (ob.sp, ob.why, ob.do4_pulse, ob.ff_done, ob.split_all, ob.rot, ob.d1_id, ob.surplus,
-                     dataclasses.asdict(sb))
+                     [db[f] for f in common])
             if repr(got_a) != repr(got_b):
                 diffs += 1
                 if diffs <= 5:

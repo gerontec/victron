@@ -202,11 +202,15 @@ BM_PARAMS = [
     Param("ACOUT_FEED_S", "acout_feed_s", 10, 0, 120, "s", "... for this long"),
     Param("CHARGER_DC_W", "charger_dc_w", 3600, 500, 5000, "W", "full_at forecast: DC at the BMS per MultiPlus at its limit"),
     Param("WP_WINTER_W", "wp_winter_w", 1000, 0, 12000, "W", "winter half-year (October..March), heat pump running: the stacks discharge nothing while the Sofar Bat1 discharges, else at most this (heat pump off: PCC near 0)"),
+    Param("WP_PEAK_ON_W", "wp_peak_on_w", 5000, 0, 30000, "W", "0.80-py (user 2026-11-08): heat pump running and the grid import without the own discharge above this: the stacks hold the import at this (PCC = -this), in any season (30000 = off)"),
+    Param("WP_PEAK_OFF_W", "wp_peak_off_w", 4500, 0, 30000, "W", "0.80-py: ... until that import falls below this (hysteresis) or the heat pump stops"),
+    Param("WP_PEAK_W", "wp_peak_w", 1000, 0, 12000, "W", "0.80-py: at most this discharge for the heat pump peak rule (user: only 1000 W)"),
     Param("FORCE_FULL_HOLD_MIN", "force_full_hold_min", 60, 0, 1440, "min", "force_full_from_pv: the command ends once its stack held 100 % SoC this long (BMS cell balancing)"),
     Param("FORCE_FULL_MAX_MIN", "force_full_max_min", 240, 0, 1440, "min", "force_full_from_pv: the command ends at the latest this long after it came, also below 100 % SoC (0 = off)"),
     Param("FORCE_FULL_SPREAD_MV", "force_full_spread_mv", 30, 0, 500, "mV", "force_full_from_pv: the command ends once the cell spread of its stack stayed at or below this for 60 s with the highest cell at FORCE_FULL_TOP_V (0 = off)"),
     Param("FORCE_FULL_TOP_V", "force_full_top_v", 3.45, 3.0, 3.7, "V", "... the highest cell at least this: the spread counts only at the top of the charge, not at rest"),
-    Param("HOUSE_ACOUT", "house_acout", 2, 0, 2, "", "house on AC-out1 (0.69-c): winter Z2 near 0 (discharge = AC-out1 load), summer Z1 near 0 (PCC, at least the AC-out1 load); 0 = never (0.68-c matrix, house on the grid), 1 = always, 2 = auto (AC-out total > 99 W, off after 60 s < 30 W)"),
+    Param("HOUSE_ACOUT", "house_acout", 2, 0, 2, "", "house on AC-out1 (0.69-c): winter Z2 near 0 (discharge = AC-out1 load), summer Z1 near 0 (PCC, at least the AC-out1 load); 0 = never (0.68-c matrix, house on the grid), 1 = always, 2 = auto (AC-out total > 200 W for 60 s, off after 120 s < 100 W)"),
+    Param("HOUSE_WP_EXTRA_W", "house_wp_extra_w", 40, 0, 2000, "W", "0.81-py (user 2026-11-09): house on AC-out1, winter, heat pump running: discharge this much above the AC-out1 load for the heat pump"),
 
     Param("SINGLE_MAX_W", "single_max_w", 600, 0, 5000, "W", "0.77-py: up to this total (charge or discharge) only one MultiPlus works, above it all three alike (0 = always all three)"),
     Param("SINGLE_HYST_W", "single_hyst_w", 100, 0, 1000, "W", "0.77-py: back to one MultiPlus only below SINGLE_MAX_W minus this"),
@@ -302,6 +306,8 @@ class State:
     ff_since: float = 0.0                       # monotonic s since the force_full command is on, 0 = off (0.67-c)
     ff_spread_since: float = 0.0                # monotonic s since its cell spread is down at the top, 0 = not
     house_on: int = 0                           # D7: the house hangs on AC-out1 (0.69-c)
+    wp_peak: int = 0                            # D1_WP_PEAK latch (0.80-py)
+    house_over_since: float = 0.0               # monotonic s since the AC-out total is above HOUSE_ON_W, 0 = not (0.81-py)
     house_under_since: float = 0.0              # monotonic s since the AC-out total is below HOUSE_OFF_W, 0 = not
     rot: int = 0                                # 0.77-py: phase of the single MultiPlus
     rot_since: float = 0.0                      # monotonic s since it is this phase, 0 = not started
@@ -356,6 +362,8 @@ class Out:
     ff_done: int = 0                            # end the force_full command (0.62-c): BM_FF_HOLD, _SPREAD, _MAX, 0 = no
     house: int = 0                              # D7 this cycle: 1 = house on AC-out1, the Z1 / Z2 rule (0.69-c)
     house_w: int = 0                            # AC-out1 load W (sum of the positive phases)
+    wp_peak: int = 0                            # 0.80-py: heat pump peak rule on, discharge WP_PEAK_W
+    import_gross: int = 0                       # 0.80-py: grid import W without the own discharge / charge
     rot: int = 0                                # 0.77-py: phase of the single MultiPlus
     split_all: int = 0                          # 1 = all three MultiPlus this cycle
 
@@ -569,6 +577,7 @@ DMN_INPUTS = {
     "house": "PCC + own charge W", "deficit": "discharge deficit W",
     "have_pcc": "PCC present", "pcc": "PCC W, + = export",
     "acout_total": "AC-out total W",
+    "import_gross": "grid import W without the own discharge / charge (0.80-py)",
 }
 _EXPR_NODES = (ast.Expression, ast.BoolOp, ast.And, ast.Or, ast.UnaryOp, ast.Not, ast.USub, ast.Compare, ast.Lt,
                ast.LtE, ast.Gt, ast.GtE, ast.BinOp, ast.Add, ast.Sub, ast.Name, ast.Load, ast.Constant)
@@ -753,6 +762,11 @@ def bm_d1(b, bat1_first):
     return o
 
 
+def bm_d1_peak(b, wp_peak):
+    """D1_WP_PEAK (0.80-py): heat pump on and grid import above WP_PEAK_ON_W -> discharge WP_PEAK_W (latch)"""
+    return keep(first_hit(TABLES["D1_WP_PEAK"], dict(b, wp_peak=wp_peak)), wp_peak)
+
+
 def bm_d1_id(b, bat1_first):
     """D1 cell as one byte (0.60-c): bit 0 night, 1 wp_on, 2 b1_above_min, 3 b1_ge_release, 4 winter, 5 b1_dis,
     6 bat1_first (the state before the cycle); bit 7 is 0 since 0.61-c (was wp_low); state.json d1_id,
@@ -795,16 +809,20 @@ def bm_d5(pcc_over, grace_over, pcc_hard, lockout_over, acout_over):
                                     "grace_over": grace_over, "pcc_hard": pcc_hard})
 
 
-HOUSE_ON_W = 99.0
-HOUSE_OFF_W = 30.0
-HOUSE_OFF_S = 60.0
+# 0.81-py (user 2026-11-09): idle AC-out reads 20..50 W with minutes up to 137 W while the rotary switch is on the grid,
+# so the old 99 W / 30 W pair never released; on after 60 s above 200 W, off after 120 s below 100 W
+HOUSE_ON_W = 200.0
+HOUSE_OFF_W = 100.0
+HOUSE_ON_S = 60.0
+HOUSE_OFF_S = 120.0
 
 
-def bm_d7(mode_off, mode_on, over_on, under_off, under_long, on):
-    """D7 house on AC-out1 (table D7). Returns (on_next, under_next)"""
-    on_next, under = first_hit(TABLES["D7"], {"mode_off": mode_off, "mode_on": mode_on, "over_on": over_on,
-                                              "under_off": under_off, "under_long": under_long, "on": on})
-    return keep(on_next, on), under
+def bm_d7(mode_off, mode_on, over_on, over_long, under_off, under_long, on):
+    """D7 house on AC-out1 (table D7). Returns (on_next, under_next, over_next)"""
+    on_next, under, over = first_hit(TABLES["D7"], {"mode_off": mode_off, "mode_on": mode_on, "over_on": over_on,
+                                                    "over_long": over_long, "under_off": under_off,
+                                                    "under_long": under_long, "on": on})
+    return keep(on_next, on), under, over
 
 
 # ---- the rule chain: one function per stage, run in this order by bm_step ------------------------------------
@@ -828,6 +846,8 @@ class Chain:
         self.charge = [0] * NPH
         self.n_dis = self.n_chg = 0
         self.house = self.house_w = 0           # D7: house on AC-out1, its load W (0.69-c)
+        self.house_extra = 0                    # 0.81-py: W given above the house load for the heat pump
+        self.wp_peak = 0                        # D1_WP_PEAK this cycle (0.80-py)
 
 
 def chain_inputs(inp, out, c):
@@ -861,10 +881,16 @@ def chain_house(cfg, inp, st, out, c):
             load += inp.ac_out[p] if inp.ac_out[p] > 0 else 0
     mode = lround(cfg.house_acout)
     under = int(st.house_under_since > 0)
+    over = int(st.house_over_since > 0)
     hb = table_bits(cfg, ("D7",), acout_total=total)
-    on, under_next = bm_d7(mode == 0, mode == 1, hb["over_on"], hb["under_off"],
-                           (inp.now - st.house_under_since if under else 0) >= HOUSE_OFF_S, st.house_on)
+    on, under_next, over_next = bm_d7(mode == 0, mode == 1, hb["over_on"],
+                                      over and inp.now - st.house_over_since >= HOUSE_ON_S, hb["under_off"],
+                                      under and inp.now - st.house_under_since >= HOUSE_OFF_S, st.house_on)
     st.house_on = on
+    if not over_next:
+        st.house_over_since = 0.0
+    elif not over:
+        st.house_over_since = inp.now
     if not under_next:
         st.house_under_since = 0.0
     elif not under:
@@ -886,6 +912,14 @@ def chain_d1(cfg, inp, st, out, c):
     out.d1_id = bm_d1_id(b, st.bat1_first)
     o = bm_d1(b, st.bat1_first)
     st.bat1_first = o["bat1_first"]
+    # 0.80-py (user 2026-11-08 "wenn wp = on und pcc kauft mehr als 5000W, dann akkus entladen, aber nur mit 1000W"):
+    # the import without the own discharge, so our 1000 W do not switch the rule off again
+    imp = watt(-(inp.pcc + c.own_charge - c.own_discharge)) if inp.have_pcc else 0
+    pb = table_bits(cfg, ("D1_WP_PEAK",), wp_fresh=c.wp_fresh, wp=inp.wp, have_pcc=inp.have_pcc, stale=c.stale,
+                    import_gross=imp)
+    st.wp_peak = bm_d1_peak(pb, st.wp_peak)
+    c.wp_peak = out.wp_peak = st.wp_peak
+    out.import_gross = imp
     c.wp_max = 0 if o["wp_cap"] == BM_WP_ZERO else int(cfg.wp_winter_w) if o["wp_cap"] == BM_WP_MAX else -1
     c.dis_max = c.wp_max if 0 <= c.wp_max < int(cfg.w_max) else int(cfg.w_max)
     out.wp_max_w = c.wp_max
@@ -1076,7 +1110,9 @@ def chain_discharge(cfg, inp, st, out, c):
         pcc_w = deficit if deficit > 0 else 0
         prop = int(not c.winter and pcc_w > c.house_w)
         exp = 0
-        w = pcc_w if prop else c.house_w
+        # 0.81-py (user 2026-11-09): the whole house load plus a small share for the running heat pump
+        extra = int(cfg.house_wp_extra_w) if c.winter and c.wp_on else 0
+        w = pcc_w if prop else c.house_w + extra
         if c.winter:
             cap = watt(c.own_discharge) - c_div(KP_PM * (house - watt(cfg.charge_reserve)), 1000)
             if cap < 0:
@@ -1086,6 +1122,7 @@ def chain_discharge(cfg, inp, st, out, c):
                 exp = 1
         if w > c.dis_max:
             w = c.dis_max
+        c.house_extra = 0 if exp or prop else extra
         st.soyo_prop_prev = 0
         rule = "%s SRC:%s" % ("PROP" if prop else "EXPCAP" if exp else "HOUSE", out.src_why)
     else:
@@ -1094,6 +1131,15 @@ def chain_discharge(cfg, inp, st, out, c):
         st.soyo_prop_prev = prop
         w = dis_amount(prop, deficit, r.idle_w, c.dis_max)
         rule = "%s SRC:%s" % ("PROP" if prop else "IDLE", out.src_why)
+    if c.wp_peak:                  # D1_WP_PEAK (0.80-py): above the heat pump cap and PROP / IDLE
+        # user 2026-11-08 "besser statt fix 1000w pcc auf 5000w regeln": give what the import is above WP_PEAK_ON_W
+        # (feed forward on the import without the own discharge, so the PCC sits at -WP_PEAK_ON_W), at most
+        # WP_PEAK_W; never less than the other rules give
+        peak = min(max(out.import_gross - int(cfg.wp_peak_on_w), 0), int(cfg.wp_peak_w), int(cfg.w_max))
+        if peak >= w:
+            w = peak
+            c.house_extra = 0
+            rule = "WPPEAK SRC:%s" % out.src_why
     dcap = int_caps(out.dis_cap)
     w = min(w, sum(dcap[p] for p in range(NPH) if c.discharge[p]))
     chain_split(cfg, st, out, w)
@@ -1102,10 +1148,14 @@ def chain_discharge(cfg, inp, st, out, c):
         if c.discharge[p]:
             out.sp[p] = -give[p]
             out.why[p] = (rule + tag[p])[:WHY_LEN - 1]
-    if c.wp_max >= 0:
+    if c.wp_max >= 0 and not c.wp_peak:
         for p in range(NPH):
             if c.discharge[p]:
                 out.why[p] = (out.why[p] + " WPMAX(%d)" % c.wp_max)[:WHY_LEN - 1]
+    if c.house_extra:
+        for p in range(NPH):
+            if c.discharge[p]:
+                out.why[p] = (out.why[p] + " WP+%d" % c.house_extra)[:WHY_LEN - 1]
 
 
 def chain_charge(cfg, st, out, c):
@@ -1378,6 +1428,7 @@ def _check_tables():
     before the first setpoint (first_hit raises KeyError on a column no caller provides)"""
     z = dict.fromkeys
     bm_d1(z(["night", "wp_on", "b1_above_min", "b1_ge_release", "winter", "b1_dis"], 0), 0)
+    bm_d1_peak(z(["wp_on", "peak_on", "peak_off"], 0), 0)
     bank = dict(d2_bank_bits(Cfg(), 0, 0.0, 0, 0.0, 0, 0.0, 0, 0.0), ff=0)
     bm_d2({"stale": 0, "block": 0, "surplus_gt_on": 0, "surplus_gt_hold": 0, "bank": [bank] * NBANK},
           [0] * NBANK, [0] * NBANK, [0] * NBANK, 0)
@@ -1385,7 +1436,7 @@ def _check_tables():
     bm_d4(z(["new_day", "enabled", "season", "fc_cap_ahead", "pcc_peak", "surplus_cap_on", "surplus_cap_hold",
              "chg_prev"], 0), 0)
     bm_d5(0, 0, 0, 0, 0)
-    bm_d7(0, 0, 0, 0, 0, 0)
+    bm_d7(0, 0, 0, 0, 0, 0, 0)
 
 
 _check_tables()

@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bm_logic as L  # noqa: E402
 import bm_parse  # noqa: E402
 
-VERSION = "0.79-py"
+VERSION = "0.81-py"
 INVERTER_TOPIC = "inverter/power_grid_exchange/json"
 FAST_HOLD_S = 15.0   # s: while a sofar_fast sample is this fresh, pivot2db samples on the topic are ignored (0.71)
 R290_TOPIC = "r290/heatpump/all"
@@ -451,6 +451,7 @@ class Batmonitor:
             "bat1_first": o.bat1_first,
             "chain": {"src": o.src_why},
             "wp_max_w": o.wp_max_w,
+            "wp_peak": {"on": bool(o.wp_peak), "import_w": o.import_gross},  # 0.80-py: D1_WP_PEAK
             "d1_id": o.d1_id,
             "house": {"on": bool(o.house), "w": o.house_w},                      # 0.69-c: D7 house on AC-out1
             "force_full_from_pv": {                 # 0.62-c: stack None = off; held_min at 100 % SoC

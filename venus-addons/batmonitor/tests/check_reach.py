@@ -207,9 +207,10 @@ mode = L.lround(cfg.house_acout)
 TD = np.zeros((2, 2), dtype=bool)
 for on in (0, 1):
     for total in reps(TH["acout_total"], -5000.0, 15000.0):
-        for under_long in (0, 1):
+        for under_long, over_long in itertools.product((0, 1), repeat=2):
             hb = L.table_bits(cfg, ("D7",), acout_total=total)
-            nxt, _ = L.bm_d7(mode == 0, mode == 1, hb["over_on"], hb["under_off"], under_long and hb["under_off"], on)
+            nxt, _, _ = L.bm_d7(mode == 0, mode == 1, hb["over_on"], over_long and hb["over_on"], hb["under_off"],
+                                under_long and hb["under_off"], on)
             TD[on, nxt] = True
 RD = closure(TD)
 nD = int(RD[0].sum())
