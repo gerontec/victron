@@ -264,6 +264,7 @@ for p, dev, ph, note, bat in MP:
     x = CX[p] - 160
     box(x, 275, 320, 165, '#16263a', 12, f'{p}_ac_in_w', flow_ranges('color', '#3a2a10', '#16263a', '#0f2a1c', 50))
     text(x + 18, 302, f'{dev} · {ph}', 15, 'bold')
+    value(x + 302, 302, f'{p}_role', '', None, 14, anchor='end')   # whose turn it is (from the batmonitor rule)
     text(x + 18, 322, f'MultiPlus-II 48/5000 · {note}', 11, fill=MUTED)
     text(x + 18, 352, 'AC-in', 13, fill=MUTED)
     value(x + 165, 352, f'{p}_ac_in_w', 'W', 0, 22, anchor='end')
@@ -320,7 +321,7 @@ value(300, 512, 'bank_kw', 'kW', 2, 13, anchor='end')
 text(40, 532, 'ΔU Pytes − MUST', 12, fill=MUTED)
 value(300, 532, 'bat_dv', 'V', 2, 13, anchor='end')
 text(40, 550, '(cable drop only, batmonitor warns > 0.5 V)', 10, fill=MUTED)
-text(40, 572, 'batmonitor 0.77: < 600 W one MultiPlus,', 11, fill=MUTED)
+text(40, 572, 'batmonitor: < 900 W one MultiPlus,', 11, fill=MUTED)
 text(40, 588, 'next unit every 600 s; above all three', 11, fill=MUTED)
 
 # ---- Stack1: MUST, CAN BMS ---------------------------------------------------------------------

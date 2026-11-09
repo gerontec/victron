@@ -75,6 +75,12 @@ function v($value, string $unit, string $desc, string $src): array {
 }
 function num($x) { return $x === null ? null : $x + 0; }
 function kw($x) { return $x === null ? null : round($x / 1000, 2); }
+// role of one MultiPlus in the load split: the split tag in its batmonitor rule (alloc() in bm_logic.py)
+function role(?string $rule): ?string {
+    if ($rule === null) return null;
+    if (!preg_match('/(?:^| )(1PH|SPILL|STBY|EQ)(?: |$)/', $rule, $m)) return 'idle';
+    return ['1PH' => '▶ carries load', 'SPILL' => 'assisting', 'STBY' => 'standby', 'EQ' => 'shared'][$m[1]];
+}
 // full / empty forecast for one stack: full_at from batmonitor, empty linear at the 5 min average down to the 5 % discharge stop
 function eta(?array $r, string $s, string $soc_col): ?string {
     if (!$r) return null;
@@ -224,6 +230,9 @@ if ($r) {
         'bm_l1_rule' => v($r['bm_l1_rule'] ?? null, 'text', 'batmonitor rule L1', 'pv_victron.bm_l1_rule'),
         'bm_l2_rule' => v($r['bm_l2_rule'] ?? null, 'text', 'batmonitor rule L2', 'pv_victron.bm_l2_rule'),
         'bm_l3_rule' => v($r['bm_l3_rule'] ?? null, 'text', 'batmonitor rule L3', 'pv_victron.bm_l3_rule'),
+        'l1_role' => v(role($r['bm_l1_rule'] ?? null), 'text', 'Role of the MultiPlus on L1 in the load split: carries load (its turn alone), assisting, standby, shared (all three), idle', 'derived: pv_victron.bm_l1_rule'),
+        'l2_role' => v(role($r['bm_l2_rule'] ?? null), 'text', 'Role of the MultiPlus on L2 in the load split: carries load (its turn alone), assisting, standby, shared (all three), idle', 'derived: pv_victron.bm_l2_rule'),
+        'l3_role' => v(role($r['bm_l3_rule'] ?? null), 'text', 'Role of the MultiPlus on L3 in the load split: carries load (its turn alone), assisting, standby, shared (all three), idle', 'derived: pv_victron.bm_l3_rule'),
         'bm_balance_lead' => v($r['bm_balance_lead'] ?? null, 'text', 'Stack more than 3 % SoC ahead (it alone feeds the house, the other is charged first); null = balanced', 'pv_victron.bm_balance_lead'),
         'bm_surplus_kw' => v(kw($r['bm_surplus_w'] ?? null), 'kW', 'Surplus used for charging: Sofar PCC + Bat1 + own AC-in charging', 'pv_victron.bm_surplus_w'),
         's1_chg_avg5_kw' => v(kw($r['bm_s1_chg_avg5_w'] ?? null), 'kW', 'Stack1 DC power, 5 min average (+ = charging)', 'pv_victron.bm_s1_chg_avg5_w'),
