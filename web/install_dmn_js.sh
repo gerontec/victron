@@ -1,5 +1,5 @@
 #!/bin/sh
-# install_dmn_js.sh - dmn-js (bpmn.io, MIT + watermark clause, see LICENSE) for web/bm_dmn.php into <web1>/vendor/
+# install_dmn_js.sh - dmn-js (bpmn.io, MIT + watermark clause, see LICENSE) for web/bm_editor.php into <web1>/vendor/
 # Downloads the npm tarball, checks the sha512 of the npm registry, copies dist/ (bundles + assets) and LICENSE.
 # usage (on heissa): sh install_dmn_js.sh /var/www/web1
 set -e

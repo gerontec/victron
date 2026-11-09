@@ -1,0 +1,348 @@
+openapi: 3.0.3
+info:
+  title: batmonitor editor API
+  version: 1.0.0
+  description: |
+    Parameters and decision tables of batmonitor (three MultiPlus-II, Lenggries), the API behind `bm_editor.php`.
+
+    **Reading is open. Writing works only from the VPN (10.8.0.0/24), on the instance on the Pi also from the intranet**; there is no login.
+
+    **A write controls real hardware.** It adds a new version, and the Pi takes the newest one within a minute: it
+    checks the version against its own limits (parameters) or its DMN reader and self-test (tables), puts it live and
+    restarts batmonitor. Use `dry_run=true` to run every check here without saving. The result of the Pi is in `state`
+    and `applied_note` of the version.
+servers:
+  - url: bm_api.php
+    description: this instance (heissa.de or the Pi in the intranet)
+tags:
+  - name: status
+  - name: parameters
+    description: Numeric site values, stored as the overrides of the defaults.
+  - name: decision tables
+    description: bm_decisions.dmn, standard DMN 1.3.
+paths:
+  /status:
+    get:
+      tags: [status]
+      summary: Running version, live rules and the newest versions
+      responses:
+        '200':
+          description: Overview
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Status' }
+        '503': { $ref: '#/components/responses/Error' }
+  /params:
+    get:
+      tags: [parameters]
+      summary: Newest version with every parameter, its value, default and limits
+      responses:
+        '200':
+          description: The parameters
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ParamsOverview' }
+        '404': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [parameters]
+      summary: Change single parameters (new version)
+      description: |
+        Merges into the newest version: `set` writes values, `reset` returns names to the default, all other overrides
+        stay. A value equal to the default removes the override. Overrides of parameters the running batmonitor no
+        longer has are dropped and listed in `dropped_obsolete`. Without a difference nothing is saved (`changed: false`).
+      parameters:
+        - $ref: '#/components/parameters/DryRun'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ParamsChange' }
+            example:
+              set: { SINGLE_MAX_W: 900 }
+              note: what was changed and why
+      responses:
+        '200':
+          description: Nothing saved (no change or dry run)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ParamsResult' }
+        '201':
+          description: New version saved
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ParamsResult' }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '415': { $ref: '#/components/responses/Error' }
+  /params/schema:
+    get:
+      tags: [parameters]
+      summary: Definitions published by the Pi from the deployed batmonitor
+      responses:
+        '200':
+          description: The newest schema row; `def` holds params, src_rule and mode_rule
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: integer }
+                  created_at: { type: string }
+                  bm_version: { type: string, example: 0.81-py }
+                  def: { type: object }
+        '503': { $ref: '#/components/responses/Error' }
+  /params/versions:
+    get:
+      tags: [parameters]
+      summary: Version history, newest first
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: The versions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  versions:
+                    type: array
+                    items: { $ref: '#/components/schemas/ParamVersion' }
+        '400': { $ref: '#/components/responses/Error' }
+  /params/versions/{id}:
+    get:
+      tags: [parameters]
+      summary: One version
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: The version
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ParamVersion' }
+        '404': { $ref: '#/components/responses/Error' }
+  /dmn:
+    get:
+      tags: [decision tables]
+      summary: Newest version including the DMN text
+      responses:
+        '200':
+          description: The version
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DmnVersionFull' }
+        '404': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [decision tables]
+      summary: Store complete decision tables (new version)
+      description: |
+        The text must be a DMN 1.3 `definitions` document of at most 2 MB. This API only checks the document form; the
+        content is checked by the Pi, which rolls back if batmonitor does not run with it.
+      parameters:
+        - $ref: '#/components/parameters/DryRun'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DmnChange' }
+      responses:
+        '200':
+          description: Nothing saved (same as the newest version, or dry run)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DmnResult' }
+        '201':
+          description: New version saved
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DmnResult' }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '415': { $ref: '#/components/responses/Error' }
+  /dmn/versions:
+    get:
+      tags: [decision tables]
+      summary: Version history without the DMN text, newest first
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: The versions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  versions:
+                    type: array
+                    items: { $ref: '#/components/schemas/DmnVersion' }
+        '400': { $ref: '#/components/responses/Error' }
+  /dmn/versions/{id}:
+    get:
+      tags: [decision tables]
+      summary: One version including the DMN text
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: The version
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DmnVersionFull' }
+        '404': { $ref: '#/components/responses/Error' }
+  /dmn/versions/{id}/xml:
+    get:
+      tags: [decision tables]
+      summary: The DMN text of one version as XML
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: DMN 1.3 document
+          content:
+            application/xml:
+              schema: { type: string }
+        '404': { $ref: '#/components/responses/Error' }
+components:
+  parameters:
+    DryRun:
+      name: dry_run
+      in: query
+      description: Run every check and return the result without saving.
+      schema: { type: boolean, default: false }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 15 }
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, minimum: 1 }
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error: { type: string }
+  schemas:
+    State:
+      type: string
+      enum: [pending, applied, rejected]
+      description: pending = no answer from the Pi yet, applied = accepted by the Pi, rejected = refused or rolled back
+    ParamVersion:
+      type: object
+      properties:
+        id: { type: integer }
+        created_at: { type: string, example: '2026-11-09 08:26:00' }
+        author: { type: string }
+        note: { type: string }
+        params:
+          type: object
+          description: Only the overrides of the defaults
+          additionalProperties: { type: number }
+        sha256: { type: string }
+        state: { $ref: '#/components/schemas/State' }
+        applied_at: { type: string, nullable: true }
+        applied_note: { type: string, nullable: true }
+    ParamValue:
+      type: object
+      properties:
+        name: { type: string, example: SINGLE_MAX_W }
+        value: { type: number, description: The override if there is one, else the default }
+        overridden: { type: boolean }
+        default: { type: number }
+        min: { type: number }
+        max: { type: number }
+        unit: { type: string }
+        help: { type: string }
+    ParamsOverview:
+      type: object
+      properties:
+        bm_version: { type: string, example: 0.81-py }
+        version: { $ref: '#/components/schemas/ParamVersion' }
+        running_version_id:
+          type: integer
+          nullable: true
+          description: Newest version the Pi accepted; differs from `version.id` while one is pending or was rejected
+        values:
+          type: array
+          items: { $ref: '#/components/schemas/ParamValue' }
+    ParamsChange:
+      type: object
+      properties:
+        set:
+          type: object
+          additionalProperties: { type: number }
+        reset:
+          type: array
+          items: { type: string }
+        note: { type: string, maxLength: 255 }
+    ParamsResult:
+      type: object
+      properties:
+        changed: { type: boolean }
+        dry_run: { type: boolean }
+        id: { type: integer, nullable: true, description: The new version, or the newest one if nothing was saved }
+        params:
+          type: object
+          additionalProperties: { type: number }
+        dropped_obsolete:
+          type: array
+          items: { type: string }
+    DmnVersion:
+      type: object
+      properties:
+        id: { type: integer }
+        created_at: { type: string }
+        source: { type: string, enum: [pi, editor] }
+        author: { type: string, nullable: true }
+        note: { type: string, nullable: true }
+        bm_version: { type: string, nullable: true }
+        sha256: { type: string }
+        state: { $ref: '#/components/schemas/State' }
+        applied_at: { type: string, nullable: true }
+        applied_note: { type: string, nullable: true }
+    DmnVersionFull:
+      allOf:
+        - $ref: '#/components/schemas/DmnVersion'
+        - type: object
+          properties:
+            dmn: { type: string, description: DMN 1.3 XML }
+    DmnChange:
+      type: object
+      required: [dmn]
+      properties:
+        dmn: { type: string, description: DMN 1.3 XML, at most 2 MB }
+        note: { type: string, maxLength: 255 }
+    DmnResult:
+      type: object
+      properties:
+        changed: { type: boolean }
+        dry_run: { type: boolean }
+        id: { type: integer, nullable: true, description: The new version, or the newest one if nothing was saved }
+        sha256: { type: string }
+    Status:
+      type: object
+      properties:
+        bm_version: { type: string, example: 0.81-py }
+        can_write: { type: boolean, description: This client is on the VPN }
+        live:
+          type: object
+          nullable: true
+          properties:
+            ts: { type: string }
+            rules:
+              type: object
+              properties:
+                L1: { type: string }
+                L2: { type: string }
+                L3: { type: string }
+        params_version: { $ref: '#/components/schemas/ParamVersion' }
+        dmn_version: { $ref: '#/components/schemas/DmnVersion' }

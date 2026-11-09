@@ -1,0 +1,24 @@
+# bm-editor.service - the batmonitor editor on the Pi (.123:8088), reachable in the intranet during an internet outage.
+# Same files as heissa web1 (web/bm_editor.php, bm_api.php, bm_swagger.php ...) in /opt/bm-editor, config.php points to
+# wagodb on the LAN (.218). BM_EDITOR_LAN=1: the intranet may write here too (bm_access.php).
+[Unit]
+Description=batmonitor editor (PHP built-in server, port 8088)
+After=network.target
+
+[Service]
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/bm-editor
+Environment=BM_EDITOR_LAN=1
+Environment=PHP_CLI_SERVER_WORKERS=3
+ExecStart=/usr/bin/php -d display_errors=0 -d log_errors=1 -S 0.0.0.0:8088 -t /opt/bm-editor
+Restart=always
+RestartSec=3
+MemoryMax=192M
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -200,7 +200,7 @@ svg { width:100%; max-width:1100px; height:auto; display:block; margin-top:12px;
 </style></head><body>
 <h1>batmonitor decision flow</h1>
 <div class="muted">drawn for batmonitor <?= FLOW_VERSION ?> · running on the Pi: <?= h($schema['bm_version'] ?? '?') ?>&nbsp;<?php if ($schema && $schema['bm_version'] !== FLOW_VERSION): ?> <span class="warn">- stages may have changed, check this picture against bm_logic.c</span><?php endif ?>
-· live <?= h($live['ts'] ?? '-') ?> (highlighted, refresh 60 s) · <a href="bm_params.php">parameters</a></div>
+· live <?= h($live['ts'] ?? '-') ?> (highlighted, refresh 60 s) · <a href="bm_editor.php">editor</a></div>
 <svg viewBox="0 0 <?= $W ?> <?= $H ?>" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="batmonitor decision flow">
 <defs><marker id="ah" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker></defs>
 <?= implode("\n", $svg) ?>
