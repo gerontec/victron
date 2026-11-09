@@ -21,6 +21,7 @@ Environment (service/run exports /data/batmonitor/env):
 import json
 import os
 import signal
+import socket
 import sys
 import threading
 import time
@@ -32,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bm_logic as L  # noqa: E402
 import bm_parse  # noqa: E402
 
-VERSION = "0.81-py"
+VERSION = "0.82-py"
 INVERTER_TOPIC = "inverter/power_grid_exchange/json"
 FAST_HOLD_S = 15.0   # s: while a sofar_fast sample is this fresh, pivot2db samples on the topic are ignored (0.71)
 R290_TOPIC = "r290/heatpump/all"
@@ -45,6 +46,8 @@ PEAK_MODEL_SECONDS = 60.0
 DO4_LAST_TOPIC = "batmonitor/do4_last"     # out, retained: {"ts", "pcc_w"} of the last DO4 pulse (r290_boost, hantech)
 FORCE_FULL_TOPIC = "batmonitor/force_full_from_pv"   # in + out, retained: "S1" / "S2" / "off" (0.62-c), see batmonitor.c
 DO4_TOPIC = "pv_relay/DO4"                 # out, not retained: "1" for DO4_PULSE_S, then "0" (FoxESS shedding)
+DO4_USB_SOCK = "/data/do4_usb/do4.sock"    # do4_usb_bridge.py on the Pi host: DO4 over USB, needs no WiFi
+DO4_USB_TIMEOUT_S = 4.0
 TZ_BERLIN = "CET-1CEST,M3.5.0,M10.5.0/3"   # Europe/Berlin without a zoneinfo file
 SETPOINT_MAX_AGE = 90.0
 LOG_SECONDS = 60.0
@@ -271,9 +274,26 @@ class Batmonitor:
         return self.mqttc.publish(topic, payload, qos, retain).rc == mqtt.MQTT_ERR_SUCCESS
 
     def do4_publish(self, v):
-        """DO4 pulse edge (D5): QoS 1, not retained, so a reconnecting relay never sees an old "1" """
+        """DO4 pulse edge (D5): QoS 1, not retained, so a reconnecting relay never sees an old "1"; also over USB"""
+        self.do4_usb(v)
         if not self.publish(DO4_TOPIC, v, 1, False):
             loge("DO4=%s publish failed" % v)
+
+    def do4_usb(self, v):
+        """in a thread: the control cycle never waits for the USB bridge"""
+        threading.Thread(target=self.do4_usb_send, args=(v,), daemon=True).start()
+
+    def do4_usb_send(self, v):
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.settimeout(DO4_USB_TIMEOUT_S)
+                s.connect(DO4_USB_SOCK)
+                s.sendall(("do4 %s\n" % v).encode())
+                reply = s.makefile("r").readline().strip()
+        except OSError as e:
+            reply = "ERR %s" % e
+        if not reply.startswith("OK"):
+            loge("DO4=%s over USB failed: %s" % (v, reply))
 
     def publish_peak_model(self, now):
         """the charge block's clear-sky peak model, retained, once a minute (for r290_boost.py)"""
