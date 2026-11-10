@@ -40,6 +40,25 @@ try {
     $errors[] = 'database: ' . $e->getMessage();
 }
 
+// batmonitor limits that run on the Pi (2026-11-10): the newest applied wagodb.bm_param_version (the Pi pull marks it),
+// so the empty forecast and the texts follow the editor; a name not in that version = the code default of bm_logic.py
+$BM_DEFAULTS = ['SOC_MIN' => 5, 'SOC_MIN_RELEASE' => 7, 'SOC_FORCE' => 3, 'SOC_FORCE_RELEASE' => 5,
+                'CELL_PROT_V' => 3.10, 'CELL_PROT_RELEASE_V' => 3.20, 'CELL_FORCE_V' => 3.0, 'CELL_FORCE_RELEASE_V' => 3.25];
+$bm = $BM_DEFAULTS;
+$bm_ver = null;
+if (isset($pdo)) {
+    try {
+        $pv = $pdo->query("SELECT id, params FROM bm_param_version WHERE applied_at IS NOT NULL
+            AND (applied_note IS NULL OR applied_note NOT LIKE 'rejected%') ORDER BY id DESC LIMIT 1")->fetch(PDO::FETCH_ASSOC);
+        if ($pv) {
+            $bm_ver = (int)$pv['id'];
+            foreach (json_decode($pv['params'], true) ?: [] as $k => $x) if (array_key_exists($k, $bm)) $bm[$k] = $x + 0;
+        }
+    } catch (Exception $e) {
+        $errors[] = 'bm_param_version: ' . $e->getMessage();
+    }
+}
+
 // sunshine forecast for tomorrow from the OWM 3 h slots in heissa wagodb.weather_data (config2.php, local time, Lenggries):
 // each slot covers timestamp +-90 min; sun hours = daylight part of the slot (date_sun_info) * (1 - cloudiness/100)
 const WX_LAT = 47.6833, WX_LON = 11.5667;
@@ -83,15 +102,20 @@ function role(?string $rule, $in = null, $out = null): ?string {
     if (!preg_match('/(?:^| )(1PH|SPILL|STBY|EQ)(?: |$)/', $rule, $m)) return 'idle';
     return ['1PH' => '▶ carries load', 'SPILL' => 'assisting', 'STBY' => 'standby', 'EQ' => 'shared'][$m[1]];
 }
-// full / empty forecast for one stack: full_at from batmonitor, empty linear at the 5 min average down to the 5 % discharge stop
-function eta(?array $r, string $s, string $soc_col): ?string {
+// full / empty forecast of the bank (0.77-py, 2026-11-07: MUST + Pytes parallel, one bank BATTERY in the s1 columns).
+// full_at from batmonitor; empty linear at the 5 min average bank DC power from the master SoC (Pytes, MUST only while
+// the Pytes is missing, like batmonitor) down to SOC_MIN, 600 Ah x 51.2 V. The ESS cut-off (49.0 V, VE.Bus) can stop
+// the discharge earlier at the bottom; a voltage cannot be forecast linearly, so it is only named in the description.
+const BANK_WH = 600 * 51.2;
+function eta(?array $r, float $soc_min): ?string {
     if (!$r) return null;
-    if (isset($r["bm_{$s}_full_at"])) return 'full ' . date('H:i', strtotime($r["bm_{$s}_full_at"]));
-    $avg = $r["bm_{$s}_chg_avg5_w"] ?? null;
-    $soc = $r[$soc_col] ?? null;
-    if ($avg === null || $soc === null || $avg > -50 || $soc <= 5) return null;
-    $sec = ($soc - 5) / 100 * 300 * 51.2 / -$avg * 3600;
-    return $sec > 86400 ? 'empty >24 h' : 'empty ' . date('H:i', time() + (int)$sec);
+    if (isset($r['bm_s1_full_at'])) return 'full ' . date('H:i', strtotime($r['bm_s1_full_at']));
+    $avg = $r['bm_s1_chg_avg5_w'] ?? null;
+    $soc = $r['soc'] ?? $r['a_soc'] ?? null;
+    if ($avg === null || $soc === null || $avg > -50 || $soc <= $soc_min) return null;
+    $sec = ($soc - $soc_min) / 100 * BANK_WH / -$avg * 3600;
+    $lim = ' (SoC ' . $soc_min . ' %)';
+    return $sec > 86400 ? 'empty >24 h' . $lim : 'empty ≈' . date('H:i', time() + (int)$sec) . $lim;
 }
 
 // VE.Bus /State (Victron dbus documentation)
@@ -262,12 +286,12 @@ if ($r) {
         's2_chg_avg5_kw' => v(kw($r['bm_s2_chg_avg5_w'] ?? null), 'kW', 'Stack2 DC power, 5 min average (+ = charging)', 'pv_victron.bm_s2_chg_avg5_w'),
         's1_full_at' => v(isset($r['bm_s1_full_at']) ? date('H:i', strtotime($r['bm_s1_full_at'])) : null, 'text', 'Stack1 forecast: 100 % SoC at this time (hh:mm) if the 5 min average charge power holds; null = not charging or full', 'pv_victron.bm_s1_full_at'),
         's2_full_at' => v(isset($r['bm_s2_full_at']) ? date('H:i', strtotime($r['bm_s2_full_at'])) : null, 'text', 'Stack2 forecast: 100 % SoC at this time (hh:mm) if the 5 min average charge power holds; null = not charging or full', 'pv_victron.bm_s2_full_at'),
-        's1_eta' => v(eta($r, 's1', 'a_soc'), 'text', 'Stack1 forecast at the 5 min average DC power: "full hh:mm" (100 % SoC, from batmonitor) or "empty hh:mm" (discharge stop 5 % SoC, linear, 300 Ah x 51.2 V; "empty >24 h" beyond a day); null = idle', 'derived: pv_victron.bm_s1_full_at, bm_s1_chg_avg5_w, a_soc'),
-        's2_eta' => v(eta($r, 's2', 'soc'), 'text', 'Stack2 forecast at the 5 min average DC power: "full hh:mm" (100 % SoC, from batmonitor) or "empty hh:mm" (discharge stop 5 % SoC, linear, 300 Ah x 51.2 V; "empty >24 h" beyond a day); null = idle', 'derived: pv_victron.bm_s2_full_at, bm_s2_chg_avg5_w, soc'),
-        's1_discharge_blocked' => v(isset($r['bm_s1_prot']) ? (bool)$r['bm_s1_prot'] : null, 'bool', 'Stack1 discharge protection (SoC < 5 % until 7 %)', 'pv_victron.bm_s1_prot'),
-        's2_discharge_blocked' => v(isset($r['bm_s2_prot']) ? (bool)$r['bm_s2_prot'] : null, 'bool', 'Stack2 discharge protection (SoC < 5 % until 7 %)', 'pv_victron.bm_s2_prot'),
-        's1_forced_charge' => v(isset($r['bm_s1_force']) ? (bool)$r['bm_s1_force'] : null, 'bool', 'Stack1 forced grid charge (SoC < 3 % until 5 %)', 'pv_victron.bm_s1_force'),
-        's2_forced_charge' => v(isset($r['bm_s2_force']) ? (bool)$r['bm_s2_force'] : null, 'bool', 'Stack2 forced grid charge (SoC < 3 % until 5 %)', 'pv_victron.bm_s2_force'),
+        's1_eta' => v(eta($r, (float)$bm['SOC_MIN']), 'text', 'Bank forecast (MUST + Pytes parallel, 600 Ah x 51.2 V) at the 5 min average bank DC power: "full hh:mm" (100 % SoC, from batmonitor) or "empty ≈hh:mm (SoC n %)" linear from the master SoC (Pytes; MUST while the Pytes is missing) down to batmonitor SOC_MIN ' . $bm['SOC_MIN'] . ' % ("empty >24 h" beyond a day); null = idle. The ESS cut-off of the MultiPlus (49.0 V) can stop the discharge earlier', 'derived: pv_victron.bm_s1_full_at, bm_s1_chg_avg5_w, soc (a_soc), bm_param_version ' . ($bm_ver ?? 'none') . ' SOC_MIN'),
+        's2_eta' => v(null, 'text', 'Since 0.77-py (2026-11-07) one bank: always null, the bank forecast is s1_eta', 'none'),
+        's1_discharge_blocked' => v(isset($r['bm_s1_prot']) ? (bool)$r['bm_s1_prot'] : null, 'bool', sprintf('Bank discharge protection PROT (SoC < %s %% until %s %%, or weakest cell < %s V until %s V below SoC 30 %%)', $bm['SOC_MIN'], $bm['SOC_MIN_RELEASE'], $bm['CELL_PROT_V'], $bm['CELL_PROT_RELEASE_V']), 'pv_victron.bm_s1_prot'),
+        's2_discharge_blocked' => v(null, 'bool', 'Since 0.77-py one bank: always null, see s1_discharge_blocked', 'none'),
+        's1_forced_charge' => v(isset($r['bm_s1_force']) ? (bool)$r['bm_s1_force'] : null, 'bool', sprintf('Bank forced grid charge (SoC < %s %% until %s %%, or weakest cell < %s V until %s V)', $bm['SOC_FORCE'], $bm['SOC_FORCE_RELEASE'], $bm['CELL_FORCE_V'], $bm['CELL_FORCE_RELEASE_V']), 'pv_victron.bm_s1_force'),
+        's2_forced_charge' => v(null, 'bool', 'Since 0.77-py one bank: always null, see s1_forced_charge', 'none'),
         // heat pump
         'wp_w' => v($wp ? round($wp['w']) : null, 'W', 'Heat pump (R290) electrical power, SDM72D, last reading of the last 3 min; null = no reading', 'sdm72d.total_active_power'),
         'wp_on' => v($wp ? ($wp['w'] >= 300 ? 1 : 0) : null, '', '1 = heat pump running (>= 300 W, the batmonitor threshold: winter heat pump rule WPMAX), 0 = off', 'derived: wp_w'),
