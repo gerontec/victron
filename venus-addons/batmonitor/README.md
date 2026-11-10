@@ -6,6 +6,8 @@ computes one AC setpoint per phase and writes it to the Multis. Only the Python 
 
 **0.77-py (2026-11-07): the two 300 Ah stacks are physically parallel = one 600 Ah bank behind L1 + L2 + L3.**
 
+Field observations from the running system (what tripped, measured values): [OBSERVATIONS.md](OBSERVATIONS.md).
+
 | | |
 |---|---|
 | Bank | `BATTERY`, 600 Ah, phases L1 + L2 + L3 |
