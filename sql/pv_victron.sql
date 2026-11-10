@@ -211,3 +211,12 @@ ALTER TABLE pv_victron
   ADD COLUMN a_temp_min_id TINYINT UNSIGNED NULL COMMENT 'MUST cell number of the lowest temperature' AFTER a_cell_max_temp_c,
   ADD COLUMN a_temp_max_id TINYINT UNSIGNED NULL COMMENT 'MUST cell number of the highest temperature' AFTER a_temp_min_id,
   ALGORITHM=INSTANT;
+
+-- 2026-11-10: Victron low-battery trip (victron2db.py). batmonitor cell limits now at the Pytes values (2.94 V/cell
+-- = 47 V), so the ESS cut-off (49.0 V) trips first; in external control it gives no system_state code and no
+-- notification of its own. ess_cutoff_suspect: batmonitor asks >= 300 W discharge, bank < 100 W, lowest DC voltage
+-- <= 49.2 V.
+ALTER TABLE pv_victron
+  ADD COLUMN vebus_alarm_low_battery TINYINT UNSIGNED NULL COMMENT 'VE.Bus /Alarms/LowBattery: 0 ok, 1 warning, 2 alarm' AFTER vebus_error,
+  ADD COLUMN ess_cutoff_suspect TINYINT UNSIGNED NULL COMMENT '1 = ESS cut-off very likely holds the discharge back (batmonitor asks >= 300 W, bank < 100 W, DC <= 49.2 V), NULL = inputs missing',
+  ALGORITHM=INSTANT;

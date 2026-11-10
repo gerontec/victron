@@ -15,6 +15,9 @@ into the bm_* columns (setpoints, rules, SoC balancing lead, protection / forced
 NULL if the file is missing or older than BM_STATE_MAX_AGE.
 EBox pack counters (cycle count per Pytes pack) from the cache of ebox_mqtt.py (EBOX_STAT, `ebox stat <n>`, refreshed
 every 6 h) into ebox_p1..p3_cycles; NULL if missing or older than EBOX_STAT_MAX_AGE.
+Victron low-battery trip (2026-11-10): vebus_alarm_low_battery = VE.Bus /Alarms/LowBattery (0 ok, 1 warning, 2 alarm);
+ess_cutoff_suspect = 1 when batmonitor asks for >= ESS_CUTOFF_ASK_W discharge, the bank discharges < ESS_CUTOFF_REAL_W
+and the lowest of dc_v / bat_v / a_bat_v is <= ESS_CUTOFF_V + margin (the ESS cut-off gives no alarm of its own).
 Venus notification list (platform/0/Notifications, the last 20 alarms/warnings) into wagodb.pv_victron_notifications
 (python/create_pv_victron_notifications.py): upsert on portal + time + device + text, so each notification is stored once
 and only its active / acknowledged state follows (2026-10-20).
@@ -42,6 +45,14 @@ BM_STACKS = (('s1', 'BATTERY'), ('s2', 'STACK2_PYTES'))   # 0.77-py: one paralle
 EBOX_STAT = '/home/pi/sofar/ebox_stat.json'
 EBOX_STAT_MAX_AGE = 2 * 86400   # s
 EBOX_PACKS = 3
+# 2026-11-10 (user: batmonitor cell limits lowered to the Pytes values, 2.94 V/cell = 47 V): the ESS assistant
+# dynamic cut-off (49.0 V at all C-rates, VE.Bus config) now trips before batmonitor. In external control
+# (Hub4Mode 3) system_state stays 252 and the cut-off raises no notification, so ess_cutoff_suspect marks the
+# minute: batmonitor asks for discharge, the bank hardly discharges and the DC voltage is at the cut-off.
+ESS_CUTOFF_V = 49.0          # ess_cutoff_*_V of the VE.Bus backup (readers/rvms2db.py)
+ESS_CUTOFF_MARGIN_V = 0.2    # V: suspect up to cut-off + margin
+ESS_CUTOFF_ASK_W = 300       # W: batmonitor discharge request (sum of the phase setpoints) at least this
+ESS_CUTOFF_REAL_W = 100      # W: ... while the bank (Pytes + MUST) discharges less than this
 
 # column -> (service, path); 'vebus' takes the first instance seen; the batteries are told apart by /ProductName:
 # 'battery' = Speicher B (EBox, dbus-ebox-battery), 'battery_a' = Speicher A (CAN-bus BMS on can0)
@@ -53,6 +64,7 @@ COLUMNS = {
 	'vebus_state': ('vebus', '/State'),
 	'vebus_mode': ('vebus', '/Mode'),
 	'vebus_error': ('vebus', '/VebusError'),
+	'vebus_alarm_low_battery': ('vebus', '/Alarms/LowBattery'),   # 2026-11-10: 0 ok, 1 warning, 2 alarm
 	'active_input': ('vebus', '/Ac/ActiveIn/ActiveInput'),
 	'ac_in_limit_a': ('vebus', '/Ac/In/1/CurrentLimit'),
 	'ac_in_f_hz': ('vebus', '/Ac/ActiveIn/L1/F'),
@@ -290,6 +302,20 @@ def batmonitor_columns():
 	return cols
 
 
+def ess_cutoff_suspect(row):
+	"""1 = the ESS cut-off very likely holds the discharge back, 0 = not, None = setpoints, bank power or voltage
+	missing. Needs the bm_* columns: batmonitor setpoint < 0 = discharge, bank power < 0 = discharge."""
+	sp = [row.get(f'bm_l{ph}_sp_w') for ph in (1, 2, 3)]
+	pw = [row.get(c) for c in ('bat_w', 'a_bat_w') if row.get(c) is not None]
+	volt = [row.get(c) for c in ('dc_v', 'bat_v', 'a_bat_v') if row.get(c) is not None]
+	if None in sp or not pw or not volt:
+		return None
+	ask = -sum(sp)
+	real = -sum(pw)
+	return int(ask >= ESS_CUTOFF_ASK_W and real < ESS_CUTOFF_REAL_W
+			   and min(volt) <= ESS_CUTOFF_V + ESS_CUTOFF_MARGIN_V)
+
+
 def ebox_stat_columns():
 	"""ebox_p<n>_cycles from the ebox_mqtt.py cache, all None if it is missing or stale"""
 	cols = {f'ebox_p{n}_cycles': None for n in range(1, EBOX_PACKS + 1)}
@@ -410,6 +436,7 @@ def main():
 	filled = sum(1 for k, v in row.items() if v is not None and k not in ('ts', 'portal_id'))
 	row.update(batmonitor_columns())
 	row.update(ebox_stat_columns())
+	row['ess_cutoff_suspect'] = ess_cutoff_suspect(row)
 	if '--print' in sys.argv:
 		for k, v in row.items():
 			print(f'{k:26} {v}')
