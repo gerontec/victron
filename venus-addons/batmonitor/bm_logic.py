@@ -102,7 +102,9 @@ AUX_SERVICE = "com.victronenergy.battery.socketcan_can0"   # also the fallback m
 # fitted per string (gen_pv_strings.py, 14 clear days): Sofar PV1 west / PV2 south, FoxESS pv2 east / pv1 west
 ARRAYS = [(60, 33, 19430), (68, -12, 7690)]           # (tilt, azimuth from south, W)
 ARRAYS_EAST = [(59, -29, 22036), (67, 32, 2781)]
-KT_MONTH = [0, .331, .402, .563, .838, .909, .880, .840, .820, .760, .600, .350, .134]
+# monthly clear-day kt incl. mountain shading; Oct/Nov refit 2026-11-14 on 21 clear days (Sofar 2026 + FoxESS 2025/26,
+# least squares on 15-min means): Oct .600 -> .480 (was +8..+36 % high), Nov .350 -> .411 (was -9..-23 % low)
+KT_MONTH = [0, .331, .402, .563, .838, .909, .880, .840, .820, .760, .480, .411, .134]
 
 
 # ---- C arithmetic, so this port gives the same numbers as bm_logic.c -------------------------------------------
