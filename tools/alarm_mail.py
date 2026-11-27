@@ -2,6 +2,8 @@
 """
 alarm_mail.py - alarm mails of the Lenggries system in two categories (user 2026-10-11: one service, one mail path):
   TEMP    a temperature sensor reads above its threshold (below)
+  RULE    (2026-11-27) batmonitor state.json shows a rule code with bit 31: a rule word bm_logic.RULE_FIELDS lacks;
+          at most one mail per day, listing every new text
   RELAIS  a relay of the Victron system drops, with the cause from the data (after 2026-10-11 04:05-08:20, when the
           cluster stood still without anybody noticing):
             GRID  vebus Ac/ActiveIn/Connected 1 -> 0: the MultiPlus grid (transfer) relay opened
@@ -11,6 +13,9 @@ alarm_mail.py - alarm mails of the Lenggries system in two categories (user 2026
             DC    Devices/<n>/Diagnostics/UBatTerminal below DC_LOST_V: no battery at that unit's terminals
             NA    Devices/<n>/InterfaceProtectionLog/0/Time changes: the unit's NA-Schutz (grid code interface
                   protection) tripped; the GRID trips of 2026-10-13/18 on L2/L3 were these (user 2026-10-20)
+                  Only when the new Time is more than IP_NEW_S newer, ErrorFlags != 0 and the vebus service has been
+                  back for more than IP_GRACE_S: mk2-dbus re-reads the log after a restart (nightly mk2vsc backup
+                  03:30, nightly-config.sh) and Time comes back shifted by a few seconds (false alarms 2026-10-31/11-01)
           Codes in plain text (state, mode, VE.Bus error, active input, NA-Schutz flags) from the dim_vebus_* tables
           in wagodb (python/dim_vebus.py), read at start; built-in texts if the DB is not reachable.
           EVENT_WAIT_S after the event the values are checked against the cause rules (cause()); the mail carries the
@@ -167,6 +172,8 @@ VEBUS_ERROR = {
 PHASE = {0: "L1", 1: "L2", 2: "L3"}     # VE.Bus device index -> phase (unit 0 = L1, VE.Bus master)
 IP_ENTRIES = 5                          # InterfaceProtectionLog/0..4 per unit, 0 = newest
 IP_WINDOW_S = 300                       # s: NA-Schutz entries this close to the event count as its cause
+IP_NEW_S = 120                          # s: a new NA-Schutz entry's Time must be this much newer than the old one
+IP_GRACE_S = 60                         # s: no NA alarm this long after the vebus service came back (mk2-dbus restart)
 DB_CNF = os.path.expanduser("~/.victron2db.cnf")
 # plain texts of the codes: dim_vebus_* tables in wagodb (dim_vebus.py), loaded at start; built-in fallback
 DIM_TABLES = {"error": "dim_vebus_error", "ip_flag": "dim_vebus_ip_flag", "state": "dim_vebus_state",
@@ -271,6 +278,57 @@ def venus_logs(n=12):
                 pass
         lines.append(line[:220])
     return "\n".join(lines)
+
+
+UNPARSED_BIT = 31               # batmonitor >= 0.84-py: state.json code with this bit = a rule word RULE_FIELDS lacks
+RULE_DAY_FILE = os.path.expanduser("~/.alarm_mail_rule_day")   # date of the last RULE mail (survives a restart)
+unparsed_seen = set()           # (version, phase, rule text) seen since the start
+unparsed_pending = []           # seen but not mailed yet
+
+
+def rule_mail_day():
+    try:
+        with open(RULE_DAY_FILE) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def rule_code_check():
+    """RULE: a rule text whose code has the unknown-token bit (user 2026-11-27 "wie erfahren wir wenn neue texte
+    eingefuehrt werden" - "aber nur eine mail pro tag"): new texts are collected, at most one mail per day lists them"""
+    try:
+        with open("/data/batmonitor/state.json") as f:
+            s = json.load(f)
+    except (OSError, ValueError):
+        s = {}
+    if s and time.time() - s.get("ts", 0) <= 120:
+        for ph, code in sorted((s.get("code") or {}).items()):
+            if not isinstance(code, int) or not code >> UNPARSED_BIT & 1:
+                continue
+            key = (s.get("version"), ph, (s.get("rule") or {}).get(ph, ""))
+            if key not in unparsed_seen:
+                unparsed_seen.add(key)
+                unparsed_pending.append(key + (code, time.strftime("%Y-%m-%d %H:%M:%S")))
+                log("RULE: unknown token in %s %r (code %d), batmonitor %s" % (ph, key[2], code, key[0]))
+    today = time.strftime("%Y-%m-%d")
+    if not unparsed_pending or rule_mail_day() == today:
+        return
+    rows = "\n".join("  %s  batmonitor %s  %s  %r  code %d" % (t, ver, ph, rule, code)
+                      for ver, ph, rule, code, t in unparsed_pending)
+    if send_mail("ALARM RULE Lenggries: %d batmonitor rule text(s) with an unknown word" % len(unparsed_pending),
+                 "batmonitor writes rule texts whose bit field has bit %d set (a word bm_logic.RULE_FIELDS does not "
+                 "know):\n\n%s\n\nThe control itself is not affected; only pv_victron.bm_l*_code cannot be decoded "
+                 "for these states.\nFix: add the word to RULE_FIELDS in bm_logic.py, run tests/test_rule_code.py and "
+                 "tools/rule_code_dim.py, deploy.\nAt most one RULE mail per day; texts seen after this mail come "
+                 "with the next one. state.json shows the first 48 characters, the batmonitor log the full text.\n"
+                 % (UNPARSED_BIT, rows)):
+        del unparsed_pending[:]
+        try:
+            with open(RULE_DAY_FILE, "w") as f:
+                f.write(today + "\n")
+        except OSError as e:
+            log("RULE: %s not writable: %s" % (RULE_DAY_FILE, e))
 
 
 def batmonitor_rule():
@@ -405,9 +463,23 @@ def relay_event(kind, what, ok=False):
     threading.Timer(EVENT_WAIT_S, relay_report, (kind, what, t, ok)).start()
 
 
+def na_confirm(n, t_event):
+    """NA alarm only when the new newest log entry carries error flags (they may arrive after Time)"""
+    fl = v("vebus/%d/Devices/%d/InterfaceProtectionLog/0/ErrorFlags" % (VEBUS, n))
+    if not fl:
+        log("NA unit %d: new entry without ErrorFlags (%r), no alarm" % (n, fl))
+        return
+    relay_report("NA", "unit %d (%s) NA-Schutz: neuer Eintrag" % (n, PHASE.get(n, "?")), t_event)
+
+
 def relay_check(path, val):
     """edge detection on the watched paths (the first value after start only sets the state)"""
     vb = "vebus/%d/" % VEBUS
+    if path == vb + "State":                            # vebus service gone (None) / back: start of the NA grace time
+        if val is None:
+            state["vb_gone"] = True
+        elif state.get("vb_gone"):
+            state["vb_gone"], state["vb_back"] = False, time.time()
     if path == vb + "Ac/ActiveIn/Connected" and val is not None:
         prev, state["grid"] = state["grid"], val
         if prev == 1 and val == 0:
@@ -433,8 +505,13 @@ def relay_check(path, val):
     elif path.startswith(vb + "Devices/") and path.endswith("/InterfaceProtectionLog/0/Time") and val:
         n = int(path.split("/")[3])
         prev, state["ip"][n] = state["ip"].get(n), val
-        if prev is not None and val != prev:
-            relay_event("NA", "unit %d (%s) NA-Schutz: neuer Eintrag" % (n, PHASE.get(n, "?")))
+        if prev is None or val - prev <= IP_NEW_S:
+            if prev is not None and val != prev:
+                log("NA unit %d: Time %+.0f s (re-read, no new entry), no alarm" % (n, val - prev))
+        elif state.get("vb_gone") or time.time() - state.get("vb_back", 0) < IP_GRACE_S:
+            log("NA unit %d: new Time within %d s after the vebus restart, no alarm" % (n, IP_GRACE_S))
+        else:
+            threading.Timer(EVENT_WAIT_S, na_confirm, (n, time.time())).start()
     elif path.startswith(vb + "Devices/") and path.endswith("/Diagnostics/UBatTerminal") and val is not None:
         n = int(path.split("/")[3])
         low = 1 if val < DC_LOST_V else 0
@@ -552,6 +629,7 @@ def main():
     while True:
         time.sleep(VENUS_KEEPALIVE_S)
         venus.publish("R/%s/keepalive" % VENUS_PORTAL, '{"keepalive-options": ["suppress-republish"]}')
+        rule_code_check()
         if time.time() - last_summary >= 3600:          # hourly log line: how many sensors, the hottest one
             last_summary = time.time()
             with lock:

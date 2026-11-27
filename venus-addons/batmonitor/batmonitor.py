@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bm_logic as L  # noqa: E402
 import bm_parse  # noqa: E402
 
-VERSION = "0.84-py"
+VERSION = "0.85-py"
 INVERTER_TOPIC = "inverter/power_grid_exchange/json"
 FAST_HOLD_S = 15.0   # s: while a sofar_fast sample is this fresh, pivot2db samples on the topic are ignored (0.71)
 R290_TOPIC = "r290/heatpump/all"
@@ -109,6 +109,7 @@ class Batmonitor:
         self.volt_diff = None              # 0.77-py: Pytes minus MUST BMS voltage, None = one is missing
         self.volt_diff_bad = False
         self.cell_est = False                       # 0.79-py: weakest cell substituted (MUST BMS offline)
+        self.unparsed_seen = set()                  # 0.85-py: rule texts with an unknown token, logged once each
         self.bus = dbus.SystemBus()
         self.mqttc = None
 
@@ -443,6 +444,7 @@ class Batmonitor:
         forecast["kt_now"] = c_round(fc.kt_now * 1000) / 1000
         forecast["pv_model_w"] = c_round(fc.pv_now_w)
         forecast["pv_rest_kwh"] = c_round(fc.rest_kwh * 10) / 10
+        self.check_rule_code(o)
         js = {
             "ts": int(time.time()),
             "version": VERSION,
@@ -501,6 +503,15 @@ class Batmonitor:
             os.replace(tmp, self.state_file)
         except OSError:
             loge("state file: write failed")
+
+    def check_rule_code(self, o):
+        """0.85-py: a rule text with a token RULE_FIELDS does not know (code bit 31): ERROR once per text; alarm_mail
+        mails it from state.json. Means bm_logic produces a word tests/test_rule_code.py would have caught."""
+        for p in range(L.NPH):
+            if o.code[p] >> 31 and o.why[p] not in self.unparsed_seen:
+                self.unparsed_seen.add(o.why[p])
+                loge("rule code: unknown token in %s %r (code %d) - add it to RULE_FIELDS, run tests/test_rule_code.py"
+                     % (L.BM_PH[p], o.why[p], o.code[p]))
 
     def pi_shadow_log(self, pcc, bat1, pv):
         o = self.out

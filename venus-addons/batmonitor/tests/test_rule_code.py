@@ -98,5 +98,36 @@ modes = {L.rule_code_fields(c).get("mode", 0) for c in by_code}
 print("     modes seen: %s" % " ".join(sorted(L.RULE_FIELDS[0][3][m] or "-" for m in modes)))
 print("     largest code %d (%d bits)" % (max(by_code), max(by_code).bit_length()))
 
+
+# ---- 0.85-py: batmonitor logs an unknown token once per text (needs python3-dbus / paho stubs) -------------------
+try:
+    import types
+    sys.modules.setdefault("dbus", types.ModuleType("dbus"))
+    pm = types.ModuleType("paho")
+    pm.mqtt = types.ModuleType("paho.mqtt")
+    pm.mqtt.client = types.ModuleType("paho.mqtt.client")
+    sys.modules.setdefault("paho", pm)
+    sys.modules.setdefault("paho.mqtt", pm.mqtt)
+    sys.modules.setdefault("paho.mqtt.client", pm.mqtt.client)
+    import batmonitor as B  # noqa: E402
+except Exception as e:                      # noqa: BLE001
+    print("skip batmonitor.check_rule_code: %s" % e)
+    B = None
+if B is not None:
+    logs = []
+    B.loge = lambda s: logs.append(s)
+    bm = B.Batmonitor.__new__(B.Batmonitor)
+    bm.unparsed_seen = set()
+    o = L.Out()
+    o.why = ["PROT(2.3%)", "PROP SRC:DAY EQ NEWWORD", "PROP SRC:DAY EQ NEWWORD"]
+    o.code = [L.rule_code(w) for w in o.why]
+    bm.check_rule_code(o)
+    bm.check_rule_code(o)
+    check(len(logs) == 1 and "NEWWORD" in logs[0] and "L2" in logs[0], "batmonitor: one ERROR line per unknown text")
+    o.why[0] = "PROT(2.3%) OTHER"
+    o.code = [L.rule_code(w) for w in o.why]
+    bm.check_rule_code(o)
+    check(len(logs) == 2 and "OTHER" in logs[1], "batmonitor: a second unknown text gets its own line")
+
 print("%d failed" % fails)
 sys.exit(1 if fails else 0)
