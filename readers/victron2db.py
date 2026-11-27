@@ -276,7 +276,7 @@ def bm_logic_id():
 
 def batmonitor_columns():
 	"""bm_* columns from the batmonitor state file, all None if it is missing or stale"""
-	cols = {f'bm_l{ph}_{k}': None for ph in (1, 2, 3) for k in ('sp_w', 'rule')}
+	cols = {f'bm_l{ph}_{k}': None for ph in (1, 2, 3) for k in ('sp_w', 'rule', 'code')}
 	cols.update({'bm_balance_lead': None, 'bm_surplus_w': None, 'bm_d1_id': None, 'bm_logic': None})
 	cols.update({f'bm_{s}_{k}': None for s, _ in BM_STACKS for k in ('prot', 'force', 'chg_avg5_w', 'full_at')})
 	try:
@@ -289,6 +289,7 @@ def batmonitor_columns():
 	for ph in (1, 2, 3):
 		cols[f'bm_l{ph}_sp_w'] = st.get('sp', {}).get(f'L{ph}')
 		cols[f'bm_l{ph}_rule'] = st.get('rule', {}).get(f'L{ph}')
+		cols[f'bm_l{ph}_code'] = st.get('code', {}).get(f'L{ph}')      # batmonitor >= 0.84-py: rule bit field
 	cols['bm_balance_lead'] = st.get('balance_lead')
 	cols['bm_surplus_w'] = st.get('surplus_w')
 	cols['bm_d1_id'] = st.get('d1_id')                          # batmonitor >= 0.60-c: D1 cell as a bit mask

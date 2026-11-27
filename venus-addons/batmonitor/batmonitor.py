@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bm_logic as L  # noqa: E402
 import bm_parse  # noqa: E402
 
-VERSION = "0.83-py"
+VERSION = "0.84-py"
 INVERTER_TOPIC = "inverter/power_grid_exchange/json"
 FAST_HOLD_S = 15.0   # s: while a sofar_fast sample is this fresh, pivot2db samples on the topic are ignored (0.71)
 R290_TOPIC = "r290/heatpump/all"
@@ -448,6 +448,7 @@ class Batmonitor:
             "version": VERSION,
             "sp": {L.BM_PH[p]: o.sp[p] for p in range(L.NPH)},
             "rule": {L.BM_PH[p]: o.why[p][:48] for p in range(L.NPH)},
+            "code": {L.BM_PH[p]: o.code[p] for p in range(L.NPH)},             # 0.84-py: rule as bit field
             "bms_master": self.master,                                           # 0.77-py
             "bms_volt_diff_v": round(self.volt_diff, 3) if self.volt_diff is not None else None,
             "cell_est": int(self.cell_est),

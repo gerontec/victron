@@ -126,13 +126,33 @@ near 0, at least the AC-out1 load), and source row, night floor and heat pump ca
 Each phase gets one text, built stage by stage, in `state.json` and the log:
 
 ```
-<mode or PROP/IDLE/HOUSE> [SRC:<source>] [EQ|BAL|SPILL|WAIT|FF] [CAP] [TOP] [WPMAX(W)] [LOW] [CCL|DCL|CELL]
+<mode or PROP/IDLE/EXPCAP/HOUSE/WPPEAK> [SRC:<source>] [EQ|1PH|SPILL|STBY] [LOW] [FF] [CAP] [WPMAX(W)] [WP+W] [CCL|DCL]
 ```
 
-Examples: `CHARGE SRC:DAY EQ CAP` (charging, both stacks alike, summer export cap active),
-`PROP SRC:STK BAL` (night floor, the stack ahead in SoC gives first), `FORCE(2.8%) LOW`, `PROT(4.6%)`.
-`EQ` = both stacks the same share, `BAL` = lead bank first, `SPILL` / `WAIT` = the other bank takes the rest / nothing,
-`CCL` / `DCL` / `CELL` = the BMS limit or the top hold cap cut this setpoint.
+Examples: `CHARGE SRC:DAY EQ CAP` (charging, all three alike, summer export cap active), `CHARGE SRC:Z2 1PH`
+(one MultiPlus, rotating), `FORCE(2.8%) LOW`, `PROT(4.6%)`. `EQ` = all phases the same share, `1PH` = the rotating
+phase alone, `SPILL` / `STBY` = the others take the rest / nothing, `CCL` / `DCL` = the BMS limit cut this setpoint.
+
+**Rule code (0.84-py).** The same state as a bit field per phase: `state.json` `code`, `pv_victron.bm_l1..3_code`
+(INT UNSIGNED), built by `bm_logic.rule_code(why)` from the final text. Measured values in `(...)` are values, not
+states, and are not encoded (`WPMAX` keeps 0 / above 0, `WP+` only on). Layout `RULE_FIELDS`, 22 bits:
+
+| bits | field | values (0 = absent) |
+|---|---|---|
+| 0-3 | mode | BMS_MISSING FORCE STALE LADESPERRE CHARGE FULL PROT CHARGING DIS HOLD |
+| 4-6 | dis_rule | PROP IDLE EXPCAP HOUSE WPPEAK (implies DIS) |
+| 7-9 | src | SRC:DAY SRC:B1 SRC:STK SRC:WPG SRC:Z1 SRC:Z2 |
+| 10-12 | split | EQ 1PH SPILL STBY |
+| 13 / 14 / 15 | flags | LOW / FF / CAP |
+| 16-17 | limit | CCL DCL |
+| 18-19 | wpmax | WPMAX(0) WPMAX(>0) |
+| 20 / 21 | flags | WP+ / PI |
+| 31 | unparsed | a token the parser does not know (never in tests/test_rule_code.py) |
+
+`wagodb.dim_bm_rule_bit` holds the layout of the running version only (`tools/rule_code_dim.py`, run it on every
+deploy that changes `RULE_FIELDS`); decode in SQL with `((code >> bit_lo) & ((1 << bits) - 1)) = value`.
+kellertreppe `tagesaggregat.py` keeps 90 days of minute rows and counts the codes per day
+(`pv_victron_daily_cat`); the rule texts are not kept beyond that.
 
 ## Editing
 

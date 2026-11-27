@@ -220,3 +220,11 @@ ALTER TABLE pv_victron
   ADD COLUMN vebus_alarm_low_battery TINYINT UNSIGNED NULL COMMENT 'VE.Bus /Alarms/LowBattery: 0 ok, 1 warning, 2 alarm' AFTER vebus_error,
   ADD COLUMN ess_cutoff_suspect TINYINT UNSIGNED NULL COMMENT '1 = ESS cut-off very likely holds the discharge back (batmonitor asks >= 300 W, bank < 100 W, DC <= 49.2 V), NULL = inputs missing',
   ALGORITHM=INSTANT;
+
+-- 2026-11-27: batmonitor 0.84-py rule per phase as a bit field (state.json code, bm_logic.rule_code);
+-- layout in dim_bm_rule_bit (venus-addons/batmonitor/tools/rule_code_dim.py, running version only); INSTANT, no table copy
+ALTER TABLE pv_victron
+  ADD COLUMN bm_l1_code INT UNSIGNED NULL COMMENT 'batmonitor L1 rule as bit field (dim_bm_rule_bit)' AFTER bm_l3_rule,
+  ADD COLUMN bm_l2_code INT UNSIGNED NULL COMMENT 'batmonitor L2 rule as bit field (dim_bm_rule_bit)' AFTER bm_l1_code,
+  ADD COLUMN bm_l3_code INT UNSIGNED NULL COMMENT 'batmonitor L3 rule as bit field (dim_bm_rule_bit)' AFTER bm_l2_code,
+  ALGORITHM=INSTANT;

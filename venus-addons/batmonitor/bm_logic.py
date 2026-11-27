@@ -350,6 +350,7 @@ class Out:
     """bm_out: the result of one cycle"""
     sp: list = field(default_factory=lambda: [0] * NPH)          # W per phase, + = charge
     why: list = field(default_factory=lambda: [""] * NPH)        # rule text per phase
+    code: list = field(default_factory=lambda: [0] * NPH)        # 0.84-py: rule_code(why) per phase
     surplus: float = 0.0
     season: int = 0
     season_measured: int = 0
@@ -516,6 +517,106 @@ BM_SRC_NAME = ["DAY", "B1", "STK", "WPG"]
 (BM_M_BMS_MISSING, BM_M_FORCE, BM_M_STALE, BM_M_LADESPERRE, BM_M_CHARGE, BM_M_FULL, BM_M_PROT, BM_M_CHARGING,
  BM_M_DIS, BM_M_HOLD) = range(10)                  # HOLD appended (0.62-c), the older indices stay
 BM_MODE_NAME = ["BMS_MISSING", "FORCE", "STALE", "LADESPERRE", "CHARGE", "FULL", "PROT", "CHARGING", "DIS", "HOLD"]
+
+
+# ---- rule code (0.84-py, user 2026-11-27): the rule text of a phase as a bit field -----------------------------
+# pv_victron.bm_l1..3_code (INT UNSIGNED): every state of the rule text as a number, so the minute rows can be
+# aggregated per day (minutes per code) and the text column dropped. Measured values in (...) - FORCE(2.3%),
+# CHARGING(1381W), LADESPERRE(13h), PI(+12) - are values, not states, and are not encoded; WPMAX keeps only
+# "0" vs. "above 0", WP+ only "on". Only the running version counts: wagodb.dim_bm_rule_bit holds this layout
+# (tools/rule_code_dim.py writes it from RULE_FIELDS on every deploy).
+# Field: (name, first bit, bits, values); value index 0 = absent. 22 bits used, bit 31 = a token the parser
+# does not know (a bug: tests/test_rule_code.py checks it never happens).
+RULE_FIELDS = (
+    ("mode", 0, 4, ("",) + tuple(BM_MODE_NAME)),
+    ("dis_rule", 4, 3, ("", "PROP", "IDLE", "EXPCAP", "HOUSE", "WPPEAK")),
+    ("src", 7, 3, ("", "SRC:DAY", "SRC:B1", "SRC:STK", "SRC:WPG", "SRC:Z1", "SRC:Z2")),
+    ("split", 10, 3, ("", "EQ", "1PH", "SPILL", "STBY")),
+    ("low", 13, 1, ("", "LOW")),
+    ("ff", 14, 1, ("", "FF")),
+    ("cap", 15, 1, ("", "CAP")),
+    ("limit", 16, 2, ("", "CCL", "DCL")),
+    ("wpmax", 18, 2, ("", "WPMAX(0)", "WPMAX(>0)")),
+    ("wp_extra", 20, 1, ("", "WP+")),
+    ("pi", 21, 1, ("", "PI")),
+    ("unparsed", 31, 1, ("", "UNPARSED")),
+)
+RULE_FIELD = {f[0]: f for f in RULE_FIELDS}
+RULE_TEXT_ORDER = ("mode", "dis_rule", "src", "split", "low", "ff", "cap", "wpmax", "wp_extra", "limit", "pi")
+_RULE_TOKEN = {}
+for _f in RULE_FIELDS:
+    for _v, _t in enumerate(_f[3]):
+        if _t and _f[0] not in ("unparsed", "wpmax", "wp_extra", "pi"):
+            _RULE_TOKEN[_t] = (_f[0], _v)
+for _t, _v in (("PROP", 1), ("IDLE", 2), ("EXPCAP", 3), ("HOUSE", 4), ("WPPEAK", 5)):
+    _RULE_TOKEN[_t] = ("dis_rule", _v)      # a discharge rule word stands for the mode DIS
+
+
+def _rule_set(fields, name, v):
+    fields[name] = v
+    return fields
+
+
+def rule_fields(why):
+    """rule text -> {field: value index}; tokens it does not know set 'unparsed'"""
+    fd = {}
+    for tok in why.split():
+        base = tok.split("(", 1)[0]
+        if tok.startswith("WPMAX(") and tok.endswith(")"):
+            try:
+                _rule_set(fd, "wpmax", 1 if float(tok[6:-1]) == 0 else 2)
+            except ValueError:
+                _rule_set(fd, "unparsed", 1)
+        elif tok.startswith("WP+") and tok[3:].isdigit():
+            _rule_set(fd, "wp_extra", 1)
+        elif base == "PI" and tok != base:
+            _rule_set(fd, "pi", 1)
+        elif base in _RULE_TOKEN and (tok == base or base in BM_MODE_NAME):
+            name, v = _RULE_TOKEN[base]
+            if name == "dis_rule":
+                _rule_set(fd, "mode", BM_MODE_NAME.index("DIS") + 1)
+            if name in fd and fd[name] != v:
+                _rule_set(fd, "unparsed", 1)          # two values for one field: not a text of this version
+            _rule_set(fd, name, v)
+        else:
+            _rule_set(fd, "unparsed", 1)
+    return fd
+
+
+def rule_code(why):
+    """rule text of a phase -> INT UNSIGNED bit field (0 = no text)"""
+    code = 0
+    for name, v in rule_fields(why).items():
+        _, lo, bits, _vals = RULE_FIELD[name]
+        code |= (v & ((1 << bits) - 1)) << lo
+    return code
+
+
+def rule_code_fields(code):
+    """bit field -> {field: value index} (only the fields that are set)"""
+    fd = {}
+    for name, lo, bits, _vals in RULE_FIELDS:
+        v = (code >> lo) & ((1 << bits) - 1)
+        if v:
+            fd[name] = v
+    return fd
+
+
+def rule_code_text(code):
+    """bit field -> the rule text without measured values (FORCE LOW, PROP SRC:DAY EQ WPMAX(>0) DCL, ...)"""
+    fd = rule_code_fields(code)
+    words = []
+    for name in RULE_TEXT_ORDER:
+        if name not in fd:
+            continue
+        if name == "mode" and "dis_rule" in fd:
+            continue                                   # the discharge rule word names the mode DIS
+        v = fd[name]
+        vals = RULE_FIELD[name][3]
+        words.append(vals[v] if v < len(vals) else "%s?%d" % (name, v))
+    if "unparsed" in fd:
+        words.append("UNPARSED")
+    return " ".join(words)
 @dataclass(frozen=True)
 class SrcRule:
     b1_signed: int      # 1: a Bat1 discharge is house load the stacks take over; 0: only its charge counts
@@ -1329,6 +1430,7 @@ def bm_step(cfg, inp, st):
     chain_pi(cfg, inp, st, out, c)
     out.surplus = c.surplus
     st.setpoints = list(out.sp)
+    out.code = [rule_code(w) for w in out.why]          # 0.84-py
     return out
 
 
