@@ -185,7 +185,7 @@ BM_PARAMS = [
     Param("FORCE_CHARGE_W", "force_charge_w", 500, 0, 4000, "W", "force charge per phase"),
     Param("DCL_FORCE_A", "dcl_force_a", 1, 0, 50, "A", "force charge (LOW) while the BMS discharge limit is below this, no discharge (0 = off)"),
     Param("CELL_FORCE_V", "cell_force_v", 3.0, 0, 3.4, "V", "force charge (LOW) while the lowest cell is below this, no discharge (0 = off)"),
-    Param("CELL_FORCE_RELEASE_V", "cell_force_release_v", 3.25, 0, 3.5, "V", "LOW ends once the lowest cell is at least this and DCL is back"),
+    Param("CELL_FORCE_RELEASE_V", "cell_force_release_v", 3.25, 0, 3.5, "V", "LOW ends once the lowest MEASURED cell (0.83-py: no MUST substitute, no SoC) is at least this and DCL is back"),
     Param("CELL_PROT_V", "cell_prot_v", 3.10, 0, 3.4, "V", "0.79-py: no discharge (PROT) while the weakest cell of both stacks is below this and the SoC is below CELL_PROT_SOC (0 = off)"),
     Param("CELL_PROT_RELEASE_V", "cell_prot_release_v", 3.20, 0, 3.5, "V", "0.79-py: PROT ends only once the weakest cell is at least this (and the SoC at least SOC_MIN_RELEASE)"),
     Param("CELL_PROT_SOC", "cell_prot_soc", 30, 0, 101, "%", "0.79-py: the critical range: the cell rule of PROT starts only below this SoC (101 = always)"),
@@ -281,6 +281,11 @@ class In:
     dcl: list = field(default_factory=lambda: [0.0] * NBANK)
     cell_ok: list = field(default_factory=lambda: [0] * NBANK)
     cell_min: list = field(default_factory=lambda: [0.0] * NBANK)  # BMS /System/MinCellVoltage V (0.52-c)
+    # 0.83-py: the lowest MEASURED cell, without the MUST-offline substitute (the LOW release uses it: the substitute
+    # Pytes - 0.07 V sits below the release on the Pytes plateau and would keep the grid charge running for hours).
+    # None = same as cell_ok / cell_min (callers that do not know the difference)
+    cell_meas_ok: list = field(default_factory=lambda: [None] * NBANK)
+    cell_meas: list = field(default_factory=lambda: [None] * NBANK)
     force_full: int = 0                         # batmonitor/force_full_from_pv (0.62-c): 0 off, 1 / 2 = on (S1 / S2, one bank since 0.77)
     cell_max_ok: list = field(default_factory=lambda: [0] * NBANK)
     cell_max: list = field(default_factory=lambda: [0.0] * NBANK)  # BMS /System/MaxCellVoltage V (0.67-c)
@@ -576,6 +581,8 @@ DMN_INPUTS = {
     "surplus": "PCC surplus W (charge point)", "soc": "bank SoC % (master BMS)", "power_ok": "bank power present",
     "power": "bank power W, + = charge", "lim_ok": "BMS sends CCL / DCL", "dcl": "BMS DCL A",
     "cell_ok": "lowest cell present", "cell_min": "lowest cell V",
+    "cell_meas_ok": "lowest measured cell present (0.83-py)",
+    "cell_meas": "lowest measured cell V, no MUST-offline substitute (0.83-py)",
     "house": "PCC + own charge W", "deficit": "discharge deficit W",
     "have_pcc": "PCC present", "pcc": "PCC W, + = export",
     "acout_total": "AC-out total W",
@@ -958,10 +965,14 @@ def chain_gates(cfg, inp, st, out):
             out.dis_cap[p] = d
 
 
-def d2_bank_bits(cfg, soc_ok, soc, power_ok, power, lim_ok, dcl, cell_ok, cell_min):
-    """the bank columns of D2 from the inputExpressions of bm_decisions.dmn (0.78-py)"""
+def d2_bank_bits(cfg, soc_ok, soc, power_ok, power, lim_ok, dcl, cell_ok, cell_min, cell_meas_ok=None, cell_meas=None):
+    """the bank columns of D2 from the inputExpressions of bm_decisions.dmn (0.78-py). cell_meas_ok / cell_meas
+    (0.83-py): the lowest measured cell without the substitute; None = cell_ok / cell_min"""
+    if cell_meas_ok is None or cell_meas is None:
+        cell_meas_ok, cell_meas = cell_ok, cell_min
     b = table_bits(cfg, ("D2_PROT", "D2_FORCE", "D2_LOW", "D2_MODE"), soc=soc, power_ok=power_ok, power=power,
-                   lim_ok=lim_ok, dcl=dcl, cell_ok=cell_ok, cell_min=cell_min)
+                   lim_ok=lim_ok, dcl=dcl, cell_ok=cell_ok, cell_min=cell_min, cell_meas_ok=cell_meas_ok,
+                   cell_meas=cell_meas)
     b["bms_ok"] = soc_ok
     return b
 
@@ -1035,7 +1046,8 @@ def chain_mode(cfg, inp, st, out, c):
         "block": c.block,
         **table_bits(cfg, ("D2_CHARGE_MODE",), surplus=c.surplus),
         "bank": [d2_bank_bits(cfg, st.soc_ok[b], st.soc[b], inp.power_ok[b], inp.power[b], inp.lim_ok[b], inp.dcl[b],
-                              inp.cell_ok[b], inp.cell_min[b]) for b in range(NBANK)],
+                              inp.cell_ok[b], inp.cell_min[b], inp.cell_meas_ok[b], inp.cell_meas[b])
+                 for b in range(NBANK)],
     }
     for b in range(NBANK):
         d["bank"][b]["ff"] = b == c.ff

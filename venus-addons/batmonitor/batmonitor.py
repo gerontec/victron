@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bm_logic as L  # noqa: E402
 import bm_parse  # noqa: E402
 
-VERSION = "0.82-py"
+VERSION = "0.83-py"
 INVERTER_TOPIC = "inverter/power_grid_exchange/json"
 FAST_HOLD_S = 15.0   # s: while a sofar_fast sample is this fresh, pivot2db samples on the topic are ignored (0.71)
 R290_TOPIC = "r290/heatpump/all"
@@ -365,6 +365,7 @@ class Batmonitor:
         # 0.79-py (user 2026-11-08): the weakest cell sits in the MUST stack. MUST (CAN) offline but Pytes present:
         # substitute = lowest Pytes cell - CELL_AUX_MISSING_OFFSET_V, so PROT / LOW / their release stay on the safe side
         est = L.AUX_SERVICE not in lo_by and L.BM_BANKS[0].service in lo_by
+        meas = list(lo)                             # 0.83-py: measured only, for the LOW release
         if est:
             lo = [lo_by[L.BM_BANKS[0].service] - self.cfg.cell_aux_missing_offset_v]
         if est != self.cell_est:
@@ -384,6 +385,7 @@ class Batmonitor:
                 ": stacks no longer parallel?" if bad else ", ok again"))
             self.volt_diff_bad = bad
         i.cell_ok[b], i.cell_min[b] = int(bool(lo)), min(lo) if lo else 0.0
+        i.cell_meas_ok[b], i.cell_meas[b] = int(bool(meas)), min(meas) if meas else 0.0
         i.cell_max_ok[b], i.cell_max[b] = int(bool(hi)), max(hi) if hi else 0.0
 
     def avg_power(self, b):
@@ -449,6 +451,10 @@ class Batmonitor:
             "bms_master": self.master,                                           # 0.77-py
             "bms_volt_diff_v": round(self.volt_diff, 3) if self.volt_diff is not None else None,
             "cell_est": int(self.cell_est),
+            "cell_min_v": {bank.name: round(il.cell_min[b], 3) if il.cell_ok[b] else None
+                           for b, bank in enumerate(L.BM_BANKS)},                   # 0.83-py: start / PROT
+            "cell_meas_v": {bank.name: round(il.cell_meas[b], 3) if il.cell_meas_ok[b] else None
+                            for b, bank in enumerate(L.BM_BANKS)},                  # 0.83-py: LOW release
             "split": {"all": st.split_all, "single": L.BM_PH[st.rot],             # 0.77-py: one MultiPlus or all
                       "next_s": max(0, c_round(self.cfg.rotate_s - (il.now - st.rot_since))) if st.rot_since > 0 else None},
             "surplus_w": c_round(o.surplus),

@@ -12,15 +12,16 @@
  */
 
 /* ---- site parameters (until 2026-11-05 in the Pi env /data/batmonitor/env) ---- */
-PARAM(CELL_FORCE_RELEASE_V, 3)
-PARAM(CELL_FORCE_V, 2.94)           /* 2026-11-10: Pytes E-Box 48100R cutout 47 V = 2.94 V/cell; Pytes BMS gives the low-bat warning */
+PARAM(CELL_FORCE_RELEASE_V, 3.2)   /* 2026-11-27 (v9): stop below the LFP plateau (~3.24 V at 500 W/phase), ~SoC 5.5 % */
+PARAM(CELL_FORCE_V, 3)              /* 2026-11-27 (v8): idle at 2.98-3.00 V the MUST BMS drops off CAN every ~10 min */
 PARAM(CELL_PROT_RELEASE_V, 3)       /* 2026-11-10: Pytes cut-in 48 V = 3.00 V/cell */
-PARAM(CELL_PROT_V, 2.94)
+PARAM(CELL_PROT_V, 2.94)           /* 2026-11-10: Pytes E-Box 48100R cutout 47 V = 2.94 V/cell */
 PARAM(CHARGE_EFF, 0.9)              /* 2026-10-09: at 0.93 the ceiling bound (MUST BMS saw only 66 A); AC->BMS 0.87-0.91 */
 PARAM(CHARGE_RESERVE, 100)          /* 0.72-c: charge 100 W below the surplus; 0.74-c winter export cap */
+PARAM(DCL_FORCE_A, 0)               /* 2026-11-13 (v7): Pytes DCL 0 A no longer force-charges */
 PARAM(SINGLE_MAX_W, 900)
-PARAM(SOC_FORCE, 5)                 /* 2026-11-07: grid force charge below 5 % ... */
-PARAM(SOC_FORCE_RELEASE, 7)         /* ... until 7 % (hysteresis 2 %) */
+PARAM(SOC_FORCE, 0)                 /* 2026-11-13 (v7): no SoC trigger, force charge only via the weakest cell */
+PARAM(SOC_FORCE_RELEASE, 7)
 PARAM(SOC_MIN, 8)
 PARAM(SOC_MIN_RELEASE, 10)
 PARAM(WP_WINTER_W, 100)

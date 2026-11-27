@@ -253,11 +253,11 @@
     </decisionTable>
   </decision>
   <decision id="D2_LOW" name="D2_LOW">
-    <description>D2: LOW force charge: DCL 0 or lowest cell &lt; CELL_FORCE_V; ends once DCL is back, the cell &gt;= CELL_FORCE_RELEASE_V and the SoC &gt;= SOC_MIN_RELEASE.</description>
+    <description>D2: LOW force charge: DCL 0 or lowest cell &lt; CELL_FORCE_V; ends once DCL is back and the lowest MEASURED cell &gt;= CELL_FORCE_RELEASE_V. 0.83-py (user 2026-11-27 "nicht soc als massstab, nur cell voltage"): the SoC no longer holds the charge (soc_ge_release column "-"), the release uses cell_meas (MUST offline: the Pytes cell without the -0.07 V substitute, which would sit below the release on the plateau).</description>
     <decisionTable id="D2_LOW_table" hitPolicy="FIRST">
       <input id="D2_LOW_in0" label="bms_ok"><inputExpression id="D2_LOW_ex0" typeRef="boolean"><text>bms_ok</text></inputExpression></input>
       <input id="D2_LOW_in1" label="low_on"><inputExpression id="D2_LOW_ex1" typeRef="boolean"><text>(lim_ok and dcl &lt; DCL_FORCE_A) or (cell_ok and cell_min &lt; CELL_FORCE_V)</text></inputExpression></input>
-      <input id="D2_LOW_in2" label="low_off"><inputExpression id="D2_LOW_ex2" typeRef="boolean"><text>not(lim_ok and dcl &lt; DCL_FORCE_A) and (not(cell_ok) or cell_min &gt;= CELL_FORCE_RELEASE_V)</text></inputExpression></input>
+      <input id="D2_LOW_in2" label="low_off"><inputExpression id="D2_LOW_ex2" typeRef="boolean"><text>not(lim_ok and dcl &lt; DCL_FORCE_A) and (not(cell_meas_ok) or cell_meas &gt;= CELL_FORCE_RELEASE_V)</text></inputExpression></input>
       <input id="D2_LOW_in3" label="soc_ge_release"><inputExpression id="D2_LOW_ex3" typeRef="boolean"><text>soc &gt;= SOC_MIN_RELEASE</text></inputExpression></input>
       <output id="D2_LOW_out0" name="low"/>
       <rule id="D2_LOW_r1">
@@ -271,7 +271,7 @@
         <inputEntry id="D2_LOW_r2_i0"><text>true</text></inputEntry>
         <inputEntry id="D2_LOW_r2_i1"><text>-</text></inputEntry>
         <inputEntry id="D2_LOW_r2_i2"><text>true</text></inputEntry>
-        <inputEntry id="D2_LOW_r2_i3"><text>true</text></inputEntry>
+        <inputEntry id="D2_LOW_r2_i3"><text>-</text></inputEntry>
         <outputEntry id="D2_LOW_r2_o0"><text>0</text></outputEntry>
       </rule>
       <rule id="D2_LOW_r3">

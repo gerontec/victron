@@ -125,11 +125,13 @@ for bms_ok in (0, 1):
     for soc in reps(TH["soc"], 0.0, 100.0):
         for cell_ok in (0, 1):
             for cell in reps(TH["cell_min"], 2.5, 3.65):
+              for meas in [None] + reps(TH.get("cell_meas", []), 2.5, 3.65):   # 0.83-py: None = cell_min
                 for lim_ok in (0, 1):
                     for dcl in reps(TH["dcl"], 0.0, 600.0):
                         for power_ok in (0, 1):
                             for pw in reps(TH["power"], -5000.0, 5000.0):
-                                b = L.d2_bank_bits(cfg, bms_ok, soc, power_ok, pw, lim_ok, dcl, cell_ok, cell)
+                                b = L.d2_bank_bits(cfg, bms_ok, soc, power_ok, pw, lim_ok, dcl, cell_ok, cell,
+                                                   None if meas is None else cell_ok, meas)
                                 bank_bits.add(tuple(sorted(b.items())))
 surplus_bits = {tuple(L.table_bits(cfg, ("D2_CHARGE_MODE",), surplus=s)[k] for k in ("surplus_gt_on", "surplus_gt_hold"))
                 for s in reps(TH["surplus"], -30000.0, 30000.0)}

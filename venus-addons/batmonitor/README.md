@@ -77,7 +77,7 @@ inputs ─► D7 house on AC-out1 ─► D1 source (S3) + winter heat pump cap �
 | Priority | Mode | Condition |
 |---|---|---|
 | 1 | `BMS_MISSING` | BMS not connected or no valid SoC |
-| 2 | `FORCE` | SoC below `SOC_FORCE` (until `SOC_FORCE_RELEASE`), or LOW: DCL < `DCL_FORCE_A` or lowest cell < `CELL_FORCE_V` (tag `LOW`) |
+| 2 | `FORCE` | SoC below `SOC_FORCE` (until `SOC_FORCE_RELEASE`), or LOW: DCL < `DCL_FORCE_A` or lowest cell < `CELL_FORCE_V` (tag `LOW`); LOW ends by the cell only (0.83-py): lowest *measured* cell >= `CELL_FORCE_RELEASE_V` - while the MUST BMS is offline the start uses the substitute (Pytes - `CELL_AUX_MISSING_OFFSET_V`), the stop the measured Pytes cell |
 | 3 | `STALE` | Sofar data older than 180 s |
 | 4 | `LADESPERRE` | charge mode, but the summer peak window (D4) says wait |
 | 5 | `CHARGE` / `FULL` | charge mode (surplus > 200 W, held down to 20 W); `FULL` at 100 % SoC unless force_full or top hold |

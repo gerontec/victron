@@ -90,11 +90,13 @@ check(all(abs(t1 - t0 - 600) <= L.CYCLE_SECONDS for (t0, _), (t1, _) in zip(seen
 st, r = run(c, 2000.0, 0.0, 120)
 o = r[-1][1]
 check(len(active(o)) == 3 and max(o.sp) - min(o.sp) <= 2 and "EQ" in o.why[0], "2000 W load: all three EQ %s" % o.sp)
-# 3. hysteresis: 2000 W -> 560 W stays all three, 450 W back to one
-st, r = run(c, 560.0, 0.0, 120, st=st, t0=120)
-check(len(active(r[-1][1])) == 3, "560 W after 2000 W: still all three %s" % r[-1][1].sp)
-st, r = run(c, 450.0, 0.0, 120, st=st, t0=240)
-check(len(active(r[-1][1])) == 1, "450 W: back to one %s" % r[-1][1].sp)
+# 3. hysteresis: 2000 W -> inside the band stays all three, below it back to one (600 W site: 560 / 450 W)
+w_in = c.single_max_w - c.single_hyst_w + 60.0
+w_lo = c.single_max_w - c.single_hyst_w - 50.0
+st, r = run(c, w_in, 0.0, 120, st=st, t0=120)
+check(len(active(r[-1][1])) == 3, "%.0f W after 2000 W: still all three %s" % (w_in, r[-1][1].sp))
+st, r = run(c, w_lo, 0.0, 120, st=st, t0=240)
+check(len(active(r[-1][1])) == 1, "%.0f W: back to one %s" % (w_lo, r[-1][1].sp))
 # 4. charge 400 W surplus: one MultiPlus; 3000 W: all three
 st, r = run(c, 300.0, 700.0, 180)
 o = r[-1][1]
